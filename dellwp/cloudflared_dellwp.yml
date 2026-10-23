@@ -1,0 +1,26 @@
+---
+# dellwp/cloudflared_dellwp.yml
+# The connector for the WordPress Cloudflare Tunnel (wordpress-dell): it carries every name under the domain that has no explicit record to the nginx base on
+# 127.0.0.1 (dellwp/nginx_base_dellwp.yml). The tasks and the reasons for them are in tasks/cloudflared_common.yml; the tunnel, its wildcard ingress and the
+# wildcard record are declared in terraform/cloudflare/main.tf. The token (terraform output -raw wp_tunnel_token) is in the vault
+# (host_vars/dellwp/vault_wp.yml) as dellwp_cloudflared_tunnel_token. Run the nginx base first.
+# Upgrade cloudflared on purpose with  -e cloudflared_apt_state=latest.
+
+- name: Run the Cloudflare Tunnel connector on dellwp
+  hosts: dellwp
+  become: true
+
+  vars:
+    cloudflared_apt_state: present
+    cloudflared_unit_description: "Cloudflare Tunnel connector (WordPress sites)"
+    cloudflared_tunnel_token: "{{ dellwp_cloudflared_tunnel_token }}"
+
+  tasks:
+    - name: Apply the cloudflared common tasks (tasks/cloudflared_common.yml)
+      ansible.builtin.import_tasks: ../tasks/cloudflared_common.yml
+
+  handlers:
+    - name: Restart cloudflared
+      ansible.builtin.systemd:
+        name: cloudflared
+        state: restarted
