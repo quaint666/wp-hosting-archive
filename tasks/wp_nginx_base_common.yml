@@ -3,6 +3,8 @@
 # The nginx base for the WordPress sites on dellwp. No hosts:/become: and no handlers here: imported via import_tasks into the thin wrapper
 # (dellwp/nginx_base_dellwp.yml), which defines the "Reload nginx" handler. Vars (set by the wrapper):
 #   wp_nginx_listen_port   the loopback port every vhost and the catch-all listen on (cloudflared dials this; terraform/cloudflare wp_origin must match)
+#   wp_health_host         a host name only a local curl can send; its vhost answers 200 so the tunnel check can tell "nginx is up" from the catch-all's closed
+#                          connection (both are in host_vars/dellwp/vars.yml)
 #
 # What the one file does:
 # - The catch-all (default_server) closes the connection for any host name no site claims. The wildcard DNS record sends every name under the domain
@@ -37,6 +39,14 @@
               listen 127.0.0.1:{{ wp_nginx_listen_port }} default_server;
               server_name _;
               return 444;
+          }
+
+          server {
+              listen 127.0.0.1:{{ wp_nginx_listen_port }};
+              server_name {{ wp_health_host }};
+              access_log off;
+              default_type text/plain;
+              return 200 "ok\n";
           }
       register: wp_nginx_base
       notify: Reload nginx

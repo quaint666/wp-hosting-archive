@@ -1,15 +1,12 @@
 ---
 # dellwp/nginx_base_dellwp.yml
 # nginx on dellwp (the Proxmox Dell's WordPress VM): the package, then the base every site's vhost builds on (tasks/wp_nginx_base_common.yml). Listens on
-# 127.0.0.1 only; cloudflared (dellwp/cloudflared_dellwp.yml, not written yet) dials that port. The Cloudflare side is terraform/cloudflare/main.tf (wp_origin).
-# Run this before any site vhost.
+# 127.0.0.1 only; cloudflared (dellwp/cloudflared_dellwp.yml) dials that port. The port and the health host name are in host_vars/dellwp/vars.yml; the Cloudflare
+# side is terraform/cloudflare/main.tf (wp_origin). Run this before any site vhost.
 
 - name: Nginx base for the WordPress sites on dellwp
   hosts: dellwp
   become: true
-
-  vars:
-    wp_nginx_listen_port: 8080
 
   tasks:
     - name: Install nginx (tasks/nginx_setup_common.yml)

@@ -1,0 +1,7 @@
+---
+# host_vars/dellwp/vars.yml: values of the WordPress VM that more than one play needs (the secrets are in vault_wp.yml).
+# The loopback port the catch-all and every site's vhost listen on. terraform/cloudflare/main.tf (wp_origin) must match it: Terraform cannot read this file.
+wp_nginx_listen_port: 8080
+# A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
+# tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
+wp_health_host: wp-healthz.internal
