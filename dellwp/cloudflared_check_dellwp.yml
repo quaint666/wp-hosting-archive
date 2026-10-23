@@ -1,0 +1,16 @@
+---
+# dellwp/cloudflared_check_dellwp.yml
+# The tunnel check on dellwp (tasks/cloudflared_check_common.yml): the connector is active and ready, and nginx answers on its loopback port. The origin test
+# asks the health vhost of tasks/wp_nginx_base_common.yml by its host name, because the catch-all closes the connection for every other name.
+- name: Deploy the Cloudflare tunnel check on dellwp
+  hosts: dellwp
+  become: true
+  vars:
+    cloudflared_check_host_label: dellwp
+    cloudflared_check_metrics_addr: "{{ cloudflared_metrics_addr }}"
+    cloudflared_check_origin_label: "WordPress loopback vhost"
+    cloudflared_check_origin_url: "http://127.0.0.1:{{ wp_nginx_listen_port }}/healthz"
+    cloudflared_check_origin_host_header: "{{ wp_health_host }}"
+  tasks:
+    - name: Import shared cloudflared check tasks
+      ansible.builtin.import_tasks: ../tasks/cloudflared_check_common.yml
