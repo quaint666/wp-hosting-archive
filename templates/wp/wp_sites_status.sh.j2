@@ -13,7 +13,7 @@ set -u
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
 readonly MOUNT='{{ wp_data_mount }}'
-readonly VHOSTS="${WP_STATUS_VHOST_DIR:-/etc/nginx/conf.d}"
+readonly VHOSTS="${WP_STATUS_VHOST_DIR:-{{ wp_vhost_dir }}}"
 # name:state:quota project id:quota MB:backup project id:backup quota MB
 readonly TABLE='{{ wp_status_sites }}'
 {% raw %}

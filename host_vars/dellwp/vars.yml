@@ -21,7 +21,11 @@ wp_reserved_names: [bloomy, bloomy-staging, ntfy, ntfy-acer, hub, wg, lab, wp-he
 # What the sites may not spend: RAM for the OS, nginx, cloudflared, Alloy, node_exporter and the page cache; disk for intake and scratch (the backups have quotas of their own). The play refuses a
 # list whose limits do not fit.
 wp_vm_ram_reserve_mb: 1536
-wp_data_reserve_mb: 6144
+wp_data_reserve_mb: 9216
+# Where the play puts a site's stack unit and its nginx vhost: the play, the tombstone tasks, the status tool, the verifier and wp-site-delete all use these two, so the tool removes
+# exactly what the play wrote.
+wp_unit_dir: /etc/systemd/system
+wp_vhost_dir: /etc/nginx/conf.d
 # Functions php-fpm may not call (a site can list exceptions in php_allow_functions). The WP-CLI one-shot containers do not load this file.
 wp_php_disable_functions: [exec, passthru, shell_exec, system, proc_open, popen, pcntl_exec, pcntl_fork, pcntl_signal, pcntl_alarm, posix_kill, posix_setuid, posix_setgid, dl, symlink, link, show_source]
 # Every field a site may omit; wp_sites entries override these. name, port and quota_id are required. state: hold = nginx answers only a local curl and the
@@ -111,6 +115,14 @@ wp_backup_check_calendar: hourly
 # The restore drill (templates/wp/wp_site_restore.sh.j2) restores into a scratch copy under wp_data_mount/scratch in this project, one at a time, with a throwaway database.
 wp_scratch_quota_id: 3000001
 wp_scratch_quota_mb: 3072
+# The archive of deleted sites (templates/wp/wp_site_delete.sh.j2): wp-site-delete keeps the last backup of a site it removes for wp_archive_keep_days days, in this directory, in a quota
+# project of its own; wp-archive-purge (daily) removes archives whose time is up. Its quota counts in wp_data_reserve_mb together with scratch (3072 + 3072 + 3072 of intake). A site is
+# never archived if the archive would not fit: the tool stops before it removes anything.
+wp_archive_dir: "{{ wp_data_mount }}/archive"
+wp_archive_quota_id: 3000002
+wp_archive_quota_mb: 3072
+wp_archive_keep_days: 14
+wp_archive_purge_calendar: "*-*-* 05:15:00"
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.

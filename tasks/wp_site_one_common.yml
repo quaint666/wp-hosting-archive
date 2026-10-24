@@ -172,7 +172,7 @@
 - name: Deploy the site's systemd unit
   ansible.builtin.template:
     src: "{{ shared_template_dir }}/compose_stack.service.j2"
-    dest: /etc/systemd/system/wp-{{ wp_s.name }}.service
+    dest: "{{ wp_unit_dir }}/wp-{{ wp_s.name }}.service"
     owner: root
     group: root
     mode: "0644"
@@ -228,7 +228,7 @@
     - name: Deploy the vhost
       ansible.builtin.template:
         src: "{{ wp_template_dir }}/site_nginx.conf.j2"
-        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        dest: "{{ wp_vhost_dir }}/wp_site_{{ wp_s.name }}.conf"
         owner: root
         group: root
         mode: "0644"
@@ -244,14 +244,14 @@
     - name: Restore the previous vhost
       ansible.builtin.copy:
         src: "{{ wp_site_vhost.backup_file }}"
-        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        dest: "{{ wp_vhost_dir }}/wp_site_{{ wp_s.name }}.conf"
         mode: "0644"
         remote_src: true
       when: (wp_site_vhost | default({})).backup_file is defined
 
     - name: Remove a first-ever vhost that failed validation
       ansible.builtin.file:
-        path: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        path: "{{ wp_vhost_dir }}/wp_site_{{ wp_s.name }}.conf"
         state: absent
       when:
         - (wp_site_vhost | default({})).changed | default(false)

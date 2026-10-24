@@ -75,5 +75,6 @@
     - { name: backups, mode: "0700" }
     - { name: intake, mode: "0700" }
     - { name: scratch, mode: "0700" }
+    - { name: archive, mode: "0700" }
   loop_control:
     label: "{{ item.name }}"

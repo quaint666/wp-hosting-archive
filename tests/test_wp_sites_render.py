@@ -307,8 +307,27 @@ class Assertions(unittest.TestCase):
         for forbidden in ("/sites/", "wp_data_mount", "wp_backup_dir", "docker", "rm -", "shell:", "command:", "recurse"):
             self.assertNotIn(forbidden, text, "the tombstone tasks must not touch data: " + forbidden)
         paths = [t["ansible.builtin.file"]["path"] for t in closed if "ansible.builtin.file" in t]
-        self.assertEqual(sorted(p.rsplit("/", 1)[0] for p in paths), ["/etc/nginx/conf.d", "/etc/systemd/system"])
+        self.assertEqual(sorted(p.rsplit("/", 1)[0] for p in paths), ["{{ wp_unit_dir }}", "{{ wp_vhost_dir }}"], "the variables, so the play and wp-site-delete cannot disagree about where these are")
+        self.assertEqual((self.v["wp_unit_dir"], self.v["wp_vhost_dir"]), ("/etc/systemd/system", "/etc/nginx/conf.d"))
+        for f in ("tasks/wp_site_one_common.yml", "templates/wp/wp_sites_status.sh.j2"):
+            text = (ROOT / f).read_text()
+            self.assertNotIn("/etc/nginx/conf.d", text); self.assertNotIn("/etc/systemd/system/wp-", text)
         self.assertEqual({t.get("notify") for t in closed if "notify" in t}, {"Reload systemd", "Reload nginx"})
+
+    def test_the_archive_of_deleted_sites_has_its_own_project_inside_the_disk_reserve(self):
+        v = self.v
+        self.assertNotEqual(v["wp_archive_quota_id"], v["wp_scratch_quota_id"]); self.assertGreater(v["wp_archive_quota_id"], v["wp_sites"][0]["quota_id"] + v["wp_backup_quota_offset"])
+        self.assertGreaterEqual(v["wp_data_reserve_mb"], v["wp_scratch_quota_mb"] + v["wp_archive_quota_mb"], "the archive is part of what the sites may not spend")
+        self.assertEqual(v["wp_archive_dir"], "%s/archive" % v["wp_data_mount"]); self.assertEqual(v["wp_archive_keep_days"], 14)
+        base = {**v, "wp_archive_quota_id": v["wp_scratch_quota_id"]}
+        self.assertFalse(eval_that(assertions(), base, v["wp_sites"]), "an archive id equal to the scratch id is refused")
+        self.assertFalse(eval_that(assertions(), {**v, "wp_archive_quota_id": 1500}, v["wp_sites"]), "an archive id below a backup project id is refused")
+        self.assertTrue(eval_that(assertions(), v, v["wp_sites"]))
+        disk = [t for t in load("tasks/wp_data_disk_common.yml") if t.get("name") == "Make the top-level directories"][0]
+        self.assertIn({"name": "archive", "mode": "0700"}, disk["loop"])
+        tasks = load("tasks/wp_sites_common.yml"); names = [t.get("name", "") for t in tasks]
+        q = tasks[names.index("Put the archive of deleted sites in its quota project (tasks/wp_project_quota_common.yml)")]
+        self.assertEqual((q["vars"]["wp_pq_path"], q["vars"]["wp_pq_id"], q["vars"]["wp_pq_mb"]), ("{{ wp_archive_dir }}", "{{ wp_archive_quota_id }}", "{{ wp_archive_quota_mb }}"))
 
     def test_a_stopped_site_is_a_valid_state_and_does_not_count_against_the_vms_ram_but_does_against_its_disk(self):
         mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]

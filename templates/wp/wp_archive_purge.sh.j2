@@ -1,0 +1,36 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_archive_purge.sh.j2). Every day: remove the archives of deleted sites whose time is up.   wp-archive-purge
+# An archive is a directory {{ wp_archive_dir }}/<site>-<snapshot stamp>/ made by wp-site-delete, whose MANIFEST says `expires=YYYY-MM-DD`; it is removed once today is AFTER that date
+# ({{ wp_archive_keep_days }} days after the delete). It only ever removes a real directory (never a link) whose name has exactly that shape and whose MANIFEST has a well-formed
+# expiry; anything else in the directory is left alone and told once. It removes nothing else on the VM. WP_ARCHIVE_TODAY=YYYY-MM-DD in the environment replaces today's date, for the rehearsal.
+# One ntfy message says what was removed. Proxmox's backups of the whole VM may still hold the data for months and cannot be purged per site.
+set -u
+readonly ARCHIVE='{{ wp_archive_dir }}'
+readonly STATE_DIR='{{ wp_disk_state_dir }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST_NAME='{{ inventory_hostname }}'
+{% raw %}
+today=${WP_ARCHIVE_TODAY:-$(date -u +%Y-%m-%d)}
+[[ $today =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "wp-archive-purge: '$today' is not a date" >&2; exit 2; }
+[ -d "$ARCHIVE" ] && [ ! -L "$ARCHIVE" ] || { echo "wp-archive-purge: $ARCHIVE is not a real directory" >&2; exit 2; }
+mkdir -p "$STATE_DIR"
+removed=(); odd=()
+shopt -s nullglob dotglob
+for d in "$ARCHIVE"/*; do
+  name=${d##*/}
+  case $name in .partial-*) continue ;; esac   # a delete that is running (or died) builds here; it removes its own
+  if [ -L "$d" ] || [ ! -d "$d" ] || ! [[ $name =~ ^[a-z][a-z0-9-]*-[0-9]{8}T[0-9]{6}Z$ ]]; then odd+=("$name"); continue; fi
+  exp=$(sed -n 's/^expires=//p' "$d/MANIFEST" 2>/dev/null | head -n 1)
+  if ! [[ $exp =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then odd+=("$name"); continue; fi
+  if [[ $today > $exp ]]; then rm -rf -- "${d:?}"; removed+=("$name (expired $exp)"); echo "removed $name, expired $exp"; fi
+done
+if [ "${#removed[@]}" -gt 0 ]; then ntfy-notify "$TOPIC" "$HOST_NAME archive purge removed: ${removed[*]}"; fi
+# what is not an archive is told once, not every day
+flag=$STATE_DIR/archive-odd.flag
+if [ "${#odd[@]}" -gt 0 ]; then
+  if [ "$(cat "$flag" 2>/dev/null || true)" != "${odd[*]}" ]; then ntfy-notify "$TOPIC" "$HOST_NAME $ARCHIVE holds things that are not archives and were left alone: ${odd[*]}"; echo "${odd[*]}" > "$flag"; fi
+else
+  rm -f "$flag"
+fi
+exit 0
+{% endraw %}

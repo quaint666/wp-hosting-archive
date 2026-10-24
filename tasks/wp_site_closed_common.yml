@@ -13,12 +13,12 @@
 
 - name: Remove the closed site's stack unit
   ansible.builtin.file:
-    path: /etc/systemd/system/wp-{{ wp_s.name }}.service
+    path: "{{ wp_unit_dir }}/wp-{{ wp_s.name }}.service"
     state: absent
   notify: Reload systemd
 
 - name: Remove the closed site's nginx vhost
   ansible.builtin.file:
-    path: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+    path: "{{ wp_vhost_dir }}/wp_site_{{ wp_s.name }}.conf"
     state: absent
   notify: Reload nginx
