@@ -154,7 +154,7 @@ class Tools(unittest.TestCase):
     def test_code_mode_allows_only_wordpress_org_slugs_and_a_few_flags(self):
         allowed = [("core", "update", "--minor"), ("core", "version"), ("plugin", "install", "woocommerce", "--version=9.3.1"), ("plugin", "update", "--all"),
                    ("plugin", "update", "woocommerce", "--dry-run"), ("plugin", "delete", "foo-bar"), ("theme", "install", "twentytwentysix"), ("plugin", "list", "--format=json"),
-                   ("plugin", "verify-checksums", "--all")]
+                   ("plugin", "verify-checksums", "--all"), ("core", "check-update", "--major", "--field=version"), ("core", "check-update", "--minor", "--field=version")]
         for cmd in allowed:
             with self.subTest(("allowed",) + cmd):
                 (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
@@ -186,7 +186,8 @@ class Tools(unittest.TestCase):
                     ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--locale=de_DE"), ("core", "download", "--version=7.1.3;id", "--force", "--skip-content"),
                     ("core", "download", "--version=latest", "--force", "--skip-content"), ("core", "download", "--version=https://evil.example/w.zip", "--force", "--skip-content"),
                     ("core", "download", "--skip-content", "--force", "--version=7.1.3"), ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--path=/x"),
-                    ("plugin", "install", "x", "--skip-content"), ("plugin", "update", "x", "--force")):
+                    ("plugin", "install", "x", "--skip-content"), ("plugin", "update", "x", "--force"),
+                    ("core", "update", "--major"), ("plugin", "update", "--all", "--major"), ("core", "update", "--version=7.2", "--major")):
             with self.subTest(cmd):
                 (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
                 self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *cmd).returncode, 2, cmd)

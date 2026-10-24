@@ -23,7 +23,8 @@ site=$1; shift
 S="$SHIM"; F=$([ -e "$SITE/maintenance.flag" ] && echo up || echo down)
 echo "cli flag=$F $*" >> "$S/order"
 case " $* " in
-  *" check-update "*) if [ -f "$S/core_available" ]; then cat "$S/core_available"; else echo "Success: WordPress is at the latest version."; fi ;;
+  *" check-update "*) f=core_available; case " $* " in *" --major "*) f=core_major ;; esac
+    if [ -f "$S/$f" ]; then cat "$S/$f"; else echo "Success: WordPress is at the latest version."; fi ;;
   *" plugin list "*) [ -f "$S/list_fail" ] && exit 1; echo "name,version,update_version"; cat "$S/plugins.csv" 2>/dev/null; exit 0 ;;
   *" theme list "*) echo "name,version,update_version"; cat "$S/themes.csv" 2>/dev/null; exit 0 ;;
   *" core update --minor "*) [ -f "$S/core_update_fail" ] && exit 1; exit 0 ;;
@@ -194,6 +195,92 @@ class Update(Base):
         self.have(plugins=["akismet,5.3,5.4", "Some_Plugin,1.0,1.1"])
         self.run_update()
         self.assertIn("ext flag=up wptest plugin update akismet", "\n".join(self.order())); self.assertNotIn("Some_Plugin", "\n".join(self.steps("ext")))
+
+    # --- majors: held under auto, applied by --apply, reported for core
+    def applied(self):
+        return [l.split("plugin update ")[1] for l in self.steps("ext") if "plugin update" in l]
+
+    def test_auto_applies_minor_updates_and_holds_a_major_one_and_tells_once(self):
+        self.have(plugins=["akismet,5.3,5.4", "woo-thing,10.2,11.0"])
+        r = self.run_update()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.applied(), ["akismet"], "only the minor update goes through")
+        held = [t for t in self.told() if "holds for you" in t]
+        self.assertEqual(len(held), 1); self.assertIn("plugin:woo-thing:10.2>11.0[MAJOR]", held[0]); self.assertIn("wp-site-update wptest --apply", held[0])
+        self.assertNotIn("akismet", held[0])
+        self.run_update()
+        self.assertEqual(len([t for t in self.told() if "holds for you" in t]), 1, "the same held set is not told again")
+
+    def test_only_majors_under_auto_changes_nothing_and_does_not_even_take_the_site_offline(self):
+        self.have(plugins=["woo-thing,10.2,11.0"], themes=["twentytwentysix,1.4,2.0"])
+        r = self.run_update()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.steps("backup") + self.steps("ext") + self.steps("recover") + self.steps("systemctl"), []); self.assertFalse(self.flag.exists())
+        self.assertEqual(len(self.told()), 1); self.assertIn("theme:twentytwentysix:1.4>2.0[MAJOR]", self.told()[0])
+        self.assertEqual(self.last()["result"], "held-only")
+        self.run_update(); self.assertEqual(len(self.told()), 1)
+        self.have(plugins=["woo-thing,10.2,12.0"], themes=["twentytwentysix,1.4,2.0"])
+        self.run_update(); self.assertEqual(len(self.told()), 2, "a changed held set is told")
+
+    def test_apply_applies_majors_too_and_says_nothing_is_held(self):
+        self.have(plugins=["akismet,5.3,5.4", "woo-thing,10.2,11.0"], themes=["twentytwentysix,1.4,2.0"])
+        self.assertEqual(self.run_update("--apply").returncode, 0)
+        self.assertEqual(self.applied(), ["akismet woo-thing"]); self.assertTrue([l for l in self.steps("ext") if "theme update twentytwentysix" in l])
+        self.assertEqual([t for t in self.told() if "holds for you" in t], [])
+
+    def test_notify_and_check_list_everything_with_the_majors_marked_and_hold_nothing(self):
+        self.have(plugins=["akismet,5.3,5.4", "woo-thing,10.2,11.0"])
+        r = self.run_update("--check")
+        self.assertIn("akismet:5.3>5.4", r.stdout); self.assertIn("woo-thing:10.2>11.0[MAJOR]", r.stdout); self.assertNotIn("akismet:5.3>5.4[MAJOR]", r.stdout)
+        self.assertEqual(self.told(), [])
+        self.policy("wptest:notify")
+        self.run_update()
+        self.assertEqual(len(self.told()), 1); self.assertIn("woo-thing:10.2>11.0[MAJOR]", self.told()[0]); self.assertIn("akismet:5.3>5.4", self.told()[0])
+        self.assertEqual(self.steps("backup") + self.steps("ext"), [])
+
+    def test_what_counts_as_a_major_version(self):
+        cases = [("1.6.3", "1.7.0", False), ("1.0", "1.0.1", False), ("10.2", "10.3", False), ("09.1", "9.2", False), ("1.0-beta", "1.0", False), ("0.5", "1.7.0", True),
+                 ("5.9.9", "6.0", True), ("2024.1", "2025.1", True), ("9.9", "10.0", True), ("v2.0", "v2.1", True), ("1.0", "dev-trunk", True), ("", "1.0", True)]
+        for old, new, major in cases:
+            with self.subTest(old=old, new=new):
+                for n in ("order", "ntfy.log"):
+                    (self.tmp / "shim" / n).unlink(missing_ok=True)
+                self.have(plugins=["akismet,%s,%s" % (old, new)])
+                self.run_update()
+                if major:
+                    self.assertEqual(self.applied(), [], "a major is held"); self.assertEqual(len([t for t in self.told() if "holds for you" in t]), 1)
+                else:
+                    self.assertEqual(self.applied(), ["akismet"], "a minor goes through")
+
+    def test_a_major_core_release_is_told_once_per_release_and_never_applied(self):
+        self.put("core_major", "7.2\n")
+        r = self.run_update(); self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.told()), 1); self.assertIn("WordPress 7.2 is available for wptest", self.told()[0]); self.assertIn("never applies", self.told()[0])
+        self.assertIn("wp-site-backup wptest", self.told()[0]); self.assertIn("wp-site-cli wptest --code core update", self.told()[0])
+        self.assertEqual([l for l in self.steps("cli") if "core update" in l], [], "no core update of any kind")
+        self.assertEqual(self.steps("backup"), []); self.assertFalse(self.flag.exists())
+        self.run_update(); self.assertEqual(len(self.told()), 1, "once per release")
+        self.put("core_major", "7.3\n"); self.run_update(); self.assertEqual(len(self.told()), 2)
+        self.assertIn("7.3", self.told()[1])
+
+    def test_the_major_core_notice_comes_with_a_normal_minor_update_and_not_from_check_apply_or_freeze(self):
+        self.have(core="7.1.4", plugins=["akismet,5.3,5.4"]); self.put("core_major", "7.2\n")
+        self.assertEqual(self.run_update().returncode, 0)
+        self.assertEqual(len([t for t in self.told() if "WordPress 7.2" in t]), 1)
+        self.assertTrue(self.steps("cli flag=up --code core update --minor"), "the minor core update still runs")
+        for n in ("ntfy.log",):
+            (self.tmp / "shim" / n).unlink(missing_ok=True)
+        (self.site / ".update-core-major").unlink()
+        r = self.run_update("--check"); self.assertIn("core 7.2 is a major release", r.stdout); self.assertEqual(self.told(), [])
+        self.run_update("--apply"); self.assertEqual([t for t in self.told() if "WordPress 7.2" in t], [], "--apply is the operator's own run")
+        self.policy("wptest:freeze"); self.run_update(); self.assertEqual([t for t in self.told() if "WordPress 7.2" in t], [])
+
+    def test_the_failed_set_is_remembered_by_what_was_applied_not_by_what_was_held(self):
+        self.have(plugins=["akismet,5.3,5.4", "woo-thing,10.2,11.0"]); self.put("plugin_fail", "")
+        self.assertEqual(self.run_update().returncode, 1)
+        (self.tmp / "shim" / "order").unlink()
+        self.have(plugins=["akismet,5.3,5.4", "woo-thing,10.2,12.0"])   # only the held major changed
+        r = self.run_update(); self.assertEqual(r.returncode, 0); self.assertIn("not retrying", r.stdout); self.assertEqual(self.steps("backup"), [])
 
     # --- failures roll back
     def assert_rolled_back(self, r, why):

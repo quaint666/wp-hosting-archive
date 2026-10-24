@@ -457,8 +457,9 @@ def build_parser():
                        )
     c.add_argument("--name", help="the site name: letters, digits, single hyphens inside; 2 to 24 characters; the hostname is <name>.<domain>")
     c.add_argument("--state", choices=STATES, help="hold (only the VM itself can reach it; the default) or live (public)")
-    c.add_argument("--policy", choices=POLICIES, help="update policy: auto applies updates nightly with a snapshot first and a rollback if the site breaks (core: minor and security releases only; plugins and themes: any newer version, "
-                                                         "majors included); notify only tells you, once per set (the default); freeze does nothing")
+    c.add_argument("--policy", choices=POLICIES, help="update policy: auto applies updates nightly with a snapshot first and a rollback if the site breaks (core: minor and security releases only, a new X.Y is only reported; "
+                                                         "plugins and themes: minor updates, while a major version is held for you with one ntfy per set; wp-site-update --apply applies everything); "
+                                                         "notify only tells you, once per set (the default); freeze does nothing")
     c.add_argument("--title", help="the WordPress site title (1 to 100 characters)")
     c.add_argument("--user", help="the administrator's user name (3 to 30 characters of letters, digits, . _ -)")
     c.add_argument("--email", help="the administrator's email address")

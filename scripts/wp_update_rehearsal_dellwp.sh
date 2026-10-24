@@ -7,10 +7,12 @@
 #      put the plugin back to the OLD version, the flag must be gone, the site must answer 200, and .update-failed must exist   (ntfy: "ROLLED BACK")
 #   4. the same set is not retried by the timer's path (no --apply): the job says so and changes nothing; then --apply, without the forced failure, updates it for real
 #      (ntfy: "was updated and checked")
-# Expect THREE messages on your phone: updated, ROLLED BACK, updated. Needs sudo without a password. It removes the plugin at the end, on every exit path; the pre-update snapshots stay (real
+#   5. a MAJOR update is held: classic-editor 0.5 is installed (0 against 1.7.0: the first number changes), the job is run as the timer runs it (auto policy): it must change nothing, not
+#      take the site offline and not make a snapshot; it tells ntfy once ("holds for you") and a second run says nothing new; then --apply updates it for real
+# Expect FIVE messages on your phone: updated, ROLLED BACK, updated, "MAJOR updates that the nightly job holds for you", updated. Needs sudo without a password. It removes the plugin at the end, on every exit path; the pre-update snapshots stay (real
 # backups, pruned to the newest two of that kind). The site is offline for about half a minute per run of the job. What it does not prove: that the policies, the notify path or
 # the 02:00 timer do what they say (offline tests and the first night do), that a plugin whose update really breaks the site is caught (the forced failure stands in), or that the
-# php fatal-error check sees a real fatal error (look at the first night's journal).
+# php fatal-error check sees a real fatal error (look at the first night's journal), or the major CORE notice (no major WordPress release exists to test with; the offline tests do).
 set -u
 SITE=${1:-}
 [ -n "$SITE" ] || { echo "usage: bash scripts/wp_update_rehearsal_dellwp.sh <site>"; exit 2; }
@@ -24,7 +26,7 @@ for x in wp-site-update wp-site-ext wp-site-cli wp-site-recover wp-site-backup; 
 systemctl cat "wp-update@$SITE.service" </dev/null >/dev/null 2>&1 || { echo "wp-update@$SITE.service is not deployed"; exit 1; }
 [ ! -e "$DIR/maintenance.flag" ] && [ ! -e "$DIR/.recover-undo" ] && [ ! -e "$DIR/.update-failed" ] || { echo "a leftover maintenance.flag, .recover-undo or .update-failed in $DIR: look at it first"; exit 1; }
 [ ! -d "$DIR/html/wp-content/plugins/$PLUGIN" ] || { echo "$PLUGIN is already installed on $SITE: remove it first, this script owns it"; exit 1; }
-cleanup() { "$BIN/wp-site-ext" "$SITE" plugin delete "$PLUGIN" </dev/null >/dev/null 2>&1; rm -f "$DIR/.update-failed" "$DIR/.update-notified"; }
+cleanup() { "$BIN/wp-site-ext" "$SITE" plugin delete "$PLUGIN" </dev/null >/dev/null 2>&1; rm -f "$DIR/.update-failed" "$DIR/.update-notified" "$DIR/.update-held"; }
 trap cleanup EXIT
 wpc() { "$BIN/wp-site-cli" "$SITE" "$@" </dev/null; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$1/" </dev/null; }
@@ -76,7 +78,27 @@ check "--apply exit code" "$RC" 0
 NEW=$(version); [ -n "$NEW" ] && [ "$NEW" != "$OLD" ] && echo "ok: $PLUGIN is now $NEW" || { echo "FAIL: $PLUGIN is still '$NEW'"; FAIL=$((FAIL+1)); }
 [ ! -f "$DIR/.update-failed" ] && echo "ok: the failure marker is cleared by a success" || { echo "FAIL: .update-failed is still there"; FAIL=$((FAIL+1)); }
 clean; check "the public port answers" "$(code "$LISTEN")" 200
+echo "== 5. a major update is held under auto"
+MAJOR_OLD=0.5
+"$BIN/wp-site-ext" "$SITE" plugin delete "$PLUGIN" </dev/null >/dev/null 2>&1; "$BIN/wp-site-ext" "$SITE" plugin install "$PLUGIN" --version=$MAJOR_OLD --activate </dev/null >/dev/null || { echo "FAIL: could not install $PLUGIN $MAJOR_OLD"; FAIL=$((FAIL+1)); }
+check "installed at the old major version" "$(version)" "$MAJOR_OLD"
+SNAPS_BEFORE=$(ls "$BDIR/$SITE" | grep -c '^[0-9]\{8\}T')
+CODES=/tmp/update-rehearsal.codes5; rm -f "$CODES"
+( for _ in $(seq 1 40); do code "$LISTEN" >> "$CODES"; echo >> "$CODES"; sleep 0.5; done ) & POLL=$!
+OUT=$("$BIN/wp-site-update" "$SITE" </dev/null); RC=$?; kill "$POLL" 2>/dev/null; wait "$POLL" 2>/dev/null; echo "   $OUT"
+check "the job exit code" "$RC" 0
+check "nothing was updated (the major is held)" "$(version)" "$MAJOR_OLD"
+check ".update-last says held-only" "$(lastkey result)" held-only
+[ -f "$DIR/.update-held" ] && echo "ok: the held set is remembered (ntfy was told once)" || { echo "FAIL: no .update-held marker"; FAIL=$((FAIL+1)); }
+grep -q '503' "$CODES" && { echo "FAIL: the site went offline for a held update"; FAIL=$((FAIL+1)); } || echo "ok: the site was never offline"
+check "no snapshot was taken" "$(ls "$BDIR/$SITE" | grep -c '^[0-9]\{8\}T')" "$SNAPS_BEFORE"
+clean
+"$BIN/wp-site-update" "$SITE" </dev/null | sed 's/^/   /'; check "the second run changes nothing" "$(version)" "$MAJOR_OLD"
+"$BIN/wp-site-update" "$SITE" --apply </dev/null; RC=$?
+check "--apply exit code" "$RC" 0
+NEW=$(version); [ -n "$NEW" ] && [ "$NEW" != "$MAJOR_OLD" ] && echo "ok: --apply updated the major: $PLUGIN is now $NEW" || { echo "FAIL: $PLUGIN is still '$NEW'"; FAIL=$((FAIL+1)); }
+clean; check "the public port answers" "$(code "$LISTEN")" 200
 echo
-[ "$FAIL" = 0 ] && echo "All checks passed. On your phone, three messages: updated, ROLLED BACK, updated. Tell me what they said." || echo "$FAIL check(s) failed"
+[ "$FAIL" = 0 ] && echo "All checks passed. On your phone, five messages: updated, ROLLED BACK, updated, the held major, updated. Tell me what they said." || echo "$FAIL check(s) failed"
 exit "$FAIL"
 REMOTE

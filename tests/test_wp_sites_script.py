@@ -386,7 +386,8 @@ class Help(Base):
         # the operator asked whether auto asks permission for major updates; the help must not leave that to memory
         text = self.help_text("create")
         flat = " ".join(text.split())   # argparse wraps lines
-        self.assertIn("core: minor and security releases only; plugins and themes: any newer version, majors included", flat)
+        self.assertIn("core: minor and security releases only, a new X.Y is only reported; plugins and themes: minor updates, while a major version is held for you with one ntfy per set", flat)
+        self.assertIn("wp-site-update --apply applies everything", flat)
 
     def test_the_tools_the_help_names_exist_and_print_a_usage_line(self):
         deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
