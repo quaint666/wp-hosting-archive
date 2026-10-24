@@ -256,6 +256,39 @@ class Tools(unittest.TestCase):
             with self.subTest(answers.splitlines()[1:3]):
                 self.assertEqual(self.run_tool("wp-site-install", "wptest", tty=answers).returncode, 2)
 
+    def test_install_takes_title_user_and_email_as_options_and_still_asks_for_the_password(self):
+        r = self.run_tool("wp-site-install", "wptest", "--title=My Friend's Site", "--user=adminuser", "--email=admin@example.org", tty="%s\n%s\n" % (GOOD, GOOD))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        a = self.argv()
+        self.assertIn("--title=My Friend's Site", a, "a title with spaces stays one argument")
+        self.assertIn("--admin_user=adminuser", a); self.assertIn("--admin_email=admin@example.org", a)
+        self.assertNotIn("Site title:", r.stderr, "no prompt for what was given")
+        self.assertIn("Password", r.stderr); self.assertNotIn(GOOD, self.log("docker.argv"))
+
+    def test_install_asks_only_for_what_was_not_given(self):
+        r = self.run_tool("wp-site-install", "wptest", "--user=adminuser", tty="A title\nadmin@example.org\n%s\n%s\n" % (GOOD, GOOD))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Site title:", r.stderr); self.assertIn("Administrator email:", r.stderr); self.assertNotIn("Administrator user name:", r.stderr)
+        self.assertIn("--admin_user=adminuser", self.argv())
+
+    def test_install_options_are_checked_like_the_answers_and_there_is_no_password_option(self):
+        # every run gets valid values for whatever the case under test does not replace, and only the password is scripted: a failure can only come from the option under test, and a
+        # tool that ignored or accepted a bad option would install
+        base = {"--title": "--title=T", "--user": "--user=adminuser", "--email": "--email=admin@example.org"}
+        pw = "%s\n%s\n" % (GOOD, GOOD)
+        good = self.run_tool("wp-site-install", "wptest", *base.values(), tty=pw)
+        self.assertEqual(good.returncode, 0, "the valid options alone are a good run: " + good.stderr)
+        cases = [("--user", "--user=bad user!"), ("--email", "--email=not-an-email"), ("--title", "--title=" + "x" * 101), ("--title", "--title=line\nbreak"), ("--title", "--title=a\x07b"),
+                 ("--title", "--title=\x7f")]
+        extras = ["--password=" + GOOD, "--pw=" + GOOD, "--user", "--title", "extra", "--unknown=1"]
+        runs = [[v for k, v in base.items() if k != key] + [bad] for key, bad in cases] + [list(base.values()) + [e] for e in extras]
+        for opts in runs:
+            with self.subTest(opts[-1]):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                r = self.run_tool("wp-site-install", "wptest", *opts, tty=pw)
+                self.assertEqual(r.returncode, 2, (opts, r.stderr))
+                self.assertNotIn("install", [x for x in self.argv() if x == "install"], "nothing may be installed")
+
     def test_install_fails_loudly_when_the_login_does_not_work(self):
         (self.tmp / "shim" / "curl").write_text("#!/bin/bash\ncat >/dev/null\nprintf 'HTTP/1.1 200 OK\\r\\n\\r\\n'\n")
         r = self.run_tool("wp-site-install", "wptest", tty=self.answers())
