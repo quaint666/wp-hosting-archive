@@ -1,0 +1,42 @@
+---
+# tasks/wp_tools_common.yml
+# The operator's tools on dellwp: wp-site-cli (WP-CLI in a throwaway container), wp-site-install and wp-site-login-check, with the library they share. No hosts:/become: and no
+# handlers; imported via import_tasks into dellwp/wp_sites_dellwp.yml, which sets wp_template_dir. The scripts are rendered from templates/wp/ so the image pin, the site list,
+# the paths and the limits come from the variables and exist in one place. Root-only (0750 root:root): no sudoers entry, no setuid. The site names are the allowlist, so
+# adding a site means running this play again before the tools accept it. tests/test_wp_tools.py runs the rendered scripts against stand-ins for docker and curl.
+# Check mode cannot show: the image pull, or whether a tool works once installed.
+
+- name: Pull the WP-CLI image
+  community.docker.docker_image_pull:
+    name: "{{ wp_image_cli }}"
+    pull: not_present
+
+- name: Make the tools library directory
+  ansible.builtin.file:
+    path: "{{ wp_tools_lib }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy the tools library
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_tools_common.sh.j2"
+    dest: "{{ wp_tools_lib }}/common.sh"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy the tools
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "{{ wp_tools_bin }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
+    - { src: wp_site_install.sh.j2, dest: wp-site-install }
+    - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
+  loop_control:
+    label: "{{ item.dest }}"

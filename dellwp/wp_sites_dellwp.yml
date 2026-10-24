@@ -18,6 +18,8 @@
     wp_template_dir: "{{ playbook_dir }}/../templates/wp"
 
   tasks:
+    - name: Install the operator's tools (tasks/wp_tools_common.yml)
+      ansible.builtin.import_tasks: ../tasks/wp_tools_common.yml
     - name: Apply the site engine (tasks/wp_sites_common.yml)
       ansible.builtin.import_tasks: ../tasks/wp_sites_common.yml
 

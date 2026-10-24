@@ -1,0 +1,23 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_login_check.sh.j2). Does this user and password log in?   wp-site-login-check <site> <user>
+# The password comes from stdin (a pipe) or, at a terminal, a hidden prompt. It reaches curl on its stdin, never in an argument. The request goes to nginx on loopback
+# with the site's Host header and X-Forwarded-Proto: https, as Cloudflare's tunnel would send it, so it also proves the HTTPS handling. Exit 0 = logged in.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+{% raw %}
+[ "$#" -eq 2 ] || { echo "usage: wp-site-login-check <site> <user>   (password on stdin)" >&2; exit 2; }
+require_site "$1"; user=$2
+[[ $user =~ ^[A-Za-z0-9_.@-]{1,60}$ ]] || die "'$user' is not a plausible user name"
+if [ -t 0 ]; then open_tty; ask_secret "Password for $user: " pw; else IFS= read -r pw || true; fi
+[ -n "$pw" ] || die "empty password"
+# 302 with a wordpress_logged_in cookie is a login; a wrong password answers 200 with the form again. wordpress_test_cookie is what the form's own page sets.
+hdr=$(printf '%s' "$pw" | curl -s -o /dev/null -D - --max-time 20 \
+  -H "Host: $host" -H 'X-Forwarded-Proto: https' -b 'wordpress_test_cookie=WP%20Cookie%20check' \
+  --data-urlencode "log=$user" --data-urlencode 'pwd@-' --data 'wp-submit=Log+In&testcookie=1' \
+  "http://127.0.0.1:$WP_LISTEN/wp-login.php") || die "nginx did not answer"
+unset pw
+if printf '%s' "$hdr" | head -n 1 | grep -q ' 302 ' && printf '%s' "$hdr" | grep -qi '^set-cookie: wordpress_logged_in'; then
+  echo "login ok: $user on $host"; exit 0
+fi
+echo "login refused: $user on $host"; exit 1
+{% endraw %}

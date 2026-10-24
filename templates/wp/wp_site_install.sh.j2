@@ -1,0 +1,35 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_install.sh.j2). Install WordPress into a site that has none:   ssh -t dellwp sudo wp-site-install <site>
+# Asks for the title, the administrator's user name and email, and the password twice at a hidden prompt (14 characters or more). The password goes to WP-CLI on stdin; only
+# its length is ever printed. Then it proves the credentials: the right password must log in and the same password with a letter added must be refused. The site is left
+# discouraging search engines (blog_public 0) until it goes live. Nothing here sends mail (the VM cannot send SMTP).
+set -eu
+. {{ wp_tools_lib }}/common.sh
+{% raw %}
+[ "$#" -eq 1 ] || { echo "usage: wp-site-install <site>   (run with ssh -t)" >&2; exit 2; }
+require_site "$1"
+"$WP_BIN/wp-site-cli" "$site" core is-installed >/dev/null 2>&1 && die "$site already has WordPress installed; nothing was changed"
+open_tty
+ask "Site title: " title
+ask "Administrator user name: " user
+ask "Administrator email: " email
+[ -n "$title" ] && [ "${#title}" -le 100 ] || die "the title must be 1 to 100 characters"
+[[ $user =~ ^[A-Za-z0-9_.-]{3,30}$ ]] || die "the user name must be 3 to 30 characters of letters, digits, . _ -"
+[[ $email =~ ^[^@\ ]+@[^@\ ]+\.[^@\ ]+$ ]] || die "that does not look like an email address"
+ask_secret "Password (14 or more characters, not shown): " pw
+ask_secret "Password again: " pw2
+[ "$pw" = "$pw2" ] || die "the two passwords differ; nothing was changed"
+[ "${#pw}" -ge 14 ] || die "the password has ${#pw} characters; 14 or more are needed"
+unset pw2
+echo "password: ${#pw} characters, the two entries match" >&2
+
+printf '%s\n' "$pw" | "$WP_BIN/wp-site-cli" "$site" --stdin core install "--url=https://$host" "--title=$title" "--admin_user=$user" "--admin_email=$email" --prompt=admin_password --skip-email
+"$WP_BIN/wp-site-cli" "$site" option update blog_public 0
+
+rc=0
+if printf '%s' "$pw" | "$WP_BIN/wp-site-login-check" "$site" "$user"; then right=ok; else right=FAILED; rc=1; fi
+if printf '%s' "${pw}x" | "$WP_BIN/wp-site-login-check" "$site" "$user" >/dev/null; then wrong="ACCEPTED (bad)"; rc=1; else wrong=refused; fi
+unset pw
+echo "== installed $host: right password $right, wrong password $wrong" >&2
+exit "$rc"
+{% endraw %}

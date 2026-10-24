@@ -1,0 +1,26 @@
+# Managed by Ansible (templates/wp/wp_tools_common.sh.j2). Sourced by wp-site-cli, wp-site-install and wp-site-login-check; not run on its own. Root-only tools:
+# there is no sudoers entry and no setuid bit, so nobody can reach them who cannot already be root on this VM.
+readonly WP_SITES='{{ wp_sites | map(attribute="name") | join(" ") }}'
+readonly WP_DATA='{{ wp_data_mount }}/sites'
+readonly WP_DOMAIN='{{ wp_domain }}'
+readonly WP_LISTEN='{{ wp_nginx_listen_port }}'
+readonly WP_BIN='{{ wp_tools_bin }}'
+{% raw %}
+die() { echo "$(basename "$0"): $*" >&2; exit 2; }
+
+# Sets site, dir and host. The name must look like a site name AND be one the repo declares: the regex keeps path tricks and globs out, the list keeps typos out.
+require_site() {
+  site=${1:-}
+  [[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || die "'$site' is not a site name"
+  local s known=0
+  for s in $WP_SITES; do [ "$s" = "$site" ] && known=1; done
+  [ "$known" = 1 ] || die "'$site' is not in wp_sites (add it and run dellwp/wp_sites_dellwp.yml)"
+  dir=$WP_DATA/$site
+  host=$site.$WP_DOMAIN
+}
+
+# Opens fd 3 on the terminal (WP_SITE_TTY exists for the tests). Secrets are read from fd 3, silently, and never put in an argument or the environment.
+open_tty() { exec 3<"${WP_SITE_TTY:-/dev/tty}" || die "no terminal to read from (use ssh -t)"; }
+ask() { printf '%s' "$1" >&2; IFS= read -r -u 3 "$2" || die "no answer"; }
+ask_secret() { printf '%s' "$1" >&2; IFS= read -rs -u 3 "$2" || die "no answer"; echo >&2; }
+{% endraw %}

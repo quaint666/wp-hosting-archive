@@ -38,6 +38,13 @@ def base_vars():
     v.update(load("vars/wp.yml"))
     v.update(load("host_vars/dellwp/vars.yml"))
     v["wp_master_secret"] = "stub-master-secret"
+    # Ansible templates variables that refer to other variables (wp_image_cli is built from two lines): do the same here, so a test sees the value the play would use.
+    e = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    e.filters["regex_search"] = lambda value, pattern: (__import__("re").search(pattern, value) or [None])[0]
+    for _ in range(3):
+        for key, val in list(v.items()):
+            if isinstance(val, str) and "{{" in val:
+                v[key] = e.from_string(val).render(**v)
     return v
 
 
@@ -108,9 +115,15 @@ class Render(unittest.TestCase):
     def test_images_are_pinned_and_anchored(self):
         text = (ROOT / "vars/wp.yml").read_text().splitlines()
         for i, line in enumerate(text):
-            if line.startswith("wp_image_"):
+            if line.startswith("wp_image_") and "{{" not in line:
                 self.assertTrue(text[i - 1].startswith("# renovate: depName="), line)
                 self.assertNotIn(":latest", line)
+            if line.startswith("wp_image_cli:"):
+                # built from two pinned lines, so it carries no anchor of its own
+                self.assertIn("wp_cli_version", line)
+                self.assertIn("wp_image_php", line)
+            if line.startswith("wp_cli_version:"):
+                self.assertTrue(text[i - 1].startswith("# renovate: datasource=github-releases depName=wp-cli/wp-cli"), line)
 
     def test_wp_config_has_the_hardening_and_no_unrendered_text(self):
         php = self.render("site_wp-config.php.j2")

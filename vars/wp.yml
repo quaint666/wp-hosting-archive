@@ -7,6 +7,12 @@
 wp_image_php: "wordpress:7.1.3-php8.5-fpm"
 # renovate: depName=mariadb
 wp_image_db: "mariadb:12.3.3"
+# WP-CLI runs in a one-shot container of the official image with the same PHP minor as the sites (wordpress:cli-<version>-php<minor>). Renovate cannot read that tag
+# shape, so the tag is built from two lines it can: this version (custom manager in renovate.json, like vars/docker.yml) and the php minor of wp_image_php above.
+# The cli image is Alpine-based and the site image Debian-based: same PHP, different libc. The tools (templates/wp/wp_site_cli.sh.j2) bypass its entrypoint.
+# renovate: datasource=github-releases depName=wp-cli/wp-cli
+wp_cli_version: "2.12.0"
+wp_image_cli: "wordpress:cli-{{ wp_cli_version }}-{{ wp_image_php | regex_search('php[0-9]+[.][0-9]+') }}"
 # The uids the containers run as. php is www-data (33 in the image and on the VM, on purpose: the VM's nginx reads the uploads the container writes). The database
 # must NOT be a uid with an account on the VM: the image's mysql is 999, which on dellwp is the alloy user (seen 2026-10-24: the data files showed as alloy:systemd-journal),
 # so Alloy could read every site's database. mariadbd runs as any uid; this one has no account. The code is owned by root, uploads by the php uid, db/ by the db uid.

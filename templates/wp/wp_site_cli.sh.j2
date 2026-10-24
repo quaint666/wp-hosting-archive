@@ -1,0 +1,55 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_cli.sh.j2). Run WP-CLI against one site in a throwaway container:
+#   wp-site-cli <site> [--code [--with-plugins]] [--stdin] <wp arguments...>        e.g.  wp-site-cli wptest core version
+# Default: the container runs as the php uid (the web app's own power): the code is mounted read-only, only uploads and the database are writable.
+# --code: the container runs as root with NO capabilities and the code writable, for the commands that change code (core, plugin and theme updates and installs).
+#   It adds --skip-plugins --skip-themes, because wp loads every active plugin on every command and a hostile plugin must not run as root; --with-plugins lifts that.
+# Standard input is NOT forwarded unless you pass --stdin (or it is a terminal): a script or a timer that calls this tool must not have its own input swallowed by the
+# container (an `ssh host 'bash -s' <<EOF` script lost every line after the first call, 2026-10-24). wp-site-install passes --stdin to hand over a password.
+# Either way: only this site's network (not another site's database), no Docker socket, read-only root, memory equal to swap, pids and CPU limits.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+readonly WP_IMAGE='{{ wp_image_cli }}'
+readonly PHP_UID='{{ wp_php_uid }}'
+readonly CLI_MEM='{{ wp_cli_mem_mb }}'
+readonly CLI_CPUS='{{ wp_cli_cpus }}'
+readonly CLI_PIDS='{{ wp_cli_pids }}'
+{% raw %}
+[ "$#" -ge 2 ] || { echo "usage: wp-site-cli <site> [--code [--with-plugins]] [--stdin] <wp arguments...>" >&2; exit 2; }
+require_site "$1"; shift
+mode=user; plugins=skip; stdin=no
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --code) mode=code; shift ;;
+    --with-plugins) plugins=load; shift ;;
+    --stdin) stdin=yes; shift ;;
+    *) break ;;
+  esac
+done
+[ "$#" -ge 1 ] || die "nothing to run"
+[ "$plugins" = skip ] || [ "$mode" = code ] || die "--with-plugins only applies to --code"
+[ -f "$dir/wp-config.php" ] || die "$dir/wp-config.php is missing (run dellwp/wp_sites_dellwp.yml)"
+docker network inspect "wp-${site}_default" >/dev/null 2>&1 || die "the site's network wp-${site}_default does not exist (is wp-$site.service running?)"
+
+args=(docker run --rm --name "wpcli_${site}_$$" --network "wp-${site}_default"
+  --entrypoint wp --workdir /var/www/html
+  --read-only --tmpfs /tmp:size=128m,mode=1777
+  --cap-drop ALL --security-opt no-new-privileges:true
+  --memory "${CLI_MEM}m" --memory-swap "${CLI_MEM}m" --cpus "$CLI_CPUS" --pids-limit "$CLI_PIDS"
+  -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache)
+[ "$stdin" = yes ] || [ -t 0 ] && args+=(-i)
+[ -t 0 ] && [ -t 1 ] && args+=(-t)
+extra=()
+if [ "$mode" = code ]; then
+  args+=(--user 0:0 -v "$dir/html:/var/www/html")
+  extra+=(--allow-root)
+  [ "$plugins" = skip ] && extra+=(--skip-plugins --skip-themes)
+else
+  args+=(--user "$PHP_UID:$PHP_UID" -v "$dir/html:/var/www/html:ro" -v "$dir/html/wp-content/uploads:/var/www/html/wp-content/uploads")
+fi
+args+=(-v "$dir/wp-config.php:/var/www/html/wp-config.php:ro" "$WP_IMAGE")
+
+# One line in the journal per call: the site, the mode and the first two words only (a later word may be a secret).
+command -v logger >/dev/null && logger -t wp-site-cli -- "site=$site mode=$mode cmd=$1${2:+ $2}" || true
+exec "${args[@]}" "$@" "${extra[@]}"
+{% endraw %}
