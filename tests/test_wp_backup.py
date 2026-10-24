@@ -343,6 +343,55 @@ class BackupCheck(Base):
         self.assertEqual(self.v["wp_backup_check_calendar"], "hourly")
 
 
+class Drill(Base):
+    def setUp(self):
+        super().setUp()
+        self.shim("wp-site-restore-record", "")
+        # the drill calls wp-site-restore in the tools directory: a recording stand-in there
+        (self.tmp / "bin" / "wp-site-restore").write_text('#!/bin/bash\necho "$*" >> "%s"\n' % (self.tmp / "shim" / "restore.calls"))
+        (self.tmp / "bin" / "wp-site-restore").chmod(0o755)
+        self.script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=[{"name": n} for n in ("wptest", "alpha", "beta", "gamma")])
+        self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=[{"name": n} for n in ("wptest", "alpha", "beta", "gamma")])
+        for n in ("wptest", "alpha", "beta"):
+            (self.backups / n).mkdir(exist_ok=True)
+            (self.backups / n / ".last-success").write_text("20261024T201500Z")
+        (self.backups / "gamma").mkdir(exist_ok=True)   # a site with no good backup yet
+
+    def picks(self, n=1, **env):
+        for _ in range(n):
+            self.assertEqual(self.run_script(self.script, **env).returncode, 0)
+        return [l.split()[0] for l in self.log("restore.calls").splitlines()]
+
+    def test_it_picks_a_random_site_that_has_a_good_backup_and_asks_for_a_notification(self):
+        picked = self.picks(40)
+        self.assertEqual(set(picked), {"wptest", "alpha", "beta"}, "random over the sites with a backup, never one without")
+        for line in self.log("restore.calls").splitlines():
+            self.assertTrue(line.endswith("latest --notify"), line)
+
+    def test_a_named_site_is_used_only_if_it_has_a_backup(self):
+        self.assertEqual(self.picks(1, WP_DRILL_SITE="beta"), ["beta"])
+        r = self.run_script(self.script, WP_DRILL_SITE="gamma")
+        self.assertEqual(r.returncode, 2); self.assertIn("not a site with a good backup", r.stderr)
+        r = self.run_script(self.script, WP_DRILL_SITE="../x")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.log("restore.calls").count("\n"), 1, "nothing else was run")
+
+    def test_with_no_backup_anywhere_it_fails_so_that_the_unit_alerts(self):
+        for n in ("wptest", "alpha", "beta"):
+            (self.backups / n / ".last-success").unlink()
+        r = self.run_script(self.script)
+        self.assertEqual(r.returncode, 2); self.assertIn("nothing to drill", r.stderr)
+        self.assertEqual(self.log("restore.calls"), "")
+
+    def test_it_is_a_monthly_timer_after_the_proxmox_job_and_a_failure_alerts(self):
+        by = {t.get("name"): t for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())}
+        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Deploy the monthly restore drill service"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnCalendar={{ wp_drill_calendar }}", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("Persistent=true", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertEqual(self.v["wp_drill_calendar"], "*-*-01 05:30:00")
+        self.assertGreater(self.v["wp_drill_timeout_s"], 600)
+
+
 class Restore(Base):
     def setUp(self):
         super().setUp()

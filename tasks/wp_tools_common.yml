@@ -43,6 +43,7 @@
     - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
     - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
+    - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
   loop_control:
     label: "{{ item.dest }}"
 
@@ -106,5 +107,50 @@
   ansible.builtin.systemd:
     daemon_reload: true
     name: wp-backup-check.timer
+    enabled: true
+    state: started
+
+# The monthly restore drill: one random site with a good backup, restored into scratch and booted, the result sent to ntfy (templates/wp/wp_restore_drill.sh.j2).
+- name: Deploy the monthly restore drill service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-restore-drill.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Monthly WordPress restore drill (one random site, restored into scratch)
+      After=docker.service
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-restore-drill
+      TimeoutStartSec={{ wp_drill_timeout_s }}
+      Nice=10
+      IOSchedulingClass=idle
+
+- name: Deploy the monthly restore drill timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-restore-drill.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Monthly WordPress restore drill
+
+      [Timer]
+      OnCalendar={{ wp_drill_calendar }}
+      RandomizedDelaySec={{ wp_backup_jitter_s }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the monthly restore drill timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-restore-drill.timer
     enabled: true
     state: started
