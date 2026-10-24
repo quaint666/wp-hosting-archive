@@ -461,26 +461,33 @@ class Lifecycle(Base):
         t = w.set_site_field(t, "s7", "state", "stopped")
         self.vars.write_text(t); self.commit("crowded")
 
-    def test_stop_takes_the_final_backup_after_the_answer_and_before_the_edit_then_runs_the_play(self):
+    def test_stop_takes_the_final_backup_after_every_answer_and_immediately_before_the_real_play(self):
         self.answers = ["y", "y"]   # write the change, run the play for real
         rc = self.sites().stop("wptest")
         self.assertEqual(rc, 0, self.text())
-        self.assertEqual(self.kinds(), ["ssh", "play-check", "play", "play", "bash", "python3"])
-        self.assertEqual(self.calls[0], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force"], "forced, so a frozen site is backed up too")
+        self.assertEqual(self.kinds(), ["play-check", "ssh", "play", "play", "bash", "python3"], "the backup waits for the answers: a person must not decide how stale it is")
+        self.assertEqual(self.calls[1], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force --tag=final"], "forced (a frozen site too), and tagged final: it quiets the site and is what a delete archives")
         self.assertEqual(self.site("wptest")["state"], "stopped")
         self.assertIn("'This site is paused.'", self.text()); self.assertIn("It is LIVE", self.text()); self.assertIn("wp_sites.py start wptest", self.text())
         self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
 
-    def test_declining_the_diff_takes_no_backup_and_writes_nothing(self):
+    def test_declining_the_diff_or_the_real_run_takes_no_backup(self):
         self.answers = ["n"]
         self.assertEqual(self.sites().stop("wptest"), 1)
         self.assertEqual(self.calls, []); self.assertEqual(self.vars.read_text(), self.original)
+        self.answers = ["y", "n"]   # write, then decline the real run: the check ran, the backup did not
+        self.assertEqual(self.sites().stop("wptest"), 1)
+        self.assertEqual(self.kinds(), ["play-check"]); self.assertNotIn("final", " ".join(" ".join(c) for c in self.calls))
 
-    def test_a_failed_final_backup_stops_everything_before_a_byte_is_written(self):
+    def test_a_failed_final_backup_puts_the_file_back_and_the_play_never_runs(self):
         self.rc = {"ssh": 3}
         rc = self.sites().stop("wptest", yes=True)
-        self.assertEqual(rc, 3); self.assertEqual(self.kinds(), ["ssh"]); self.assertEqual(self.vars.read_text(), self.original)
-        self.assertIn("nothing was stopped and nothing was written", self.text())
+        self.assertEqual(rc, 3); self.assertEqual(self.kinds(), ["ssh"]); self.assertEqual(self.vars.read_text(), self.original, "the edit is undone, byte for byte")
+        self.assertIn("nothing was stopped", self.text()); self.assertIn("is back as it was", self.text())
+        self.assertEqual(self.git_status(), "")
+
+    def git_status(self):
+        return subprocess.run(["git", "-C", str(self.tmp), "status", "--short"], capture_output=True, text=True).stdout.strip()
 
     def test_yes_skips_the_questions_and_the_check_run_but_not_the_backup(self):
         self.assertEqual(self.sites().stop("wptest", yes=True), 0)
@@ -536,7 +543,7 @@ class Lifecycle(Base):
         self.answers = ["7", "6", "wptest", "y", "y", "4"]   # nothing is stopped; stop wptest; write; run
         self.assertEqual(self.sites().menu(), 0)
         self.assertIn("No site is stopped.", self.text()); self.assertEqual(self.site("wptest")["state"], "stopped")
-        self.assertEqual(self.calls[0], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force"])
+        self.assertIn(["ssh", "dellwp", "sudo -n wp-site-backup wptest --force --tag=final"], self.calls)
         self.commit("stopped"); self.calls.clear(); self.answers = ["6", "4"]
         self.sites().menu(); self.assertIn("No site is running.", self.text())
 

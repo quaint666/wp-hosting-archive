@@ -102,6 +102,9 @@ wp_backup_keep_weekly: 3
 # The snapshot the update job takes before it changes anything is tagged (tag=pre-update in its MANIFEST) and pruned on its own: the newest wp_backup_keep_preupdate are kept, and they
 # do not count towards the daily and weekly ones, so a night with an update does not push a nightly snapshot out.
 wp_backup_keep_preupdate: 2
+# The last backup of a site that is about to stop (wp-site-backup --tag=final, taken by wp_sites.py stop) is tagged too and kept on its own: the newest wp_backup_keep_final. It is what a
+# delete archives, so it must outlive the nightly pruning; and it does not count towards the daily and weekly ones either.
+wp_backup_keep_final: 1
 wp_backup_quota_offset: 1000
 wp_backup_stale_hours: 30
 wp_backup_check_calendar: hourly

@@ -622,6 +622,16 @@ class Tools(unittest.TestCase):
         self.assertIn("not (wp_site_restart | bool)", reload_task["when"])
         self.assertIn("wp_s.state != 'stopped'", reload_task["when"], "no php to recreate in a stopped site")
 
+    def test_a_stopped_site_loses_the_final_backups_maintenance_flag_only_after_its_containers_are_down(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
+        names = [t.get("name", "") for t in tasks]
+        stop = [i for i, n in enumerate(names) if n.startswith("Start the site, or restart it") and "stop it when it is stopped" in n][0]
+        rm = names.index("Take the maintenance flag away from a stopped site")
+        self.assertGreater(rm, stop, "the flag keeps the site quiet until the unit has stopped")
+        t = tasks[rm]
+        self.assertEqual((t["ansible.builtin.file"]["state"], t["when"]), ("absent", "wp_s.state == 'stopped'"))
+        self.assertTrue(t["ansible.builtin.file"]["path"].endswith("/maintenance.flag"))
+
     def test_only_live_sites_get_a_running_timer_and_systemd_is_reloaded_first(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
         t = [x for x in tasks if "wp-cron@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]

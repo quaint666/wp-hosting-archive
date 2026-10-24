@@ -233,10 +233,6 @@ class Sites:
         if not yes and not self.confirm("Write this change to %s?" % VARS):
             self.out("Nothing was written.")
             return 1
-        if pre is not None and not no_run:   # something that must happen after the answer and before anything changes (the final backup of a stop); --no-run runs nothing
-            rc = pre()
-            if rc != 0:
-                return rc
         self.path.write_text(new)
         if no_run:
             self.out("Edited only (--no-run). Run %s, then scripts/wp_site_verify_dellwp.sh %s." % (PLAY, site))
@@ -254,6 +250,12 @@ class Sites:
             if not self.confirm("Run the play for real now?%s" % ("" if check else " (it builds the new site)")):
                 self.out("Not run. The file is edited; `git checkout -- %s` undoes it." % VARS)
                 return 1
+        if pre is not None:   # runs immediately before the real play, after every answer: the final backup of a stop must not wait for a person
+            rc = pre()
+            if rc != 0:
+                self.path.write_text(old)
+                self.out("%s is back as it was; nothing on the host was changed by the play." % VARS)
+                return rc
         rc, _ = self.run(play)
         if rc != 0:
             self.out("The play failed (exit %d). The file stays edited and the host may be half-way; run it again once the cause is fixed, or `git checkout -- %s` and run it to undo." % (rc, VARS))
@@ -431,15 +433,16 @@ class Sites:
             raise Refuse("%s is already stopped" % site)
         new = set_site_field(text, site, "state", "stopped")
         self.check_rules(new)
-        self.out("Stopping %s: a final backup now, then its containers go down and its timers stop; backups and updates skip it; visitors of https://%s get a 'This site is paused.' page. Its data stays."
+        self.out("Stopping %s: a final backup (the site is put in maintenance while it runs and stays so until it is stopped), then its containers go down and its timers stop; backups and updates skip it; "
+                 "visitors of https://%s get a 'This site is paused.' page. Its data stays."
                  % (site, host))
         if cur["state"] == "live":
             self.out("It is LIVE: https://%s goes offline for its visitors." % host)
 
         def final_backup():
-            rc, _ = self.run(["ssh", HOST, "sudo -n wp-site-backup %s --force" % shlex.quote(site)])
+            rc, _ = self.run(["ssh", HOST, "sudo -n wp-site-backup %s --force --tag=final" % shlex.quote(site)])
             if rc != 0:
-                self.out("The final backup failed (exit %d): nothing was stopped and nothing was written." % rc)
+                self.out("The final backup failed (exit %d): nothing was stopped. If the site was put in maintenance, it was brought back." % rc)
             return rc
         rc = self.apply_and_run(text, new, site, no_run, yes, pre=final_backup)
         if rc != 0 or no_run:

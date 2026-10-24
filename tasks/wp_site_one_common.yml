@@ -207,6 +207,13 @@
     name: wp-{{ wp_s.name }}
     state: "{{ 'stopped' if wp_s.state == 'stopped' else ('restarted' if wp_site_restart | bool else 'started') }}"
 
+# wp-site-backup --tag=final leaves the site in maintenance so that nothing is written between the last backup and the stop. Once the containers are down it has done its job.
+- name: Take the maintenance flag away from a stopped site
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/maintenance.flag"
+    state: absent
+  when: wp_s.state == 'stopped'
+
 - name: Recreate only the php container when only its mounted files changed
   ansible.builtin.systemd:
     name: wp-{{ wp_s.name }}

@@ -28,7 +28,7 @@ DUMP_OK = "-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\nINSERT INTO `wp
 DOCKER_BACKUP = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 case "$1" in
-  exec) [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
+  exec) echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
 esac
 exit 0
 '''
@@ -130,6 +130,8 @@ class Backup(Base):
         super().setUp()
         self.shim("docker", DOCKER_BACKUP)
         self.script = self.install("wp_site_backup.sh.j2", "bin/wp-site-backup")
+        self.env["SITEDIR"] = str(self.site)
+        self.flag = self.site / "maintenance.flag"
         (self.site / "html/wp-content/uploads/a.jpg").write_text("a" * 5000)
         (self.site / "html/wp-content/plugins/p/p.php").write_text("<?php // plugin\n")
 
@@ -260,6 +262,65 @@ class Backup(Base):
         self.assertEqual({s for s in left if s.endswith("T020000Z")}, {"20261023T020000Z", "20261024T020000Z"}, "the newest two pre-update snapshots, whichever nights they are from")
         plain = {s for s in left if not s.endswith("T020000Z")}
         self.assertEqual(plain, self.expected_keep([s for s in old + ["20261025T031500Z", "20261026T031500Z"]], 7, 3), "tagged ones take no daily or weekly place")
+
+    # --- the final backup of a site that is about to stop
+    def dump_flag(self):
+        return [l for l in self.log("order").splitlines() if l.startswith("dump")]
+
+    def test_a_final_backup_quiets_the_site_for_the_dump_and_leaves_it_quiet(self):
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.dump_flag(), ["dump flag=up"], "the flag is up when the database is dumped")
+        self.assertTrue(self.flag.exists(), "and it stays up: nothing may write between this snapshot and the stop")
+        self.assertIn("stays so", r.stdout); self.assertIn("tag=final", (self.backups / "wptest" / "20261024T201500Z" / "MANIFEST").read_text())
+        self.assertIn("OK: snapshot 20261024T201500Z of wptest", r.stdout)
+
+    def test_a_failed_final_backup_brings_the_site_back(self):
+        self.put("dump_fail", "")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.dump_flag(), ["dump flag=up"]); self.assertFalse(self.flag.exists(), "a failed backup must not leave a site offline")
+        self.assertEqual(self.snapshots(), [])
+
+    def test_someone_elses_maintenance_flag_is_never_touched(self):
+        self.flag.write_text("")   # the update job's, say
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+        self.assertTrue(self.flag.exists(), "left as found on success")
+        self.put("dump_fail", "")
+        self.assertNotEqual(self.backup("20261025T201500Z", "--tag=final").returncode, 0)
+        self.assertTrue(self.flag.exists(), "left as found on failure")
+
+    def test_other_backups_never_touch_the_flag(self):
+        for n, args in enumerate(((), ("--tag=pre-update",), ("--force",))):
+            self.assertEqual(self.backup("2026102%dT201500Z" % (1 + n), *args).returncode, 0)
+            self.assertFalse(self.flag.exists(), args); self.assertEqual(self.dump_flag()[-1], "dump flag=down")
+
+    def test_a_final_backup_of_a_stopped_or_frozen_site_raises_no_flag(self):
+        (self.site / "stopped.flag").write_text("")
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 2); self.assertFalse(self.flag.exists())
+        (self.site / "stopped.flag").unlink(); (self.tmp / "freeze").write_text("")
+        r = self.backup("20261025T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0); self.assertIn("frozen", r.stdout); self.assertFalse(self.flag.exists(), "skipped as a success, nothing touched")
+        r = self.backup("20261026T201500Z", "--tag=final", "--force")
+        self.assertEqual(r.returncode, 0); self.assertTrue(self.flag.exists(), "--force backs up anyway, and quiets the site")
+
+    def test_final_snapshots_are_kept_on_their_own_and_nothing_else_is_pushed_out(self):
+        old = self.fabricate(12)
+        self.tagged("20261020T020000Z", "20261021T020000Z", "20261022T020000Z")   # pre-update, as before
+        for st in ("20261001T030000Z", "20261015T030000Z", "20261023T030000Z"):
+            d = self.backups / "wptest" / st
+            (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x"); (d / "MANIFEST").write_text("site=wptest\nstamp=%s\ntag=final\n" % st)
+        self.assertEqual(self.backup("20261026T031500Z").returncode, 0)
+        left = set(self.snapshots())
+        self.assertEqual({s for s in left if s.endswith("T030000Z")}, {"20261023T030000Z"}, "the newest final snapshot only")
+        self.assertEqual({s for s in left if s.endswith("T020000Z")}, {"20261021T020000Z", "20261022T020000Z"}, "the pre-update ones keep their own rule")
+        plain = {s for s in left if s.endswith("T201500Z") or s.endswith("T031500Z")}
+        self.assertEqual(plain, self.expected_keep(old + ["20261026T031500Z"], 7, 3), "tagged ones take no daily or weekly place")
+
+    def test_an_unknown_tag_is_refused(self):
+        for bad in ("--tag=finl", "--tag=final;id", "--tag=Final"):
+            self.assertEqual(self.backup("20261024T201500Z", bad).returncode, 2, bad)
+        self.assertEqual(self.snapshots(), [])
 
     def test_a_first_ever_snapshot_that_is_tagged_prunes_without_error(self):
         r = self.backup("20261024T020000Z", "--tag=pre-update")
