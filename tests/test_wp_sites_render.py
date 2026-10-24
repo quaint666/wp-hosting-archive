@@ -191,6 +191,25 @@ class Render(unittest.TestCase):
         self.ctx["wp_s"] = {**self.ctx["wp_s"], "allow_xmlrpc": True}
         self.assertNotIn("location = /xmlrpc.php", self.render("site_nginx.conf.j2"))
 
+    def test_the_probe_port_is_the_same_vhost_and_only_the_maintenance_rule_ignores_it(self):
+        # The update job probes the site while the maintenance flag is up. One server block on two loopback ports, so the probe meets the same rules a visitor does.
+        conf = self.render("site_nginx.conf.j2")
+        probe, main = str(self.v["wp_nginx_probe_port"]), str(self.v["wp_nginx_listen_port"])
+        self.assertNotEqual(probe, main)
+        self.assertEqual(conf.count("server {"), 1, "a second server block would be rules that can drift from the first")
+        self.assertIn("listen 127.0.0.1:%s;" % main, conf); self.assertIn("listen 127.0.0.1:%s;" % probe, conf)
+        self.assertNotIn("0.0.0.0", conf); self.assertNotIn("listen %s" % probe, conf, "loopback only")
+        flag_at = conf.index("maintenance.flag"); probe_at = conf.index("if ($wp_probe)"); return_at = conf.index("return 503;")
+        self.assertLess(flag_at, probe_at); self.assertLess(probe_at, return_at, "the probe exemption must come after the flag is read and before the 503")
+        self.assertEqual(conf.count("return 503;"), 1)
+        base = (ROOT / "tasks/wp_nginx_base_common.yml").read_text()
+        self.assertIn("map $server_port $wp_probe", base); self.assertIn("{{ wp_nginx_probe_port }} 1;", base)
+        self.assertIn("listen 127.0.0.1:{{ wp_nginx_probe_port }} default_server;", base, "a host no site claims must get the closed connection on the probe port too")
+        # the tunnel is pointed at the visitor port only (8081 also appears in main.tf: the Bloomy prod origin on dellapps, another VM)
+        tf = (ROOT / "terraform/cloudflare/main.tf").read_text()
+        origin = __import__("re").search(r'variable "wp_origin" \{[^}]*default\s*=\s*"([^"]+)"', tf).group(1)
+        self.assertEqual(origin, "http://127.0.0.1:%s" % main, "terraform's wp_origin must be the visitor port, never the probe port")
+
     def test_nginx_base_defines_what_the_vhost_uses(self):
         base = (ROOT / "tasks/wp_nginx_base_common.yml").read_text()
         for needle in ("$wp_https", "zone=wp_login_attempts:", "map $request_uri $wp_login_key"):

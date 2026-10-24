@@ -1,6 +1,7 @@
 # Managed by Ansible (templates/wp/site_nginx.conf.j2). Site {{ wp_s.name }} ({{ wp_s.state }}). Needs the base in wp_base.conf ($wp_https, the wp_login_attempts zone).
 server {
     listen 127.0.0.1:{{ wp_nginx_listen_port }};
+    listen 127.0.0.1:{{ wp_nginx_probe_port }};
     server_name {{ wp_host }};
     root {{ wp_site_dir }}/html;
     index index.php;
@@ -20,8 +21,16 @@ server {
     deny all;
 {% endif %}
 
-    # Our own maintenance flag (WordPress ignores a .maintenance file older than 10 minutes); the update job creates and removes it.
+    # Our own maintenance flag (WordPress ignores a .maintenance file older than 10 minutes); the update job creates and removes it. Requests on the probe port ($wp_probe,
+    # reachable only from this VM) skip it, so the job can test the site before it reopens it. (nginx has no "and" in an if: the flag is set, then cleared for the probe.)
+    set $wp_maintenance 0;
     if (-f {{ wp_site_dir }}/maintenance.flag) {
+        set $wp_maintenance 1;
+    }
+    if ($wp_probe) {
+        set $wp_maintenance 0;
+    }
+    if ($wp_maintenance) {
         return 503;
     }
     if ($args ~* "(^|&)author=[0-9]") {

@@ -5,6 +5,7 @@
 # The base RESTARTS nginx: a reload that nginx refuses (a zone redefined with another key) leaves the old config running while every tool says ok; a restart that
 # fails is a failed unit and a red play. A site's vhost keeps the graceful reload. Vars (set by the wrapper):
 #   wp_nginx_listen_port   the loopback port every vhost and the catch-all listen on (cloudflared dials this; terraform/cloudflare wp_origin must match)
+#   wp_nginx_probe_port    a second loopback port on the same vhosts that ignores the maintenance flag ($wp_probe), for the update job's health probe; nothing outside dials it
 #   wp_health_host         a host name only a local curl can send; its vhost answers 200 so the tunnel check can tell "nginx is up" from the catch-all's closed
 #                          connection (both are in host_vars/dellwp/vars.yml)
 #
@@ -52,8 +53,15 @@
               https on;
           }
 
+          # 1 on the probe port: the vhosts skip their maintenance 503 for it. Only a process on this VM can connect there.
+          map $server_port $wp_probe {
+              default 0;
+              {{ wp_nginx_probe_port }} 1;
+          }
+
           server {
               listen 127.0.0.1:{{ wp_nginx_listen_port }} default_server;
+              listen 127.0.0.1:{{ wp_nginx_probe_port }} default_server;
               server_name _;
               return 444;
           }
