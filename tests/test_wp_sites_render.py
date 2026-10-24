@@ -323,6 +323,12 @@ class Assertions(unittest.TestCase):
         self.assertFalse(eval_that(assertions(), base, v["wp_sites"]), "an archive id equal to the scratch id is refused")
         self.assertFalse(eval_that(assertions(), {**v, "wp_archive_quota_id": 1500}, v["wp_sites"]), "an archive id below a backup project id is refused")
         self.assertTrue(eval_that(assertions(), v, v["wp_sites"]))
+        names0 = [t.get("name", "") for t in load("tasks/wp_sites_common.yml")]; t0 = load("tasks/wp_sites_common.yml")
+        quota_at = names0.index("Put the archive of deleted sites in its quota project (tasks/wp_project_quota_common.yml)")
+        stat, stop = t0[names0.index("Look for the archive directory")], t0[names0.index("Stop if the archive directory is missing")]
+        self.assertLess(names0.index("Look for the archive directory"), names0.index("Stop if the archive directory is missing")); self.assertLess(names0.index("Stop if the archive directory is missing"), quota_at)
+        self.assertEqual(stat["ansible.builtin.stat"]["path"], "{{ wp_archive_dir }}"); self.assertIs(stat["check_mode"], False)
+        self.assertIn("wp_data_disk_dellwp.yml", stop["ansible.builtin.assert"]["fail_msg"]); self.assertIn("isdir", stop["ansible.builtin.assert"]["that"][0])
         disk = [t for t in load("tasks/wp_data_disk_common.yml") if t.get("name") == "Make the top-level directories"][0]
         self.assertIn({"name": "archive", "mode": "0700"}, disk["loop"])
         tasks = load("tasks/wp_sites_common.yml"); names = [t.get("name", "") for t in tasks]

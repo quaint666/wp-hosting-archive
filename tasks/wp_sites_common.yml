@@ -67,6 +67,21 @@
 # A closed site is a tombstone: it is in the list so that its name, port and project id are never given to another site, but nothing of it may be on the VM. The PLAY NEVER DELETES
 # DATA: a site whose state was edited to closed by hand, with its directory still there, stops the play here, before anything is deployed. The data goes only through wp-site-delete
 # (python3 scripts/wp_sites.py delete <site>), which makes the archive first and asks for the name to be typed.
+# The archive directory is made by the data disk play (dellwp/wp_data_disk_dellwp.yml). Without it the quota task below fails with a bare lsattr error, even in check mode.
+- name: Look for the archive directory
+  ansible.builtin.stat:
+    path: "{{ wp_archive_dir }}"
+  register: wp_archive_stat
+  check_mode: false
+
+- name: Stop if the archive directory is missing
+  ansible.builtin.assert:
+    that:
+      - wp_archive_stat.stat.isdir | default(false)
+    fail_msg: >-
+      {{ wp_archive_dir }} does not exist. Run dellwp/wp_data_disk_dellwp.yml first: it makes the top-level directories of the data disk, including the archive of deleted sites. Nothing was changed.
+    quiet: true
+
 # The archive of deleted sites sits in a project of its own (the files made below the directory inherit it), so it can never grow past its quota.
 - name: Put the archive of deleted sites in its quota project (tasks/wp_project_quota_common.yml)
   ansible.builtin.include_tasks: wp_project_quota_common.yml
