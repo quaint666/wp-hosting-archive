@@ -1,7 +1,7 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_site_install.sh.j2). Install WordPress into a site that has none:   ssh -t dellwp sudo wp-site-install <site> [--title=T] [--user=U] [--email=E]
 # Asks for the title, the administrator's user name and email (any of them can be given as an option instead, which is what scripts/wp_sites.py does: none of the three is secret), and the
-# password twice at a hidden prompt (14 characters or more; there is no option for it, on purpose). The password goes to WP-CLI on stdin; only
+# password twice at a hidden prompt (14 characters or more; there is no option for it, on purpose). The password goes to WP-CLI on stdin, and what WP-CLI prints is redacted; only
 # its length is ever printed. Then it proves the credentials: the right password must log in and the same password with a letter added must be refused. The site is left
 # discouraging search engines (blog_public 0) until it goes live. Nothing here sends mail (the VM cannot send SMTP).
 set -eu
@@ -34,7 +34,20 @@ ask_secret "Password again: " pw2
 unset pw2
 echo "password: ${#pw} characters, the two entries match" >&2
 
-printf '%s\n' "$pw" | "$WP_BIN/wp-site-cli" "$site" --stdin core install "--url=https://$host" "--title=$title" "--admin_user=$user" "--admin_email=$email" --prompt=admin_password --skip-email
+# WP-CLI's prompt mode keeps the password out of the process list, but then PRINTS the command it built, password included (seen on dellwp 2026-10-24, in a scrollback that was pasted
+# into a chat). Everything it prints goes through redact: the exact password is replaced wherever it appears, and whatever follows --admin_password= is dropped, which also covers
+# the shell-quoted form (a quote in a password is printed as '\'' and would not match the exact value).
+redact() {
+  local l
+  while IFS= read -r l; do
+    l=${l//"$pw"/REDACTED}
+    case $l in *--admin_password=*) l="${l%%--admin_password=*}--admin_password=REDACTED" ;; esac
+    printf '%s\n' "$l"
+  done
+}
+set -o pipefail
+printf '%s\n' "$pw" | "$WP_BIN/wp-site-cli" "$site" --stdin core install "--url=https://$host" "--title=$title" "--admin_user=$user" "--admin_email=$email" --prompt=admin_password --skip-email 2>&1 | redact >&2
+set +o pipefail
 "$WP_BIN/wp-site-cli" "$site" option update blog_public 0
 
 rc=0
