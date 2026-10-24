@@ -164,6 +164,20 @@ class Tools(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, cmd)
                 self.assertEqual(self.log("docker.argv"), "", "docker was called for %r" % (cmd,))
 
+    def test_core_download_is_allowed_only_in_the_one_form_wp_site_recover_uses(self):
+        ok = ("core", "download", "--version=7.1.3", "--force", "--skip-content")
+        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *ok).returncode, 0)
+        self.assertEqual(self.wp_calls(), [(True, list(ok))])
+        for cmd in (("core", "download"), ("core", "download", "--version=7.1.3"), ("core", "download", "--force", "--skip-content"), ("core", "download", "--version=7.1.3", "--force"),
+                    ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--locale=de_DE"), ("core", "download", "--version=7.1.3;id", "--force", "--skip-content"),
+                    ("core", "download", "--version=latest", "--force", "--skip-content"), ("core", "download", "--version=https://evil.example/w.zip", "--force", "--skip-content"),
+                    ("core", "download", "--skip-content", "--force", "--version=7.1.3"), ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--path=/x"),
+                    ("plugin", "install", "x", "--skip-content"), ("plugin", "update", "x", "--force")):
+            with self.subTest(cmd):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *cmd).returncode, 2, cmd)
+                self.assertEqual(self.log("docker.argv"), "", "docker was called for %r" % (cmd,))
+
     def test_user_mode_stays_unrestricted_because_it_is_only_the_web_apps_power(self):
         for cmd in (("eval", "echo 1;"), ("plugin", "activate", "woocommerce"), ("db", "check")):
             self.assertEqual(self.run_tool("wp-site-cli", "wptest", *cmd).returncode, 0, cmd)
@@ -346,6 +360,15 @@ class Tools(unittest.TestCase):
         (self.tmp / "data/sites/wptest/freeze").unlink()
         self.assertEqual(self.run_tool("wp-site-cron", "wptest").returncode, 0)
         self.assertNotEqual(self.log("docker.argv"), "", "with no freeze flag cron must run")
+
+    def test_cron_skips_a_site_in_maintenance_and_counts_it_as_success(self):
+        (self.tmp / "data/sites/wptest/maintenance.flag").write_text("")
+        r = self.run_tool("wp-site-cron", "wptest")
+        self.assertEqual((r.returncode, self.log("docker.argv")), (0, ""))
+        self.assertIn("maintenance", r.stdout)
+        (self.tmp / "data/sites/wptest/maintenance.flag").unlink()
+        self.assertEqual(self.run_tool("wp-site-cron", "wptest").returncode, 0)
+        self.assertNotEqual(self.log("docker.argv"), "", "with the flag gone cron must run again")
 
     def test_cron_fails_when_the_job_fails_so_the_unit_can_alert(self):
         self.assertEqual(self.run_tool("wp-site-cron", "wptest", run_rc=3).returncode, 3)

@@ -11,5 +11,7 @@ require_site "$1"
 for flag in "$WP_FREEZE" "$dir/freeze"; do
   if [ -e "$flag" ]; then echo "wp-site-cron: $site is frozen ($flag exists); skipped"; exit 0; fi
 done
+# A site in maintenance (an update or a recover is changing it) must not run plugin code underneath that job; the next tick picks the events up.
+if [ -e "$dir/maintenance.flag" ]; then echo "wp-site-cron: $site is in maintenance ($dir/maintenance.flag exists); skipped"; exit 0; fi
 exec "$WP_BIN/wp-site-cli" "$site" cron event run --due-now
 {% endraw %}

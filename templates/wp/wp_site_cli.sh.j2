@@ -25,6 +25,7 @@ code_allowed() {
   local cmd=${1:-} sub=${2:-} a
   case "$cmd $sub" in
     "core update"|"core check-update"|"core version"|"core verify-checksums") ;;
+    "core download") [[ "$*" =~ ^core\ download\ --version=[0-9]+\.[0-9]+(\.[0-9]+)?\ --force\ --skip-content$ ]] || die "core download is allowed only as: core download --version=X.Y.Z --force --skip-content (wp-site-recover puts core back with it)"; return 0 ;;
     "plugin install"|"plugin update"|"plugin delete"|"plugin list"|"plugin get"|"plugin status"|"plugin is-installed"|"plugin verify-checksums") ;;
     "theme install"|"theme update"|"theme delete"|"theme list"|"theme get"|"theme status"|"theme is-installed") ;;
     *) die "'$cmd $sub' is not allowed with --code (it runs as root). Run it without --code, as the web app's identity, or use wp-site-ext to install, update or remove plugins and themes." ;;
