@@ -14,6 +14,7 @@ set -eu
 readonly WP_IMAGE='{{ wp_image_cli }}'
 readonly PHP_UID='{{ wp_php_uid }}'
 readonly CLI_MEM='{{ wp_cli_mem_mb }}'
+readonly CLI_TMP='{{ wp_cli_tmp_mb }}'
 readonly CLI_CPUS='{{ wp_cli_cpus }}'
 readonly CLI_PIDS='{{ wp_cli_pids }}'
 {% raw %}
@@ -55,7 +56,7 @@ docker network inspect "wp-${site}_default" >/dev/null 2>&1 || die "the site's n
 
 args=(docker run --rm --name "wpcli_${site}_$$" --network "wp-${site}_default"
   --entrypoint wp --workdir /var/www/html
-  --read-only --tmpfs /tmp:size=128m,mode=1777
+  --read-only --tmpfs /tmp:size=${CLI_TMP}m,mode=1777
   --cap-drop ALL --security-opt no-new-privileges:true
   --memory "${CLI_MEM}m" --memory-swap "${CLI_MEM}m" --cpus "$CLI_CPUS" --pids-limit "$CLI_PIDS"
   -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache)

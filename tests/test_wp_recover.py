@@ -40,14 +40,18 @@ case "$1" in
     esac ;;
   run)
     case "$args" in
+      *" --entrypoint cat "*) printf "<?php\n\$wp_version = '%s';\n" "${IMAGE_CORE:-7.1.3}"; exit 0 ;;
+      *" --entrypoint sh "*)
+        echo reseed >> "$SHIM/order"; [ -f "$SHIM/reseed_fail" ] && exit 1
+        mkdir -p "$SITE/html/wp-includes"; printf "<?php\n\$wp_version = '%s';\n" "${IMAGE_CORE:-7.1.3}" > "$SITE/html/wp-includes/version.php"; exit 0 ;;
       *" core is-installed "*) [ -f "$SHIM/wp_not_installed" ] && exit 1; exit 0 ;;
       *" user list "*) echo "${SHIM_USERS:-2}"; exit 0 ;;
-      *" core verify-checksums "*) echo verify >> "$SHIM/order"; [ -f "$SHIM/verify_fail" ] && exit 1; exit 0 ;;
+      *" core verify-checksums "*) echo verify >> "$SHIM/order"; [ -f "$SHIM/verify_fail" ] && exit 1; [ -f "$SHIM/verify_warn" ] && echo "Warning: File should not exist: x.php"; exit 0 ;;
       *" core download "*)
         echo "download $(echo "$args" | sed -n 's/.*--version=\([0-9.]*\).*/\1/p') root=$(case "$args" in *"--user 0:0"*) echo yes;; *) echo no;; esac)" >> "$SHIM/order"
         [ -f "$SHIM/core_fail" ] && exit 1
         v=$(echo "$args" | sed -n 's/.*--version=\([0-9.]*\).*/\1/p')
-        printf "<?php\n\$wp_version = '%s';\n" "$v" > "$SITE/html/wp-includes/version.php"; : > "$SITE/html/wp-config-sample.php"; exit 0 ;;
+        printf "<?php\n\$wp_version = '%s';\n" "$v" > "$SITE/html/wp-includes/version.php"; exit 0 ;;
     esac ;;
 esac
 exit 0
@@ -77,6 +81,7 @@ class Recover(Base):
         self.undo = self.site / ".recover-undo"
         self.wpc = self.site / "html/wp-content"
         (self.wpc / "uploads/live-only.jpg").write_text("live")
+        (self.site / "html/wp-config-sample.php").write_text("<?php // official sample\n")
         self.put("db_current", ORIGINAL_DB)
         self.snap("20261024T201500Z")
 
@@ -247,35 +252,80 @@ class Recover(Base):
         self.assertEqual(r.returncode, 2); self.assertIn("another recover", r.stderr); self.assert_untouched()
 
     # --- core
-    def test_core_is_put_back_to_the_snapshots_version_by_the_narrow_root_command(self):
-        (self.site / "html/wp-includes/version.php").write_text("<?php\n$wp_version = '7.1.4';\n")
+    def set_core(self, v):
+        (self.site / "html/wp-includes/version.php").write_text("<?php\n$wp_version = '%s';\n" % v)
+
+    def downloads(self):
+        return [o for o in self.order() if o.startswith("download")]
+
+    def test_the_images_own_core_is_reseeded_from_the_image_not_downloaded(self):
+        self.set_core("7.1.4")
         r = self.recover("--yes")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.core(), "7.1.3")
-        self.assertIn("download 7.1.3 root=yes", self.order()); self.assertIn("verify", self.order())
-        self.assertFalse((self.site / "html/wp-config-sample.php").exists(), "the site engine removes the sample on purpose; the download must not leave it")
+        self.assertIn("reseed", self.order()); self.assertEqual(self.downloads(), [])
+        self.assertIn("verify", self.order(), "core is proven after it is put back")
+        self.assertTrue((self.site / "html/wp-config-sample.php").exists(), "wp-config-sample.php is in wordpress.org's checksums: it must never be deleted")
+
+    def test_a_reseed_replaces_wp_admin_and_wp_includes_whole_and_lays_the_files_down_as_root(self):
+        # a newer core's extra files must not survive (verify-checksums would call them "should not exist"), and the image's files are owned by www-data, so tar must not keep that
+        self.set_core("7.1.4")
+        (self.site / "html/wp-admin").mkdir(); (self.site / "html/wp-admin/only-in-7.1.4.php").write_text("x")
+        (self.site / "html/wp-includes/only-in-7.1.4.php").write_text("x")
+        self.assertEqual(self.recover("--yes").returncode, 0)
+        self.assertFalse((self.site / "html/wp-admin").exists()); self.assertFalse((self.site / "html/wp-includes/only-in-7.1.4.php").exists())
+        call = [c for c in self.log("docker.calls").splitlines() if "--entrypoint sh" in c][0]
+        self.assertIn("--no-same-owner", call); self.assertIn("--exclude=./wp-content", call); self.assertIn("--exclude=./wp-config-docker.php", call)
+        self.assertIn("--cap-drop ALL", call); self.assertIn("--memory 256m --memory-swap 256m", call)
+        self.assertIn("%s/html:/var/www/html" % self.site, call)
+
+    def test_any_other_core_version_is_downloaded_by_the_narrow_root_command_and_proven(self):
+        self.snap("20261025T201500Z", core="7.1.2")
+        r = self.recover("20261025T201500Z", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.core(), "7.1.2")
+        self.assertEqual(self.downloads(), ["download 7.1.2 root=yes"]); self.assertNotIn("reseed", self.order()); self.assertIn("verify", self.order())
         self.assertTrue(re.search(r"--force --skip-content", self.log("docker.calls")))
+        self.assertTrue((self.site / "html/wp-config-sample.php").exists())
 
     def test_core_is_left_alone_when_the_version_already_matches(self):
         self.recover("--yes")
-        self.assertFalse([o for o in self.order() if o.startswith("download")])
+        self.assertEqual(self.downloads(), []); self.assertNotIn("reseed", self.order()); self.assertNotIn("verify", self.order())
 
     def test_a_failure_after_a_core_change_puts_core_back_too(self):
-        (self.site / "html/wp-includes/version.php").write_text("<?php\n$wp_version = '7.1.4';\n")
+        self.set_core("7.1.4")   # not the image's: the undo has to download it
         self.put("wp_not_installed", "")
         r = self.recover("--yes")
-        self.assertEqual(r.returncode, 1); self.assertIn("rolled back", r.stderr)
+        self.assertEqual(r.returncode, 1); self.assertIn("rolled back", r.stderr); self.assertNotIn("EXCEPT CORE", r.stderr)
         self.assertEqual(self.core(), "7.1.4", "core is back at the version the site had")
-        self.assertEqual([o for o in self.order() if o.startswith("download")], ["download 7.1.3 root=yes", "download 7.1.4 root=yes"])
+        self.assertEqual([o for o in self.order() if o in ("reseed", "download 7.1.4 root=yes")], ["reseed", "download 7.1.4 root=yes"])
         self.assert_untouched()
 
-    def test_a_core_that_cannot_be_downloaded_is_rolled_back(self):
-        (self.site / "html/wp-includes/version.php").write_text("<?php\n$wp_version = '7.1.4';\n")
+    def test_a_core_download_that_fails_is_rolled_back_when_the_old_core_is_the_images(self):
+        self.snap("20261025T201500Z", core="7.1.2")
         self.put("core_fail", "")
+        r = self.recover("20261025T201500Z", "--yes")
+        self.assertEqual(r.returncode, 1); self.assertIn("could not put core back to 7.1.2", r.stderr); self.assertIn("rolled back", r.stderr)
+        self.assertEqual(self.core(), "7.1.3"); self.assert_untouched()
+
+    def test_when_core_cannot_be_put_back_the_data_is_restored_but_the_site_stays_in_maintenance(self):
+        self.set_core("7.1.4"); self.snap("20261025T201500Z", core="7.1.2")
+        self.put("core_fail", "")   # the download of 7.1.2 fails, and so does the undo's download of 7.1.4
+        r = self.recover("20261025T201500Z", "--yes")
+        self.assertEqual(r.returncode, 1); self.assertIn("ROLLED BACK EXCEPT CORE", r.stderr); self.assertIn("verify-checksums", r.stderr)
+        self.assertEqual(self.db(), ORIGINAL_DB.strip()); self.assertTrue((self.wpc / "uploads/live-only.jpg").exists())
+        self.assertTrue(self.flag.exists(), "a core that does not verify must not serve visitors")
+        self.assertFalse(self.undo.exists(), "the data is back, so the undo material is not left to block the next recover")
+
+    def test_a_checksum_warning_counts_as_a_failure_even_when_the_exit_code_is_zero(self):
+        self.set_core("7.1.4"); self.put("verify_warn", "")
+        r = self.recover("--yes")
+        self.assertEqual(r.returncode, 1); self.assertIn("Warning: File should not exist", r.stderr); self.assertIn("EXCEPT CORE", r.stderr)
+
+    def test_a_reseed_that_fails_is_a_core_failure(self):
+        self.set_core("7.1.4"); self.put("reseed_fail", "")
         r = self.recover("--yes")
         self.assertEqual(r.returncode, 1); self.assertIn("could not put core back to 7.1.3", r.stderr)
-        self.assertEqual(self.core(), "7.1.4")   # the failed download wrote nothing; the undo's own download fails as well here, so the site is left in maintenance
-        self.assertIn("NOT ROLLED BACK", r.stderr); self.assertTrue(self.flag.exists())
 
     # --- what the files promise
     def test_the_tool_is_deployed_and_never_touches_wp_config_or_env(self):
@@ -283,7 +333,7 @@ class Recover(Base):
         self.assertIn("{ src: wp_site_recover.sh.j2, dest: wp-site-recover }", tasks)
         text = (ROOT / "templates/wp/wp_site_recover.sh.j2").read_text()
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
-        self.assertNotIn("wp-config.php", code.replace('"$dir/html/wp-config-sample.php"', "")); self.assertNotIn(".env", code)
+        self.assertNotIn("wp-config.php", code); self.assertNotIn("wp-config-sample", code); self.assertNotIn(".env", code)
         self.assertNotIn("docker restart", text)
 
     def test_the_script_is_run_by_root_tools_only_and_logs_each_outcome(self):

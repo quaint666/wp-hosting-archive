@@ -164,6 +164,12 @@ class Tools(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, cmd)
                 self.assertEqual(self.log("docker.argv"), "", "docker was called for %r" % (cmd,))
 
+    def test_the_cli_tmpfs_is_big_enough_to_unpack_core_and_comes_from_one_variable(self):
+        # 128 MB unpacked 1347 of 3341 files and still reported success (dellwp, 2026-10-24): the size is a variable and must not fall back below what was proven
+        self.run_tool("wp-site-cli", "wptest", "--code", "core", "version")
+        self.assertIn("--tmpfs\n/tmp:size=%sm,mode=1777" % self.v["wp_cli_tmp_mb"], self.log("docker.argv"))
+        self.assertGreaterEqual(self.v["wp_cli_tmp_mb"], 256); self.assertGreaterEqual(self.v["wp_cli_mem_mb"], 768)
+
     def test_core_download_is_allowed_only_in_the_one_form_wp_site_recover_uses(self):
         ok = ("core", "download", "--version=7.1.3", "--force", "--skip-content")
         self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *ok).returncode, 0)

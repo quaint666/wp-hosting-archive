@@ -5,8 +5,9 @@
 #   2. during step 1 the site must have answered 503 while it ran (a request loop in the background) - nginx's maintenance flag, php stopped, then the site back to 200
 #   3. a recover is made to FAIL half way: a copy of the snapshot whose dump passes every check but contains a broken statement is recovered from. The tool must roll back: the
 #      state from before this step (the option "after", the second file) must be exactly there, the flag and the undo directory gone, the site answering
-#   4. with --core: a copy of the snapshot whose MANIFEST says an older core (the previous patch version) is recovered from, so the real core download and its checksum check run; then
-#      the real snapshot is recovered from again, which puts core back to the version the image carries
+#   4. with --core: a copy of the snapshot whose MANIFEST says an older core (the previous patch version) is recovered from, so the real core DOWNLOAD (a version that is not the
+#      image's) and its checksum check run; then the real snapshot is recovered from again, which RESEEDS core from the image (the image's own version is never downloaded). Both
+#      times verify-checksums must exit 0 with no warning, and wp-config-sample.php (in wordpress.org's checksums) must still be there
 # Needs sudo without a password. It leaves the snapshot it made (a real backup) and removes the copies it crafted, on every exit path. The site is offline for about half a minute
 # per recover. It changes one option (recover_rehearsal) and two files under uploads/, and removes them at the end. What it does not prove: that the recover works on a site with
 # real content (run it on a copy first), or that the update job calls it correctly (that job has its own rehearsal).
@@ -82,7 +83,9 @@ if [ "$CORE" = yes ]; then
     check "going forward to $NOW again: exit code" "$RC" 0
     check "core on disk" "$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$DIR/html/wp-includes/version.php" | head -n 1)" "$NOW"
     clean
-    [ ! -e "$DIR/html/wp-config-sample.php" ] && echo "ok: no wp-config-sample.php left" || { echo "FAIL: wp-config-sample.php is back"; FAIL=$((FAIL+1)); }
+    VC=$("$BIN/wp-site-cli" "$SITE" core verify-checksums </dev/null 2>&1); VR=$?
+    [ "$VR" = 0 ] && ! echo "$VC" | grep -q '^Warning' && echo "ok: verify-checksums is clean" || { echo "FAIL: verify-checksums: $(echo "$VC" | head -3 | tr '\n' ' ')"; FAIL=$((FAIL+1)); }
+    [ -f "$DIR/html/wp-config-sample.php" ] && echo "ok: wp-config-sample.php is still there" || { echo "FAIL: wp-config-sample.php is gone"; FAIL=$((FAIL+1)); }
     check "the home page answers" "$(http /)" 200
   fi
 fi

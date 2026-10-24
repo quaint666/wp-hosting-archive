@@ -1,7 +1,8 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_site_recover.sh.j2). Put a site back to one of its snapshots, IN PLACE:   wp-site-recover <site> [<stamp>|latest] [--yes] [--no-undo]
 # The dangerous sibling of wp-site-restore (a drill that never touches the site). It REPLACES the site's database and wp-content with the snapshot's, and puts core back to the
-# version the snapshot recorded (core is not in the snapshot: it came from the image once and has changed only through WP-CLI since). Used by hand, and by the update job to roll back.
+# version the snapshot recorded (core is not in the snapshot: it came from the image once and has changed only through WP-CLI since). The image's own version is reseeded from the
+# image (no download); any other version is downloaded from wordpress.org, and either way core must pass wp-site-cli's verify-checksums with no warning before the site opens. Used by hand, and by the update job to roll back.
 # Everything between "the site was as it was" and "the site is as the snapshot was" is one transaction:
 #   1. the snapshot is checked (complete, the dump passes gzip -t and has its completion marker and a wp_options table), the site's database is healthy, one recover at a time
 #   2. at a terminal you type the site's name to go on; --yes skips that (the update job). The maintenance flag goes up (nginx answers 503; wp-site-cron skips while it exists)
@@ -15,6 +16,7 @@
 set -eEu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
+readonly IMG_PHP='{{ wp_image_php }}'
 {% raw %}
 usage() { echo "usage: wp-site-recover <site> [<stamp>|latest] [--yes] [--no-undo]" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage
@@ -36,7 +38,7 @@ src=$BACKUPS/$site/$stamp
 db=wp_${site//-/_}_db; php=wp_${site//-/_}_php
 flag=$dir/maintenance.flag; undo_dir=$dir/.recover-undo
 unit=wp-$site.service
-PHASE=checking; FAILED=""; made_flag=no; php_stopped=no; core_changed=no; old_core=""
+PHASE=checking; FAILED=""; made_flag=no; php_stopped=no; core_changed=no; old_core=""; img_core=""
 
 # --- 1. checks (nothing has been touched yet)
 [ -f "$src/db.sql.gz" ] && [ -f "$src/MANIFEST" ] && [ -d "$src/files" ] || die "$src is not a complete snapshot"
@@ -47,6 +49,10 @@ snap_core=$(sed -n 's/^core=//p' "$src/MANIFEST" | head -n 1)
 [[ $snap_core =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || die "the snapshot's MANIFEST has no usable core version ('$snap_core')"
 [ "$(docker inspect -f '{{.State.Health.Status}}' "$db" </dev/null 2>/dev/null)" = healthy ] || die "the database container $db is not healthy; start the site first (systemctl start $unit)"
 [ ! -e "$undo_dir" ] || die "$undo_dir exists: an earlier recover died. It holds that site's previous state; look at it, then remove it by hand"
+if [ "$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/version.php" | head -n 1)" != "$snap_core" ]; then
+  img_core=$(docker run --rm --entrypoint cat --cap-drop ALL --memory 64m --memory-swap 64m "$IMG_PHP" /usr/src/wordpress/wp-includes/version.php </dev/null | sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" | head -n 1)
+  [ -n "$img_core" ] || die "could not read the image's core version from $IMG_PHP"
+fi
 exec 9>"$dir/.recover.lock"
 flock -n 9 || die "another recover of $site is running"
 
@@ -61,21 +67,28 @@ wipe_tables() {
   done < <(echo "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'" | dbq)
   echo "$sql" | dbq
 }
-core_to() {   # exactly this core version from wordpress.org (checksums are verified by wp-site-cli afterwards); --force is what allows an older one
-  "$WP_BIN/wp-site-cli" "$site" --code core download "--version=$1" --force --skip-content </dev/null || return 1
-  rm -f -- "$dir/html/wp-config-sample.php"   # the download brings it back; the site engine removes it on purpose
-  "$WP_BIN/wp-site-cli" "$site" --code core verify-checksums </dev/null
+reseed_core() {   # the image's core, as the site engine's seed lays it down: wp-admin and wp-includes are replaced whole (so a newer core's extra files go), root-owned, no wp-content
+  rm -rf -- "$dir/html/wp-admin" "$dir/html/wp-includes" || return 1
+  docker run --rm --entrypoint sh --cap-drop ALL --security-opt no-new-privileges:true --memory 256m --memory-swap 256m --pids-limit 64 -v "$dir/html:/var/www/html" "$IMG_PHP" \
+    -c 'cd /usr/src/wordpress && tar cf - --exclude=./wp-content --exclude=./wp-config-docker.php . | tar xf - --no-same-owner -C /var/www/html' </dev/null
+}
+core_to() {   # core at exactly this version, then proof: verify-checksums must exit 0 with no warning (a download can say "Success" and leave files short: seen with a small /tmp)
+  if [ "$1" = "$img_core" ]; then reseed_core || return 1
+  else "$WP_BIN/wp-site-cli" "$site" --code core download "--version=$1" --force --skip-content </dev/null || return 1; fi
+  local out; out=$("$WP_BIN/wp-site-cli" "$site" --code core verify-checksums 2>&1 </dev/null) || { printf '%s\n' "$out" >&2; return 1; }
+  ! printf '%s' "$out" | grep -q '^Warning' || { printf '%s\n' "$out" >&2; return 1; }
 }
 reload_php() { systemctl reload "$unit" </dev/null; php_stopped=no; }
 
-# put back what step 3 set aside; a function that returns non-zero if any part failed, so the caller can say so
+# put back what step 3 set aside. Returns non-zero if the database or wp-content could not be put back; core is reported apart, in undo_core (ok, fail or na)
+undo_core=na
 undo_all() {
   local rc=0
   echo "UNDOING: putting back the database and wp-content that were there before" >&2
   docker stop -t 15 "$php" </dev/null >/dev/null 2>&1 || true
   if [ -d "$undo_dir/wp-content" ]; then rm -rf -- "$dir/html/wp-content" && mv -- "$undo_dir/wp-content" "$dir/html/wp-content" || rc=1; fi
   if [ -f "$undo_dir/db.sql.gz" ]; then wipe_tables && gzip -dc "$undo_dir/db.sql.gz" | dbq || rc=1; fi
-  if [ "$core_changed" = yes ]; then core_to "$old_core" || rc=1; fi
+  if [ "$core_changed" = yes ]; then if core_to "$old_core"; then undo_core=ok; else undo_core=fail; fi; fi
   reload_php || rc=1
   return "$rc"
 }
@@ -86,7 +99,10 @@ finish() {
   if [ "$rc" != 0 ]; then
     local undone=yes
     if [ "$PHASE" = swapping ]; then
-      if [ "$undo" = yes ] && undo_all; then rm -rf -- "$undo_dir"; echo "rolled back: $site is as it was before this recover" >&2
+      if [ "$undo" = yes ] && undo_all; then
+        rm -rf -- "$undo_dir"
+        if [ "$undo_core" = fail ]; then undone=no; echo "ROLLED BACK EXCEPT CORE: the database and wp-content are as they were, but core ($old_core) does not verify. $site stays in maintenance: check with  wp-site-cli $site --code core verify-checksums  and remove $flag when it passes" >&2
+        else echo "rolled back: $site is as it was before this recover" >&2; fi
       else undone=no; echo "NOT ROLLED BACK: $site is in an unknown state and stays in maintenance (undo material, if any: $undo_dir)" >&2; fi
     else
       rm -rf -- "$undo_dir"   # nothing was replaced yet: only the dump of the current database can be in it

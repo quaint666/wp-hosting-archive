@@ -50,7 +50,10 @@ wp_sites:
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.
 wp_tools_bin: /usr/local/sbin
 wp_tools_lib: /usr/local/lib/wp-tools
-wp_cli_mem_mb: 384
+# WP-CLI unpacks a core download into /tmp: with 128 MB it unpacked 1347 of 3341 files, truncated others and still said "Success" (A/B on dellwp, 2026-10-24); 256 MB unpacked all
+# and verified. tmpfs pages count against the container's memory, and 256 MB of /tmp was proven together with 768 MB of memory, so these two move together.
+wp_cli_mem_mb: 768
+wp_cli_tmp_mb: 256
 wp_cli_cpus: 1.0
 wp_cli_pids: 128
 
