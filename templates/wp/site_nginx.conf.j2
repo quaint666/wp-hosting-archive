@@ -1,4 +1,18 @@
 # Managed by Ansible (templates/wp/site_nginx.conf.j2). Site {{ wp_s.name }} ({{ wp_s.state }}). Needs the base in wp_base.conf ($wp_https, the wp_login_attempts zone).
+{% if wp_s.state == 'stopped' %}
+# Stopped: no containers behind this name. Visitors get a plain 503 "paused" page (with a Retry-After); nothing is passed to php, no file is served, no limit zone is needed. The text is
+# what scripts/wp_sites_status.py and the tools look for.
+server {
+    listen 127.0.0.1:{{ wp_nginx_listen_port }};
+    listen 127.0.0.1:{{ wp_nginx_probe_port }};
+    server_name {{ wp_host }};
+    access_log /var/log/nginx/wp_{{ wp_s.name }}.access.log;
+    error_log /var/log/nginx/wp_{{ wp_s.name }}.error.log;
+    default_type text/plain;
+    add_header Retry-After 3600 always;
+    return 503 "This site is paused.\n";
+}
+{% else %}
 server {
     listen 127.0.0.1:{{ wp_nginx_listen_port }};
     listen 127.0.0.1:{{ wp_nginx_probe_port }};
@@ -77,3 +91,4 @@ server {
         fastcgi_read_timeout 60s;
     }
 }
+{% endif %}

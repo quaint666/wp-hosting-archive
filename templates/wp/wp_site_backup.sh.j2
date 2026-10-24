@@ -7,6 +7,9 @@
 # It is built in a hidden .partial-* directory and renamed into place only when everything checked out, so a half-made snapshot never looks like a backup. Core is not
 # saved: it comes from the image (the restore seeds it), and wp-config.php and .env are rendered from the repo and the vault. Snapshots live in their own quota project, so
 # the first one is a real copy (a hard link across projects is refused) and the later ones link inside it.
+# --tag=final (wp_sites.py stop): the last backup of a site that is about to stop. The site is put in maintenance (nginx answers 503, cron skips) before the dump, so nothing can be written
+# between this snapshot and the stop; on success the flag STAYS UP (the stop's play takes it away once the containers are down; run by hand, remove it yourself or stop the site), on a
+# failure it comes down again. A flag that was already up is never touched. Tagged snapshots are kept on their own: the newest {{ wp_backup_keep_final }} final one, and what is said below for pre-update.
 # --tag=pre-update (the update job): the snapshot is marked in its MANIFEST (tag=pre-update) and pruned on its own: the newest {{ wp_backup_keep_preupdate }} tagged snapshots are kept and they do not count
 # towards the daily and weekly ones. Retention: the newest {{ wp_backup_keep_daily }} untagged snapshots, plus the newest of each of the {{ wp_backup_keep_weekly }} calendar weeks (ISO) before the oldest of those. FREEZE: like every per-site
 # job, a backup is skipped (as a success) while a freeze flag exists ({{ wp_freeze_file }} or the site's own freeze file): a frozen site and its backup set stay exactly as they are.
@@ -19,23 +22,27 @@ readonly BACKUPS='{{ wp_backup_dir }}'
 readonly KEEP_DAILY='{{ wp_backup_keep_daily }}'
 readonly KEEP_WEEKLY='{{ wp_backup_keep_weekly }}'
 readonly KEEP_PRE='{{ wp_backup_keep_preupdate }}'
+readonly KEEP_FINAL='{{ wp_backup_keep_final }}'
 {% raw %}
-usage() { echo "usage: wp-site-backup <site> [--force] [--tag=pre-update]" >&2; exit 2; }
+usage() { echo "usage: wp-site-backup <site> [--force] [--tag=pre-update|--tag=final]" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage
 require_site "$1"; shift
 force=no; tag=""
-for a in "$@"; do case $a in --force) force=yes ;; --tag=pre-update) tag=pre-update ;; *) usage ;; esac; done
+for a in "$@"; do case $a in --force) force=yes ;; --tag=pre-update) tag=pre-update ;; --tag=final) tag=final ;; *) usage ;; esac; done
 frozen=""
 for flag in "$WP_FREEZE" "$dir/freeze"; do [ -e "$flag" ] && frozen=$flag; done
 if [ -n "$frozen" ] && [ "$force" = no ]; then echo "wp-site-backup: $site is frozen ($frozen exists); skipped (--force backs up anyway)"; exit 0; fi
+refuse_if_stopped
 dest=$BACKUPS/$site
 [ -d "$dest" ] || die "$dest does not exist (run dellwp/wp_sites_dellwp.yml)"
 [ -f "$dir/wp-config.php" ] && [ -d "$dir/html/wp-content" ] || die "the site is not set up under $dir"
 umask 077
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 partial=$dest/.partial-$stamp
-cleanup() { rm -rf -- "$partial"; }
+made_flag=no; keep_flag=no
+cleanup() { rm -rf -- "$partial"; if [ "$made_flag" = yes ] && [ "$keep_flag" = no ]; then rm -f -- "$dir/maintenance.flag"; fi; }
 trap cleanup EXIT
+if [ "$tag" = final ] && [ ! -e "$dir/maintenance.flag" ]; then touch -- "$dir/maintenance.flag"; made_flag=yes; fi   # quiet the site before the dump; someone else's flag is left alone
 mkdir -- "$partial"
 db=wp_${site//-/_}_db
 
@@ -68,6 +75,7 @@ core=$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/versio
 [ ! -e "$dest/$stamp" ] || die "snapshot $stamp already exists (two runs in the same second?)"
 mv -- "$partial" "$dest/$stamp"
 trap - EXIT
+[ "$made_flag" = no ] || echo "final backup taken: $site is in maintenance and stays so ($dir/maintenance.flag) until it is stopped; remove that file to bring it back"
 echo "$stamp" > "$dest/.last-success"
 echo "OK: snapshot $stamp of $site ($(grep '^kbytes=' "$dest/$stamp/MANIFEST" | cut -d= -f2) KiB on disk, core $core)"
 
@@ -75,9 +83,11 @@ echo "OK: snapshot $stamp of $site ($(grep '^kbytes=' "$dest/$stamp/MANIFEST" | 
 if [ -n "$frozen" ]; then echo "frozen ($frozen exists): backed up because of --force; nothing is pruned"; exit 0; fi
 week() { local d=${1:0:8}; date -u -d "${d:0:4}-${d:4:2}-${d:6:2}" +%G-%V; }
 mapfile -t all < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort -r)
-plain=(); pre=()
+plain=(); pre=(); fin=()
 for s in "${all[@]}"; do
-  if grep -qx 'tag=pre-update' "$dest/$s/MANIFEST" 2>/dev/null; then pre+=("$s"); else plain+=("$s"); fi
+  if grep -qx 'tag=pre-update' "$dest/$s/MANIFEST" 2>/dev/null; then pre+=("$s")
+  elif grep -qx 'tag=final' "$dest/$s/MANIFEST" 2>/dev/null; then fin+=("$s")
+  else plain+=("$s"); fi
 done
 keep=" "; n=0; seen=" "; oldest_week=""
 for s in "${plain[@]}"; do
@@ -93,6 +103,10 @@ done
 p=0
 for s in "${pre[@]}"; do
   if [ "$p" -lt "$KEEP_PRE" ]; then keep+="$s "; p=$((p + 1)); fi
+done
+f=0
+for s in "${fin[@]}"; do
+  if [ "$f" -lt "$KEEP_FINAL" ]; then keep+="$s "; f=$((f + 1)); fi
 done
 for s in "${all[@]}"; do
   case "$keep" in *" $s "*) ;; *) rm -rf -- "${dest:?}/$s"; echo "pruned $s" ;; esac

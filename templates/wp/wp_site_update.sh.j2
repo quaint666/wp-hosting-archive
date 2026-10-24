@@ -3,10 +3,13 @@
 # Run by wp-update@<site>.timer every night before the backup. What it does depends on the site's `update_policy:` (wp_sites; the default is notify):
 #   auto    apply what is available (below)            notify  tell ntfy what is available, once per set, and change nothing
 #   freeze  do nothing
-# --check lists what is available and changes nothing (any policy). --apply is the operator doing it by hand: it applies whatever the policy says and retries a set that failed before.
+# --check lists what is available and changes nothing (any policy). --apply is the operator doing it by hand: it applies everything available, major plugin and theme updates included, and retries a
+# set that failed before.
 # A freeze flag ({{ wp_freeze_file }} or the site's own freeze file) always wins: the site stays exactly as it is.
-# What is updated: WordPress core minor and security releases (a major is the operator's decision), and the plugins and themes that wordpress.org offers a newer version of. A plugin or
-# theme whose directory name is not a wordpress.org slug is listed as one the operator must handle, never passed on. Nothing is touched when nothing is available.
+# What `auto` updates: WordPress core minor and security releases, and the plugins and themes that wordpress.org offers a newer version of, EXCEPT majors (the first number of the version
+# changes, or a version does not start with a number): those are held, and ntfy tells you once per held set; --apply applies them. A major core release (a new X.Y) is only ever
+# reported, once per release, never applied by this job. A plugin or theme whose directory name is not a wordpress.org slug is listed as one the operator must handle, never passed on.
+# Nothing is touched when nothing is available.
 # Applying, in this order, and the site is in maintenance (nginx answers 503, cron skips, so no write can arrive) from the snapshot until it has been proven:
 #   1. the maintenance flag goes up, then a snapshot tagged pre-update (wp-site-backup --tag=pre-update); if that fails nothing has changed and the flag comes down
 #   2. core (minor), then wp-site-cli's verify-checksums, which must exit 0 with no warning; plugins and themes by name through wp-site-ext (plugins are checked against wordpress.org's
@@ -33,10 +36,11 @@ usage() { echo "usage: wp-site-update <site> [--check | --apply]" >&2; exit 2; }
 require_site "$1"; shift
 mode=policy
 for a in "$@"; do case $a in --check) mode=check ;; --apply) mode=apply ;; *) usage ;; esac; done
+refuse_if_stopped
 policy=""
 for p in $POLICIES; do [ "${p%%:*}" = "$site" ] && policy=${p#*:}; done
 case $policy in auto|notify|freeze) ;; *) die "no valid update policy for $site ('$policy'): run dellwp/wp_sites_dellwp.yml" ;; esac
-flag=$dir/maintenance.flag; last=$dir/.update-last; notified=$dir/.update-notified; failed_set=$dir/.update-failed
+flag=$dir/maintenance.flag; last=$dir/.update-last; notified=$dir/.update-notified; failed_set=$dir/.update-failed; held_marker=$dir/.update-held; core_major_file=$dir/.update-core-major
 php=wp_${site//-/_}_php; unit=wp-$site.service
 cli() { "$WP_BIN/wp-site-cli" "$site" "$@" </dev/null; }
 say() { echo "wp-site-update: $*"; }
@@ -53,44 +57,80 @@ flock -n 9 || die "another update of $site is running"
 
 # --- what is available (read-only; core and the listings run without any plugin's code)
 # check-update prints the version, or nothing but a "Success: ... latest version" line: count only what looks like a version
+versions_in() { grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -n 1 || true; }
 core_out=$(cli --code core check-update --minor --field=version)
-core_new=$(printf '%s\n' "$core_out" | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -n 1 || true)
+core_new=$(printf '%s\n' "$core_out" | versions_in)
 core_n=0; [ -z "$core_new" ] || core_n=1
-plugins=(); themes=(); manual=()
+core_major_out=$(cli --code core check-update --major --field=version)   # a new X.Y release: reported, never applied by this job
+core_major=$(printf '%s\n' "$core_major_out" | versions_in)
 list_updates() {   # kind -> "slug old new" lines
   cli "$1" list --update=available --fields=name,version,update_version --format=csv --skip-plugins --skip-themes | tail -n +2 | tr ',' ' '
 }
 plugin_list=$(list_updates plugin)   # captured first: a failing listing must stop the job, not look like "nothing to update"
 theme_list=$(list_updates theme)
-while read -r name old new; do
-  [ -n "${name:-}" ] || continue
-  if [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then plugins+=("$name:$old>$new"); else manual+=("plugin:$name"); fi
-done <<< "$plugin_list"
-while read -r name old new; do
-  [ -n "${name:-}" ] || continue
-  if [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then themes+=("$name:$old>$new"); else manual+=("theme:$name"); fi
-done <<< "$theme_list"
-desc=""
+# A major update is one where the first number of the version changes (or either version does not start with a number: not understood, so not assumed safe). Under `auto` a major is
+# HELD for the operator; `--apply` (the operator choosing) applies everything. Under notify and --check nothing is applied, so every update is listed and majors are marked.
+is_major() {
+  local a=${1%%[!0-9]*} b=${2%%[!0-9]*}
+  [ -n "$a" ] && [ -n "$b" ] && [ $((10#$a)) -eq $((10#$b)) ] && return 1
+  return 0
+}
+hold_majors=no; [ "$mode" = policy ] && [ "$policy" = auto ] && hold_majors=yes
+plugins=(); themes=(); held=(); manual=()
+sort_updates() {   # kind list -> fills plugins/themes (to apply), held (majors under auto) and manual (not a wordpress.org slug)
+  local kind=$1 name old new mark
+  while read -r name old new; do
+    [ -n "${name:-}" ] || continue
+    if ! [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then manual+=("$kind:$name"); continue; fi
+    mark=""; if is_major "$old" "$new"; then mark="[MAJOR]"; fi
+    if [ "$hold_majors" = yes ] && [ -n "$mark" ]; then held+=("$kind:$name:$old>$new$mark")
+    elif [ "$kind" = plugin ]; then plugins+=("$name:$old>$new$mark")
+    else themes+=("$name:$old>$new$mark"); fi
+  done <<< "$2"
+}
+sort_updates plugin "$plugin_list"
+sort_updates theme "$theme_list"
+desc=""   # what would be applied
 [ -z "$core_new" ] || desc+="core $core_new; "
 [ "${#plugins[@]}" = 0 ] || desc+="plugins ${plugins[*]}; "
 [ "${#themes[@]}" = 0 ] || desc+="themes ${themes[*]}; "
-[ "${#manual[@]}" = 0 ] || desc+="NOT by this job (the name is not a wordpress.org slug) ${manual[*]}; "
 desc=${desc%; }
+held_desc="${held[*]}"; manual_desc="${manual[*]}"
+full_desc=$desc
+[ -z "$held_desc" ] || full_desc+="${full_desc:+; }HELD (major, not applied by auto) $held_desc"
+[ -z "$manual_desc" ] || full_desc+="${full_desc:+; }NOT by this job (the name is not a wordpress.org slug) $manual_desc"
 todo=$(( ${#plugins[@]} + ${#themes[@]} + (core_n > 0 ? 1 : 0) ))
-set_id=$(printf '%s' "$desc" | sha256sum | cut -c1-16)
+set_id=$(printf '%s' "$desc" | sha256sum | cut -c1-16)          # the set that would be applied: what a rollback is remembered by
+full_id=$(printf '%s' "$full_desc" | sha256sum | cut -c1-16)    # everything that is waiting: what the notify policy tells once
 
-if [ "$todo" = 0 ] && [ "${#manual[@]}" = 0 ]; then say "nothing to update on $site"; record none; exit 0; fi
-if [ "$mode" = check ]; then say "available on $site: ${desc:-nothing}"; exit 0; fi
+# a major core release is told once per release, under auto and notify; this job never applies one (a major WordPress release is the operator's decision, with a snapshot first)
+if [ "$mode" = policy ] && [ -n "$core_major" ] && [ "$(cat "$core_major_file" 2>/dev/null || true)" != "$core_major" ]; then
+  tell "WordPress $core_major is available for $site: a major release, which this job never applies. When you decide: ssh -t $HOST_NAME sudo wp-site-backup $site, then ssh -t $HOST_NAME sudo wp-site-cli $site --code core update"
+  echo "$core_major" > "$core_major_file"
+fi
 
-if [ "$todo" = 0 ]; then   # only updates this job never applies (not wordpress.org slugs): tell the operator once
-  say "$site: only updates this job does not apply: $desc"; record manual-only "$set_id"
-  [ "$(cat "$notified" 2>/dev/null || true)" = "$set_id" ] || { tell "$site has updates the operator must do by hand: $desc"; echo "$set_id" > "$notified"; }
+if [ "$todo" = 0 ] && [ "${#manual[@]}" = 0 ] && [ "${#held[@]}" = 0 ]; then say "nothing to update on $site"; record none; exit 0; fi
+if [ "$mode" = check ]; then
+  say "available on $site: ${full_desc:-nothing}${core_major:+; core $core_major is a major release (this job never applies one)}"; exit 0
+fi
+
+# majors held under auto, told once per held set
+if [ "${#held[@]}" -gt 0 ]; then
+  held_id=$(printf '%s' "$held_desc" | sha256sum | cut -c1-16)
+  if [ "$(cat "$held_marker" 2>/dev/null || true)" != "$held_id" ]; then
+    tell "$site has MAJOR updates that the nightly job holds for you: $held_desc. The rest is applied normally. To apply these too: ssh -t $HOST_NAME sudo wp-site-update $site --apply (everything available, majors included, with a snapshot first and a rollback)"
+    echo "$held_id" > "$held_marker"
+  fi
+fi
+if [ "$todo" = 0 ]; then   # nothing this job may apply: only held majors and/or names that are not wordpress.org slugs
+  say "$site: nothing for this job to apply: ${full_desc}"; record "$([ "${#held[@]}" -gt 0 ] && echo held-only || echo manual-only)" "$full_id"
+  if [ "${#manual[@]}" -gt 0 ] && [ "$(cat "$notified" 2>/dev/null || true)" != "$full_id" ]; then tell "$site has updates the operator must do by hand: $manual_desc"; echo "$full_id" > "$notified"; fi
   exit 0
 fi
 if [ "$mode" = policy ] && [ "$policy" = notify ]; then
-  if [ "$(cat "$notified" 2>/dev/null || true)" = "$set_id" ]; then say "$site: the same updates are still waiting (told already): $desc"; exit 0; fi
-  tell "updates are waiting on $site: $desc. Apply them: ssh -t $HOST_NAME sudo wp-site-update $site --apply"
-  echo "$set_id" > "$notified"; record notified "$set_id"; say "told ntfy: $desc"; exit 0
+  if [ "$(cat "$notified" 2>/dev/null || true)" = "$full_id" ]; then say "$site: the same updates are still waiting (told already): $full_desc"; exit 0; fi
+  tell "updates are waiting on $site: $full_desc. Apply them: ssh -t $HOST_NAME sudo wp-site-update $site --apply"
+  echo "$full_id" > "$notified"; record notified "$full_id"; say "told ntfy: $full_desc"; exit 0
 fi
 if [ "$mode" = policy ] && [ "$(cat "$failed_set" 2>/dev/null || true)" = "$set_id" ]; then
   say "$site: this set failed before and was rolled back; not retrying (wp-site-update $site --apply does): $desc"; exit 0; fi

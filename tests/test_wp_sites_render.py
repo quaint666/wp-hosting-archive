@@ -9,6 +9,7 @@ it catches a broken template, a wrong expression and a limit that no longer fits
 import copy
 import hashlib
 import random
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +22,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def load(path):
     return yaml.safe_load((ROOT / path).read_text())
+
+
+# The suites must not depend on which sites the repo happens to declare: sites come and go (a deleted site stays as a closed tombstone, and one day every real site may be closed). Everything
+# here is the real variables EXCEPT wp_sites, which is one fixed live site. The one test that must look at the real list (it has to fit the rules of the play) asks for it by name.
+FIXTURE_SITE = {"name": "wptest", "port": 9101, "quota_id": 1001, "state": "live", "update_policy": "auto"}
+
+
+def fixture_vars_text():
+    """host_vars/dellwp/vars.yml with its wp_sites list replaced by FIXTURE_SITE, comments and every other variable untouched."""
+    lines = (ROOT / "host_vars/dellwp/vars.yml").read_text().split("\n")
+    top = next(i for i, l in enumerate(lines) if re.match(r"^wp_sites:\s*(#.*)?$", l))
+    end = next(i for i in range(top + 1, len(lines)) if lines[i] and not lines[i].startswith(" "))
+    lines[top + 1:end] = ["  - name: %s" % FIXTURE_SITE["name"]] + ["    %s: %s" % (k, v) for k, v in FIXTURE_SITE.items() if k != "name"] + [""]
+    return "\n".join(lines)
 
 
 def env():
@@ -37,6 +52,8 @@ def base_vars():
     v = {}
     v.update(load("vars/wp.yml"))
     v.update(load("host_vars/dellwp/vars.yml"))
+    v["real_wp_sites"] = v["wp_sites"]
+    v["wp_sites"] = [dict(FIXTURE_SITE)]
     v["wp_master_secret"] = "stub-master-secret"
     # Ansible templates variables that refer to other variables (wp_image_cli is built from two lines): do the same here, so a test sees the value the play would use.
     e = jinja2.Environment(undefined=jinja2.StrictUndefined)
@@ -218,6 +235,23 @@ class Render(unittest.TestCase):
         origin = __import__("re").search(r'variable "wp_origin" \{[^}]*default\s*=\s*"([^"]+)"', tf).group(1)
         self.assertEqual(origin, "http://127.0.0.1:%s" % main, "terraform's wp_origin must be the visitor port, never the probe port")
 
+    def test_a_stopped_site_answers_a_paused_page_and_nothing_else(self):
+        self.ctx["wp_s"] = {**self.ctx["wp_s"], "state": "stopped"}
+        conf = self.render("site_nginx.conf.j2")
+        self.assertIn('return 503 "This site is paused.\\n";', conf); self.assertEqual(conf.count("server {"), 1); self.assertEqual(conf.count("{"), conf.count("}"))
+        for needle in ("fastcgi", "root ", "try_files", "limit_req", "maintenance.flag", "location"):
+            self.assertNotIn(needle, conf, "a stopped site serves and passes nothing: " + needle)
+        for port in (self.v["wp_nginx_listen_port"], self.v["wp_nginx_probe_port"]):
+            self.assertIn("listen 127.0.0.1:%s;" % port, conf)
+        self.assertIn("server_name %s;" % self.ctx["wp_host"], conf)
+        for state in ("hold", "live"):
+            self.ctx["wp_s"] = {**self.ctx["wp_s"], "state": state}
+            self.assertNotIn("paused", self.render("site_nginx.conf.j2"), state)
+
+    def test_the_status_tool_on_the_host_recognises_the_paused_vhost(self):
+        sh = (ROOT / "templates/wp/wp_sites_status.sh.j2").read_text()
+        self.assertIn('return 503 "This site is paused', sh); self.assertIn("actual=stopped", sh)
+
     def test_nginx_base_defines_what_the_vhost_uses(self):
         base = (ROOT / "tasks/wp_nginx_base_common.yml").read_text()
         for needle in ("$wp_https", "zone=wp_login_attempts:", "map $request_uri $wp_login_key"):
@@ -252,7 +286,84 @@ class Assertions(unittest.TestCase):
         return eval_that(self.that, self.v, sites)
 
     def test_the_real_list_fits(self):
+        # the one test that looks at the repo's own list: whatever it holds now (closed tombstones included) must pass the rules of the play
+        self.assertTrue(self.ok(self.v["real_wp_sites"]), "the sites in host_vars/dellwp/vars.yml break the play's own rules")
         self.assertTrue(self.ok(self.good))
+
+    def test_a_closed_site_is_a_tombstone_that_keeps_its_ids_and_holds_no_ram_and_no_disk(self):
+        small = {"quota_mb": 512, "backup_quota_mb": 512}
+        gone = {"name": "gone", "port": 9150, "quota_id": 1050, "state": "closed", **small}
+        live = {"name": "alive", "port": 9151, "quota_id": 1051, "state": "live", **small}
+        self.assertTrue(self.ok([live, gone]), "closed is a valid state")
+        for label, other in (("name", {**live, "name": "gone"}), ("port", {**live, "port": 9150}), ("quota project id", {**live, "quota_id": 1050})):
+            self.assertFalse(self.ok([other, gone]), "a new site cannot take a closed site's %s" % label)
+        # no RAM and no disk: a list that is too big for either fits once the extra sites are closed
+        mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
+        n = (6144 - self.v["wp_vm_ram_reserve_mb"]) // mem + 3
+        many = [{"name": "s%d" % i, "port": 9200 + i, "quota_id": 1100 + i, "state": "hold", **small} for i in range(n)]
+        self.assertFalse(self.ok(many)); self.assertTrue(self.ok(many[:3] + [{**s, "state": "closed"} for s in many[3:]]))
+        big = [{"name": "b%d" % i, "port": 9300 + i, "quota_id": 1200 + i, "state": "hold", "quota_mb": 15000, "backup_quota_mb": 15000} for i in range(2)]
+        self.assertFalse(self.ok(big)); self.assertTrue(self.ok([big[0], {**big[1], "state": "closed"}]))
+
+    def test_the_play_refuses_to_deploy_while_a_closed_site_still_has_data_and_never_deletes_any(self):
+        tasks = load("tasks/wp_sites_common.yml")
+        names = [t.get("name", "") for t in tasks]
+        first_deploy = names.index("Deploy each site that exists (tasks/wp_site_one_common.yml)")
+        for n in ("Look for the site directories of the closed sites", "Look for the backup directories of the closed sites", "Stop if a closed site still has its data on the VM"):
+            self.assertLess(names.index(n), first_deploy, n + " must come before anything is deployed")
+        stat_dirs = tasks[names.index("Look for the site directories of the closed sites")]; stat_bk = tasks[names.index("Look for the backup directories of the closed sites")]
+        self.assertEqual(stat_dirs["ansible.builtin.stat"]["path"], "{{ wp_data_mount }}/sites/{{ item.name }}"); self.assertEqual(stat_bk["ansible.builtin.stat"]["path"], "{{ wp_backup_dir }}/{{ item.name }}")
+        for t in (stat_dirs, stat_bk):
+            self.assertIs(t["check_mode"], False, "stat is read-only: it must also run in check mode"); self.assertIn("'closed'", t["loop"])
+        stop = tasks[names.index("Stop if a closed site still has its data on the VM")]
+        self.assertEqual(stop["ansible.builtin.assert"]["that"], ["not item.stat.exists"]); self.assertIn("never deletes data", stop["ansible.builtin.assert"]["fail_msg"])
+        self.assertIn("wp_closed_dirs.results + wp_closed_backups.results", stop["loop"])
+        deploy = tasks[first_deploy]; tomb = tasks[names.index("Remove what a closed site left behind (tasks/wp_site_closed_common.yml)")]
+        self.assertIn("rejectattr('state', 'eq', 'closed')", deploy["loop"]); self.assertIn("selectattr('state', 'eq', 'closed')", tomb["loop"])
+        # the tombstone tasks delete no data: only the stack's unit, the vhost and the timers
+        closed = load("tasks/wp_site_closed_common.yml")
+        text = (ROOT / "tasks/wp_site_closed_common.yml").read_text()
+        for forbidden in ("/sites/", "wp_data_mount", "wp_backup_dir", "docker", "rm -", "shell:", "command:", "recurse"):
+            self.assertNotIn(forbidden, text, "the tombstone tasks must not touch data: " + forbidden)
+        paths = [t["ansible.builtin.file"]["path"] for t in closed if "ansible.builtin.file" in t]
+        self.assertEqual(sorted(p.rsplit("/", 1)[0] for p in paths), ["{{ wp_unit_dir }}", "{{ wp_vhost_dir }}"], "the variables, so the play and wp-site-delete cannot disagree about where these are")
+        self.assertEqual((self.v["wp_unit_dir"], self.v["wp_vhost_dir"]), ("/etc/systemd/system", "/etc/nginx/conf.d"))
+        for f in ("tasks/wp_site_one_common.yml", "templates/wp/wp_sites_status.sh.j2"):
+            text = (ROOT / f).read_text()
+            self.assertNotIn("/etc/nginx/conf.d", text); self.assertNotIn("/etc/systemd/system/wp-", text)
+        self.assertEqual({t.get("notify") for t in closed if "notify" in t}, {"Reload systemd", "Reload nginx"})
+
+    def test_the_archive_of_deleted_sites_has_its_own_project_inside_the_disk_reserve(self):
+        v = self.v
+        self.assertNotEqual(v["wp_archive_quota_id"], v["wp_scratch_quota_id"]); self.assertGreater(v["wp_archive_quota_id"], v["wp_sites"][0]["quota_id"] + v["wp_backup_quota_offset"])
+        self.assertGreaterEqual(v["wp_data_reserve_mb"], v["wp_scratch_quota_mb"] + v["wp_archive_quota_mb"], "the archive is part of what the sites may not spend")
+        self.assertEqual(v["wp_archive_dir"], "%s/archive" % v["wp_data_mount"]); self.assertEqual(v["wp_archive_keep_days"], 14)
+        base = {**v, "wp_archive_quota_id": v["wp_scratch_quota_id"]}
+        self.assertFalse(eval_that(assertions(), base, v["wp_sites"]), "an archive id equal to the scratch id is refused")
+        self.assertFalse(eval_that(assertions(), {**v, "wp_archive_quota_id": 1500}, v["wp_sites"]), "an archive id below a backup project id is refused")
+        self.assertTrue(eval_that(assertions(), v, v["wp_sites"]))
+        names0 = [t.get("name", "") for t in load("tasks/wp_sites_common.yml")]; t0 = load("tasks/wp_sites_common.yml")
+        quota_at = names0.index("Put the archive of deleted sites in its quota project (tasks/wp_project_quota_common.yml)")
+        stat, stop = t0[names0.index("Look for the archive directory")], t0[names0.index("Stop if the archive directory is missing")]
+        self.assertLess(names0.index("Look for the archive directory"), names0.index("Stop if the archive directory is missing")); self.assertLess(names0.index("Stop if the archive directory is missing"), quota_at)
+        self.assertEqual(stat["ansible.builtin.stat"]["path"], "{{ wp_archive_dir }}"); self.assertIs(stat["check_mode"], False)
+        self.assertIn("wp_data_disk_dellwp.yml", stop["ansible.builtin.assert"]["fail_msg"]); self.assertIn("isdir", stop["ansible.builtin.assert"]["that"][0])
+        disk = [t for t in load("tasks/wp_data_disk_common.yml") if t.get("name") == "Make the top-level directories"][0]
+        self.assertIn({"name": "archive", "mode": "0700"}, disk["loop"])
+        tasks = load("tasks/wp_sites_common.yml"); names = [t.get("name", "") for t in tasks]
+        q = tasks[names.index("Put the archive of deleted sites in its quota project (tasks/wp_project_quota_common.yml)")]
+        self.assertEqual((q["vars"]["wp_pq_path"], q["vars"]["wp_pq_id"], q["vars"]["wp_pq_mb"]), ("{{ wp_archive_dir }}", "{{ wp_archive_quota_id }}", "{{ wp_archive_quota_mb }}"))
+
+    def test_a_stopped_site_is_a_valid_state_and_does_not_count_against_the_vms_ram_but_does_against_its_disk(self):
+        mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
+        budget = 6144 - self.v["wp_vm_ram_reserve_mb"]   # dellwp's declared memory less the reserve
+        n = budget // mem + 1                            # one more than fits
+        small = {"quota_mb": 512, "backup_quota_mb": 512}
+        sites = [{"name": "s%d" % i, "port": 9100 + i, "quota_id": 1000 + i, "state": "hold", **small} for i in range(1, n + 1)]
+        self.assertFalse(self.ok(sites), "one site too many for the RAM is refused")
+        self.assertTrue(self.ok([*sites[:-1], {**sites[-1], "state": "stopped"}]), "the same list is fine when one of them is stopped: it runs nothing")
+        big = [{**s, "quota_mb": 20000, "backup_quota_mb": 20000} for s in sites[:2]]
+        self.assertFalse(self.ok([big[0], {**big[1], "state": "stopped"}]), "a stopped site still holds its data on the disk")
 
     def test_refused(self):
         site = self.good[0]
@@ -270,6 +381,7 @@ class Assertions(unittest.TestCase):
             "project id below 1000": [{**site, "quota_id": 5}],
             "unknown state": [{**site, "state": "paused"}],
             "unknown update policy": [{**site, "update_policy": "sometimes"}],
+            "a state that does not exist": [{**site, "state": "deleted"}],
             "an empty update policy": [{**site, "update_policy": ""}],
             "RAM does not fit": [{**site, "php_mem_mb": 9000}],
             "quota does not fit": [{**site, "quota_mb": 100000}],

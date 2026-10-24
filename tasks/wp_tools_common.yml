@@ -37,12 +37,15 @@
   loop:
     - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
     - { src: wp_site_install.sh.j2, dest: wp-site-install }
+    - { src: wp_site_password.sh.j2, dest: wp-site-password }
     - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
     - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
     - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
     - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
     - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
     - { src: wp_site_recover.sh.j2, dest: wp-site-recover }
+    - { src: wp_site_delete.sh.j2, dest: wp-site-delete }
+    - { src: wp_archive_purge.sh.j2, dest: wp-archive-purge }
     - { src: wp_site_update.sh.j2, dest: wp-site-update }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
@@ -50,7 +53,7 @@
     label: "{{ item.dest }}"
   vars:
     wp_update_policies: >-
-      {% for s in wp_sites %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
+      {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
 
 # The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
 # ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
@@ -159,5 +162,47 @@
   ansible.builtin.systemd:
     daemon_reload: true
     name: wp-restore-drill.timer
+    enabled: true
+    state: started
+
+# The archive purge: once a day, the archives of deleted sites whose time is up are removed (templates/wp/wp_archive_purge.sh.j2).
+- name: Deploy the archive purge service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-archive-purge.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Remove the archives of deleted WordPress sites whose time is up
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-archive-purge
+      Nice=10
+      IOSchedulingClass=idle
+
+- name: Deploy the archive purge timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-archive-purge.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily purge of expired WordPress site archives
+
+      [Timer]
+      OnCalendar={{ wp_archive_purge_calendar }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the archive purge timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-archive-purge.timer
     enabled: true
     state: started

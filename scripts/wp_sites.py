@@ -3,21 +3,29 @@
 
     python3 scripts/wp_sites.py                       a numbered menu
     python3 scripts/wp_sites.py list
-    python3 scripts/wp_sites.py create [--name N] [--state hold|live] [--policy auto|notify|freeze] [--title T] [--user U] [--email E] [--set key=value ...] [--yes] [--no-run]
-    python3 scripts/wp_sites.py modify <site> [--set key=value ...] [--yes] [--yes-public] [--no-run]
+    python3 scripts/wp_sites.py create [--name N] [--state hold|live] [--policy auto|notify|freeze] [--title T] [--user U] [--email E] [--set key=value ...] [--yes] [--no-run] [--commit]
+    python3 scripts/wp_sites.py modify <site> [--set key=value ...] [--yes] [--yes-public] [--no-run] [--commit]
+    python3 scripts/wp_sites.py password <site> [--user U] [--yes]
+    python3 scripts/wp_sites.py stop <site> [--yes] [--no-run] [--commit]
+    python3 scripts/wp_sites.py start <site> [--yes] [--no-run] [--commit]
+    python3 scripts/wp_sites.py delete <site> [--yes] [--commit]
 
 A site is declared in git (`wp_sites` in host_vars/dellwp/vars.yml) and built by the play, so every change here is an edit of that file followed by the play and the verifier. The script
 edits only the lines it means to, re-reads the YAML to prove nothing else changed, checks the new list against the rules of the play itself (the assert in tasks/wp_sites_common.yml),
-shows the diff and asks. (A new site gets no check run: the play creates its directory and the next task reads it, which check mode cannot do.) It refuses to start if the file has uncommitted changes, so the diff is only this change, and it leaves the commit to you: it prints the command.
+shows the diff and asks. With --commit it also makes the commit of that change when it is safe (below). It refuses to start if the file has uncommitted changes, so the diff is only this change. By default it leaves the commit to you and prints the command; with --commit it commits
+`vars.yml` itself, and only that file (anything else staged is left alone), only when the play succeeded and the verifier ended with 0 failed checks. Otherwise it says why
+it did not and prints the command.
 
 A site's hostname is <name>.<wp_domain> and nothing else: no friend-owned domains (the recorded decision), so there is no Terraform step; the wildcard record already covers every name.
 The name is the site's identity (directories, containers, quota project), so it cannot be changed; make a new site and import into it. Port and quota project id are chosen above every
 value the file has ever held in git, because a quota id must never be reused for another site. The administrator's password is not asked here and cannot be given as an option: wp-site-install
 asks for it at a hidden prompt on the VM (this script runs it with ssh -t), so it never passes through this script, a command line, a file or the shell history.
 
-`create` ends with a site on `hold` unless you say otherwise: nginx answers only a request from the VM itself. Going live (public on the internet) asks one more question, whatever else
-was answered: --yes does not answer it, --yes-public does. This is what the script cannot do: delete a site (the play only adds; the stopped and closed states are not built), reset a
-password, rotate a site's secrets, or prove the public path. Run it from the repo root on the ThinkPad; it needs ssh access to dellwp and the vault password like any play.
+`delete` removes a STOPPED site for good: it runs wp-site-delete on the VM (which archives the final backup for 14 days and asks you to type the site's name), and only then marks the
+site `closed` in wp_sites (a tombstone: its name, port and project id are never reused), runs the play and the verifier. `stop` pauses a site: a final backup first, then its containers go down, its timers stop, backups and updates skip it and visitors get a "This site is paused." page; its data stays. `start`
+brings it back on `hold` (going live is a separate, explicit step). `create` ends with a site on `hold` unless you say otherwise: nginx answers only a request from the VM itself. Going live (public on the internet) asks one more question, whatever else
+was answered: --yes does not answer it, --yes-public does. This is what the script cannot do: rename a site, rotate a site's
+secrets, or prove the public path. `password` changes an existing user's password through wp-site-password on the VM; it edits no file. Run it from the repo root on the ThinkPad; it needs ssh access to dellwp and the vault password like any play.
 """
 import argparse
 import copy
@@ -35,7 +43,8 @@ VARS = "host_vars/dellwp/vars.yml"
 HOST = "dellwp"
 PLAY = "dellwp/wp_sites_dellwp.yml"
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")   # a valid hostname label (the play's own rule also lets a trailing hyphen through)
-USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")
+USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                       # a new administrator (wp-site-install)
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                 # an existing user (wp-site-password, wp-site-login-check)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 STATES = ("hold", "live")
 POLICIES = ("auto", "notify", "freeze")
@@ -217,11 +226,11 @@ class Sites:
         if bad:
             raise Refuse("the play would refuse this site list. Rule(s) broken:\n  " + "\n  ".join(bad))
 
-    def apply_and_run(self, old, new, site, no_run, yes, check=True):
-        """Show the diff, ask, write, then the play (check run, real run, second run; no check run for a new site, which check mode cannot handle) and the verifier."""
+    def apply_and_run(self, old, new, site, no_run, yes, pre=None):
+        """Show the diff, ask ONCE, write, run the play. No check run and no second run (they were dropped on request: the play runs for real anyway, and the verifier follows in finish())."""
         diff = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), "a/" + VARS, "b/" + VARS))
         self.out(diff)
-        if not yes and not self.confirm("Write this change to %s?" % VARS):
+        if not yes and not self.confirm("Write this change to %s%s?" % (VARS, "" if no_run else " and run the play")):
             self.out("Nothing was written.")
             return 1
         self.path.write_text(new)
@@ -229,55 +238,64 @@ class Sites:
             self.out("Edited only (--no-run). Run %s, then scripts/wp_site_verify_dellwp.sh %s." % (PLAY, site))
             return 0
         play = ["ansible-playbook", "-i", "inventory.yml", PLAY]
-        if not check:
-            self.out("No check run: check mode cannot get past a site that does not exist yet (the play creates its directory, and the next task reads it; seen on dellwp 2026-10-24),"
-                     "\nso the diff above and the rules of the play, checked offline, are the preview, and the first run is the real one.")
-        if not yes and check:
-            rc, _ = self.run(play + ["--check", "--diff"])
+        if pre is not None:   # runs immediately before the play, after every answer: the final backup of a stop must not wait for a person
+            rc = pre()
             if rc != 0:
-                self.out("The check run failed (exit %d). The file stays edited; `git checkout -- %s` undoes it. Nothing on the host changed." % (rc, VARS))
+                self.path.write_text(old)
+                self.out("%s is back as it was; nothing on the host was changed by the play." % VARS)
                 return rc
-        if not yes:
-            if not self.confirm("Run the play for real now?%s" % ("" if check else " (it builds the new site)")):
-                self.out("Not run. The file is edited; `git checkout -- %s` undoes it." % VARS)
-                return 1
         rc, _ = self.run(play)
         if rc != 0:
             self.out("The play failed (exit %d). The file stays edited and the host may be half-way; run it again once the cause is fixed, or `git checkout -- %s` and run it to undo." % (rc, VARS))
             return rc
-        rc, text = self.run(play, tee=True)
-        m = re.search(r"^\s*%s\s*:.*?changed=(\d+)" % HOST, text, re.M)
-        if rc != 0 or not m or m.group(1) != "0":
-            self.out("WARNING: the second run should end changed=0 and did not (%s). Look at what it changed before you trust this." % ("exit %d" % rc if rc else "changed=%s" % (m.group(1) if m else "not found")))
         return 0
 
-    def finish(self, site, what):
+    def finish(self, site, what, commit=False):
         rc, _ = self.run(["bash", "scripts/wp_site_verify_dellwp.sh", site])
         if rc != 0:
             self.out("The verifier reported %d failed check(s) for %s." % (rc, site))
         self.run(["python3", "scripts/wp_sites_status.py"])
         if self.git("diff", "--quiet", "HEAD", "--", VARS).returncode == 0:
             self.out("\nThe file is back to what is committed; there is nothing to commit.")
+        elif commit and rc == 0:
+            # only vars.yml (`git commit -- path` leaves anything else that is staged alone), only after the play succeeded and the verifier ended clean
+            msg = "ops(wp): %s" % what
+            added = self.git("add", "--", VARS)
+            done = self.git("commit", "-q", "-m", msg, "--", VARS) if added.returncode == 0 else added
+            if done.returncode == 0:
+                self.out("\nCommitted %s: %s" % (self.git("rev-parse", "--short", "HEAD").stdout.strip(), msg))
+            else:
+                self.out("\n--commit could not commit (%s). Commit it yourself:\n  git add %s && git commit -m \"%s\"" % ((done.stderr or done.stdout).strip()[:200], VARS, msg))
         else:
+            if commit:
+                self.out("\n--commit did not commit: the verifier reported failures.")
             self.out("\nWhen you are satisfied, commit it:\n  git add %s && git commit -m \"ops(wp): %s\"" % (VARS, what))
         return rc
+
+    def need_run_for_commit(self, commit, no_run):
+        if commit and no_run:
+            raise Refuse("--commit needs the run (the play and the verifier decide whether it is safe to commit); drop --no-run or --commit")
 
     # --- list
     def list(self):
         return self.run(["python3", "scripts/wp_sites_status.py"])[0]
 
     # --- create
-    def create(self, name=None, state=None, policy=None, title=None, user=None, email=None, sets=(), yes=False, yes_public=False, no_run=False):
+    def create(self, name=None, state=None, policy=None, title=None, user=None, email=None, sets=(), yes=False, yes_public=False, no_run=False, commit=False):
+        self.need_run_for_commit(commit, no_run)
         self.preflight()
         text = self.path.read_text()
         d = self.data(text)
         domain, taken = d["wp_domain"], {s["name"] for s in d["wp_sites"]}
+        closed_names = {s["name"] for s in self.merged(d) if s["state"] == "closed"}
 
         def name_check(v):
             if not NAME_RE.fullmatch(v) or "--" in v:
                 return "letters, digits and single hyphens inside, 2 to 24 characters, starting with a letter"
             if v in d["wp_reserved_names"]:
                 return "'%s' is reserved" % v
+            if v in closed_names:
+                return "'%s' is the name of a closed site; a name is never reused" % v
             if v in taken:
                 return "'%s' already exists" % v
             return None
@@ -317,7 +335,7 @@ class Sites:
         self.check_rules(new)
         self.out("\nNew site: %s -> %s, state %s, update policy %s, port %d, quota project %d. Administrator %s <%s>, title '%s'." % (name, host, state, policy, entry["port"], entry["quota_id"], user, email, title))
         self.out("The password is asked later, on the VM, at a hidden prompt (14 or more characters).\n")
-        rc = self.apply_and_run(text, new, name, no_run, yes, check=False)
+        rc = self.apply_and_run(text, new, name, no_run, yes)
         if rc != 0 or no_run:
             return rc
         remote = "sudo wp-site-install " + " ".join(shlex.quote(x) for x in (name, "--title=" + title, "--user=" + user, "--email=" + email))
@@ -326,7 +344,7 @@ class Sites:
             self.out("wp-site-install failed or was refused (exit %d). The site exists but has no WordPress yet; run it again by hand: ssh -t %s sudo wp-site-install %s" % (rc, HOST, name))
             return rc
         self.out("\n%s is installed. %s" % (host, "It is PUBLIC: https://%s" % host if state == "live" else "It is on hold: only a request from the VM itself gets in. Go live with: python3 scripts/wp_sites.py modify %s --set state=live" % name))
-        return self.finish(name, "create site %s" % name)
+        return self.finish(name, "create site %s" % name, commit)
 
     def public_question(self, host, yes_public):
         if yes_public:
@@ -335,7 +353,8 @@ class Sites:
             raise Refuse("not confirmed; nothing was written")
 
     # --- modify
-    def modify(self, site, sets=(), yes=False, yes_public=False, no_run=False):
+    def modify(self, site, sets=(), yes=False, yes_public=False, no_run=False, commit=False):
+        self.need_run_for_commit(commit, no_run)
         self.preflight()
         text = self.path.read_text()
         d = self.data(text)
@@ -343,6 +362,8 @@ class Sites:
         if cur is None:
             raise Refuse("no site '%s' in wp_sites" % site)
         host = "%s.%s" % (site, d["wp_domain"])
+        if cur["state"] == "closed":
+            raise Refuse("%s is closed (a tombstone); nothing of it is on the VM. Make a new site instead; a closed site's name is never reused" % site)
         changes = {}
         for item in sets:
             key, _, raw = item.partition("=")
@@ -364,6 +385,8 @@ class Sites:
         if not changes:
             self.out("Nothing to change.")
             return 0
+        if cur["state"] == "stopped" and "state" in changes:
+            raise Refuse("%s is stopped; bring it back with: python3 scripts/wp_sites.py start %s (it returns on hold; going live is a second step)" % (site, site))
         new = text
         for key, value in changes.items():
             new = set_site_field(new, site, key, value)
@@ -378,12 +401,130 @@ class Sites:
         rc = self.apply_and_run(text, new, site, no_run, yes)
         if rc != 0 or no_run:
             return rc
-        return self.finish(site, "modify site %s: %s" % (site, ", ".join("%s=%s" % (k, render(v)) for k, v in changes.items())))
+        return self.finish(site, "modify site %s: %s" % (site, ", ".join("%s=%s" % (k, render(v)) for k, v in changes.items())), commit)
+
+    # --- stop and start
+    def site_state(self, text, site):
+        d = self.data(text)
+        cur = next((s for s in self.merged(d) if s["name"] == site), None)
+        if cur is None:
+            raise Refuse("no site '%s' in wp_sites" % site)
+        if cur["state"] == "closed":
+            raise Refuse("%s is closed (a tombstone: its name, port and project id are reserved, and nothing of it is on the VM)" % site)
+        return d, cur, "%s.%s" % (site, d["wp_domain"])
+
+    def stop(self, site, yes=False, no_run=False, commit=False):
+        """Pause a site: final backup, then state: stopped and the play (containers down, timers off, the 'paused' page). Reversible with start."""
+        self.need_run_for_commit(commit, no_run)
+        self.preflight()
+        text = self.path.read_text()
+        d, cur, host = self.site_state(text, site)
+        if cur["state"] == "stopped":
+            raise Refuse("%s is already stopped" % site)
+        new = set_site_field(text, site, "state", "stopped")
+        self.check_rules(new)
+        self.out("Stopping %s: a final backup (the site is put in maintenance while it runs and stays so until it is stopped), then its containers go down and its timers stop; backups and updates skip it; "
+                 "visitors of https://%s get a 'This site is paused.' page. Its data stays."
+                 % (site, host))
+        if cur["state"] == "live":
+            self.out("It is LIVE: https://%s goes offline for its visitors." % host)
+
+        def final_backup():
+            rc, _ = self.run(["ssh", HOST, "sudo -n wp-site-backup %s --force --tag=final" % shlex.quote(site)])
+            if rc != 0:
+                self.out("The final backup failed (exit %d): nothing was stopped. If the site was put in maintenance, it was brought back." % rc)
+            return rc
+        rc = self.apply_and_run(text, new, site, no_run, yes, pre=final_backup)
+        if rc != 0 or no_run:
+            return rc
+        self.out("\n%s is stopped. Bring it back with: python3 scripts/wp_sites.py start %s" % (site, site))
+        return self.finish(site, "stop site %s" % site, commit)
+
+    def start(self, site, yes=False, no_run=False, commit=False):
+        """Bring a stopped site back, on hold. Going live is a separate question."""
+        self.need_run_for_commit(commit, no_run)
+        self.preflight()
+        text = self.path.read_text()
+        d, cur, host = self.site_state(text, site)
+        if cur["state"] != "stopped":
+            raise Refuse("%s is not stopped (it is %s)" % (site, cur["state"]))
+        new = set_site_field(text, site, "state", "hold")
+        self.check_rules(new)   # a stopped site does not count against the VM's RAM: starting it must still fit
+        self.out("Starting %s: its containers come up and its timers start, on hold (only a request from the VM itself gets in)." % site)
+        rc = self.apply_and_run(text, new, site, no_run, yes)
+        if rc != 0 or no_run:
+            return rc
+        self.out("\n%s is up on hold. Go live with: python3 scripts/wp_sites.py modify %s --set state=live" % (site, site))
+        return self.finish(site, "start site %s" % site, commit)
+
+    # --- delete
+    def delete(self, site, yes=False, commit=False):
+        """Remove a stopped site for good. The VM tool comes FIRST (it is the only thing that deletes data, and it asks for the name to be typed); the repo says closed only after it succeeded."""
+        self.preflight()
+        text = self.path.read_text()
+        d = self.data(text)
+        cur = next((s for s in self.merged(d) if s["name"] == site), None)
+        if cur is None:
+            raise Refuse("no site '%s' in wp_sites" % site)
+        if cur["state"] == "closed":
+            raise Refuse("%s is already closed (a tombstone); nothing of it is on the VM" % site)
+        if cur["state"] != "stopped":
+            raise Refuse("%s is %s. A site is deleted only after it is stopped, because the stop takes the final backup that gets archived: python3 scripts/wp_sites.py stop %s" % (site, cur["state"], site))
+        host = "%s.%s" % (site, d["wp_domain"])
+        new = set_site_field(text, site, "state", "closed")
+        self.check_rules(new)
+        self.out("Deleting %s (%s) FOR GOOD." % (site, host))
+        self.out("  - on the VM: its final backup is archived and kept for %s days, then purged; its containers, unit, timers, vhost, directory and backups are removed (wp-site-delete)." % d["wp_archive_keep_days"])
+        self.out("  - in the repo: %s stays in wp_sites as state: closed, a tombstone: its name, port and project id are never given to another site." % site)
+        self.out("  - the nightly Proxmox backups of the whole VM may still hold the data for months and cannot be purged for one site.")
+        # Confirmation 1 of 2, and --yes does not answer it: the name typed here. Confirmation 2 is the name typed on the VM, which the tool asks for itself.
+        typed = self.ask("Confirmation 1 of 2: type the site's name (%s) to go on; the tool on the VM will ask again" % site)
+        if typed != site:
+            self.out("Not confirmed; nothing was changed.")
+            return 1
+        rc, _ = self.run(["ssh", "-t", HOST, "sudo wp-site-delete " + shlex.quote(site)])
+        if rc != 0:
+            self.out("wp-site-delete did not finish (exit %d); the repo was not changed. Read its message above. If it stopped part way, run this again: the tool resumes." % rc)
+            return rc
+        rc = self.apply_and_run(text, new, site, False, yes)
+        if rc != 0:
+            now = self.data(self.path.read_text())["wp_sites"]
+            closed_now = next((x for x in now if x["name"] == site), {}).get("state") == "closed"
+            if closed_now:
+                self.out("The site is gone from the VM and vars.yml now says closed, but the play did not finish. Run it again, then the verifier:\n  ansible-playbook -i inventory.yml %s\n  bash scripts/wp_site_verify_dellwp.sh %s" % (PLAY, site))
+            else:
+                self.out("The site is already gone from the VM, but vars.yml still says stopped. Run this again: python3 scripts/wp_sites.py delete %s (the tool sees the archive and finishes the clean-up without asking again)." % site)
+            return rc
+        self.out("\n%s is deleted. Its archive is on the VM until the purge removes it; the name is reserved for good." % site)
+        return self.finish(site, "delete site %s" % site, commit)
+
+    # --- password
+    def password(self, site, user=None, yes=False):
+        """Change a user's password on a site: ssh -t into wp-site-password, which asks at a hidden prompt. This script never sees the password and edits no file."""
+        d = self.data(self.path.read_text())
+        if site not in [x["name"] for x in d["wp_sites"]]:
+            raise Refuse("no site '%s' in wp_sites" % site)
+        if site in [x["name"] for x in self.merged(d) if x["state"] == "closed"]:
+            raise Refuse("%s is closed (a tombstone); there is no site to change a password on" % site)
+        host = "%s.%s" % (site, d["wp_domain"])
+        user_check = lambda v: None if USER_NAME_RE.fullmatch(v) else "1 to 60 characters of letters, digits and . _ @ -"
+        user = user or self.ask("User name on %s" % host, check=user_check)
+        why = user_check(user)
+        if why:
+            raise Refuse("the user '%s': %s" % (user, why))
+        if not yes and not self.confirm("Change the password of '%s' on %s? (their other sessions are ended)" % (user, host)):
+            self.out("Nothing was changed.")
+            return 1
+        self.out("Type the new password twice at the hidden prompt on the VM (14 or more characters); this script never sees it.")
+        rc, _ = self.run(["ssh", "-t", HOST, "sudo wp-site-password " + " ".join(shlex.quote(x) for x in (site, user))])
+        if rc != 0:
+            self.out("wp-site-password reported a problem (exit %d); look at its output above. If the new password does not work, run this again." % rc)
+        return rc
 
     # --- menu
     def menu(self):
         while True:
-            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit   (python3 scripts/wp_sites.py --help lists every option)" % HOST)
+            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit   5) change a user's password   6) stop a site   7) start a site   8) delete a stopped site   (python3 scripts/wp_sites.py --help lists every option)" % HOST)
             try:
                 choice = self._ask("> ").strip()
             except EOFError:
@@ -395,8 +536,27 @@ class Sites:
                     self.create()
                 elif choice == "3":
                     d = self.data(self.path.read_text())
-                    names = [s["name"] for s in d["wp_sites"]]
+                    names = [x["name"] for x in self.merged(d) if x["state"] != "closed"]
                     self.modify(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
+                elif choice == "5":
+                    d = self.data(self.path.read_text())
+                    names = [x["name"] for x in self.merged(d) if x["state"] != "closed"]
+                    self.password(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
+                elif choice == "8":
+                    d = self.data(self.path.read_text())
+                    names = [x["name"] for x in self.merged(d) if x["state"] == "stopped"]
+                    if not names:
+                        self.out("No site is stopped; a site is deleted only after it is stopped.")
+                        continue
+                    self.delete(self.ask("Site to DELETE (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
+                elif choice in ("6", "7"):
+                    d = self.data(self.path.read_text())
+                    names = [x["name"] for x in self.merged(d) if (x["state"] == "stopped" if choice == "7" else x["state"] in ("hold", "live"))]
+                    if not names:
+                        self.out("No site is %s." % ("stopped" if choice == "7" else "running"))
+                        continue
+                    site = self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above")
+                    (self.start if choice == "7" else self.stop)(site)
                 elif choice in ("4", "q", ""):
                     return 0
             except Refuse as e:
@@ -414,13 +574,17 @@ def field_help(keys=None):
     return "\n".join(lines)
 
 
+COMMIT_HELP = "commit the change to vars.yml when it is safe: only that file, only if the play succeeded and the verifier ends with 0 failed; otherwise it prints the commit command"
+
 TOOLS_HELP = """\
 On the VM (run as: ssh -t dellwp sudo <tool>; every tool prints its usage when run with no arguments):
   wp-site-update <site> [--check|--apply]      what is available / apply it, with a snapshot first and a rollback
   wp-site-recover <site> [stamp|latest]        put a site back to a snapshot (database, wp-content, core)
   wp-site-backup <site> [--force]              back a site up now
   wp-site-restore <site> [stamp|latest]        prove a backup restores (a drill into scratch; never touches the site)
+  wp-site-delete <site>                        delete a STOPPED site for good: archive its final backup, then remove it (asks for the name to be typed)
   wp-site-install <site> [--title --user --email]   install WordPress into a site that has none (asks the password, hidden)
+  wp-site-password <site> <user>               change a user's password (hidden prompt, other sessions ended)
   wp-site-ext <site> plugin|theme install|update|delete <slug>   plugins and themes, wordpress.org slugs only
   wp-site-cli <site> <wp arguments>            WP-CLI against a site as the web app
 Other scripts here: wp_sites_status.py (the table), wp_site_state.py <site> hold|live, wp_site_verify_dellwp.sh <site>, and the rehearsals wp_*_rehearsal_dellwp.sh."""
@@ -434,13 +598,19 @@ examples:
   python3 scripts/wp_sites.py modify shop --set update_policy=auto
   python3 scripts/wp_sites.py modify shop --set state=live --set upload_mb=128
   python3 scripts/wp_sites.py modify shop --no-run     edit the file and show the diff, run nothing
+  python3 scripts/wp_sites.py stop shop --commit       and commit the change to vars.yml if the verifier ends clean
+  python3 scripts/wp_sites.py delete shop              delete a stopped site for good (asks you to type its name on the VM)
+  python3 scripts/wp_sites.py password shop --user owner   change a user's password (hidden prompt on the VM)
+  python3 scripts/wp_sites.py stop shop                pause it (final backup first); start shop brings it back on hold
 
 notes:
   The administrator password is never an option and is not asked by this script: wp-site-install asks for it on the VM at a hidden prompt.
   Going live (public on the internet) always asks its own question; --yes does not answer it, --yes-public does.
-  A new site gets no check run (check mode cannot handle a site that does not exist yet); a change to an existing site does.
-  The file must be committed first, and the script leaves the commit to you: it prints the command.
-  Not here yet: delete, rename, password reset.
+  There is no check run and no second run: the change is written, the play runs, the verifier checks the result.
+  The file must be committed first. The script prints the commit command, or with --commit makes the commit itself (only vars.yml, and only when the play succeeded and the verifier ends
+  with 0 failed).
+  A destructive change asks twice: delete makes you TYPE the site's name here, and the tool on the VM makes you type it again. --yes skips neither.
+  Not here yet: rename.
 
 """ + TOOLS_HELP
 
@@ -452,26 +622,51 @@ def build_parser():
     sub.add_parser("list", formatter_class=fmt, help="the one-table view of every site (wp_sites_status.py)", description="Show every site: state, stack, WordPress version, plugins, backup age, quota use, cron.")
     c = sub.add_parser("create", formatter_class=fmt, help="create a site: edit wp_sites, run the play, install WordPress, verify",
                        description="Create a site at <name>.%s. Every value not given as an option is asked. Steps: validate against the play's own rules, show the diff, write, run the play "
-                                   "(real run and a second run that must end changed=0), run wp-site-install on the VM (the password is typed there, hidden), run the verifier.\n\n"
+                                   "(one run), run wp-site-install on the VM (the password is typed there, hidden), run the verifier.\n\n"
                                    "limits you may set with --set (the defaults apply when not set):\n" % "example.com" + field_help(("quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc")),
                        )
     c.add_argument("--name", help="the site name: letters, digits, single hyphens inside; 2 to 24 characters; the hostname is <name>.<domain>")
     c.add_argument("--state", choices=STATES, help="hold (only the VM itself can reach it; the default) or live (public)")
-    c.add_argument("--policy", choices=POLICIES, help="update policy: auto applies updates nightly with a snapshot first and a rollback if the site breaks (core: minor and security releases only; plugins and themes: any newer version, "
-                                                         "majors included); notify only tells you, once per set (the default); freeze does nothing")
+    c.add_argument("--policy", choices=POLICIES, help="update policy: auto applies updates nightly with a snapshot first and a rollback if the site breaks (core: minor and security releases only, a new X.Y is only reported; "
+                                                         "plugins and themes: minor updates, while a major version is held for you with one ntfy per set; wp-site-update --apply applies everything); "
+                                                         "notify only tells you, once per set (the default); freeze does nothing")
     c.add_argument("--title", help="the WordPress site title (1 to 100 characters)")
     c.add_argument("--user", help="the administrator's user name (3 to 30 characters of letters, digits, . _ -)")
     c.add_argument("--email", help="the administrator's email address")
     m = sub.add_parser("modify", formatter_class=fmt, help="change a site's state, update policy, quotas, memory, upload size",
                        description="Change one site. With no --set it shows the current values and asks which field to change, until you give an empty answer. "
-                                   "The new site list is checked against the play's own rules before anything is written; a change to an existing site gets a check run first.\n\n"
+                                   "The new site list is checked against the play's own rules before anything is written; the play then runs once and the verifier checks the result.\n\n"
                                    "fields (--set KEY=VALUE):\n" + field_help() + "\n\nNot editable here: name, port, quota_id, secret_rev.")
     m.add_argument("site", help="the site's name, as in wp_sites")
+    pw = sub.add_parser("password", formatter_class=fmt, help="change a user's password on a site (asked at a hidden prompt on the VM)",
+                        description="Change an existing user's password on a site, through wp-site-password on the VM (ssh -t). The new password is typed twice at a hidden prompt there (14 or more "
+                                    "characters); this script never sees it, it is never an option, and WP-CLI's echo of it is redacted. The user's other sessions are ended and the new password is "
+                                    "proved to log in. Edits no file.")
+    pw.add_argument("site", help="the site's name, as in wp_sites")
+    pw.add_argument("--user", help="the user name on that site (asked if not given)")
+    pw.add_argument("--yes", action="store_true", help="do not ask for confirmation first")
+    dl = sub.add_parser("delete", formatter_class=fmt, help="delete a STOPPED site for good (archived for 14 days; the name stays reserved)",
+                        description="Delete a stopped site for good. Runs wp-site-delete on the VM first: it archives the final backup (kept for the archive period, then purged), asks you to TYPE the site's "
+                                    "name, and removes the site's containers, unit, timers, vhost, directory and backups. Only after it succeeded, the site is set to state: closed in wp_sites "
+                                    "(a tombstone: its name, port and project id are never reused), and the play and the verifier run. The Proxmox backups of the whole VM may keep the data for "
+                                    "months. It asks TWICE: you type the site's name here and again on the VM; --yes skips neither (it only skips the question before the play). A site is deleted only after python3 scripts/wp_sites.py stop.")
+    dl.add_argument("site", help="the site's name, as in wp_sites; it must be stopped")
+    dl.add_argument("--yes", action="store_true", help="skip the question before the play; it does NOT skip the name you type here or the name you type on the VM")
+    dl.add_argument("--commit", action="store_true", help=COMMIT_HELP)
+    for name, what in (("stop", "pause a site: final backup, containers down, timers off, a 'paused' page for visitors; its data stays"),
+                       ("start", "bring a stopped site back, on hold")):
+        sp = sub.add_parser(name, formatter_class=fmt, help=what, description=what[0].upper() + what[1:] + ". Edits state in wp_sites, runs the play and the verifier."
+                            + (" A final backup is taken first (wp-site-backup --force); if it fails nothing is changed." if name == "stop" else " Going live is a separate step (modify --set state=live), and it asks its own question."))
+        sp.add_argument("site", help="the site's name, as in wp_sites")
+        sp.add_argument("--yes", action="store_true", help="do not ask before writing and running")
+        sp.add_argument("--no-run", action="store_true", help="edit the file and show the diff, run nothing (stop also skips the backup)")
+        sp.add_argument("--commit", action="store_true", help=COMMIT_HELP)
     for p in (c, m):
         p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="set a field; can be repeated (the fields are listed above)")
         p.add_argument("--yes", action="store_true", help="do not ask before writing and running (it does not answer the question about going public)")
         p.add_argument("--yes-public", action="store_true", help="answer yes to 'make it public?'")
         p.add_argument("--no-run", action="store_true", help="edit the file and show the diff, run nothing")
+        p.add_argument("--commit", action="store_true", help=COMMIT_HELP)
     return ap
 
 
@@ -483,9 +678,17 @@ def main(argv=None, repo=REPO, ask=input, run=None, out=print):
         if a.cmd == "list":
             return s.list()
         if a.cmd == "create":
-            return s.create(a.name, a.state, a.policy, a.title, a.user, a.email, a.set, a.yes, a.yes_public, a.no_run)
+            return s.create(a.name, a.state, a.policy, a.title, a.user, a.email, a.set, a.yes, a.yes_public, a.no_run, a.commit)
         if a.cmd == "modify":
-            return s.modify(a.site, a.set, a.yes, a.yes_public, a.no_run)
+            return s.modify(a.site, a.set, a.yes, a.yes_public, a.no_run, a.commit)
+        if a.cmd == "password":
+            return s.password(a.site, a.user, a.yes)
+        if a.cmd == "delete":
+            return s.delete(a.site, a.yes, a.commit)
+        if a.cmd == "stop":
+            return s.stop(a.site, a.yes, a.no_run, a.commit)
+        if a.cmd == "start":
+            return s.start(a.site, a.yes, a.no_run, a.commit)
         return s.menu()
     except Refuse as e:
         out("wp_sites: %s" % e)

@@ -22,7 +22,7 @@
     mode: "0750"
   vars:
     wp_disk_sites: >-
-      {% for s in wp_sites_merged %}{{ s.name }}:{{ s.quota_id }}:{{ s.quota_mb }} backup-{{ s.name }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}
+      {% for s in wp_sites_merged if s.state != 'closed' %}{{ s.name }}:{{ s.quota_id }}:{{ s.quota_mb }} backup-{{ s.name }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}
 
 - name: Deploy the WordPress disk check service
   ansible.builtin.copy:

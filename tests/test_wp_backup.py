@@ -28,7 +28,7 @@ DUMP_OK = "-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\nINSERT INTO `wp
 DOCKER_BACKUP = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 case "$1" in
-  exec) [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
+  exec) echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
 esac
 exit 0
 '''
@@ -130,6 +130,8 @@ class Backup(Base):
         super().setUp()
         self.shim("docker", DOCKER_BACKUP)
         self.script = self.install("wp_site_backup.sh.j2", "bin/wp-site-backup")
+        self.env["SITEDIR"] = str(self.site)
+        self.flag = self.site / "maintenance.flag"
         (self.site / "html/wp-content/uploads/a.jpg").write_text("a" * 5000)
         (self.site / "html/wp-content/plugins/p/p.php").write_text("<?php // plugin\n")
 
@@ -261,6 +263,65 @@ class Backup(Base):
         plain = {s for s in left if not s.endswith("T020000Z")}
         self.assertEqual(plain, self.expected_keep([s for s in old + ["20261025T031500Z", "20261026T031500Z"]], 7, 3), "tagged ones take no daily or weekly place")
 
+    # --- the final backup of a site that is about to stop
+    def dump_flag(self):
+        return [l for l in self.log("order").splitlines() if l.startswith("dump")]
+
+    def test_a_final_backup_quiets_the_site_for_the_dump_and_leaves_it_quiet(self):
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.dump_flag(), ["dump flag=up"], "the flag is up when the database is dumped")
+        self.assertTrue(self.flag.exists(), "and it stays up: nothing may write between this snapshot and the stop")
+        self.assertIn("stays so", r.stdout); self.assertIn("tag=final", (self.backups / "wptest" / "20261024T201500Z" / "MANIFEST").read_text())
+        self.assertIn("OK: snapshot 20261024T201500Z of wptest", r.stdout)
+
+    def test_a_failed_final_backup_brings_the_site_back(self):
+        self.put("dump_fail", "")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.dump_flag(), ["dump flag=up"]); self.assertFalse(self.flag.exists(), "a failed backup must not leave a site offline")
+        self.assertEqual(self.snapshots(), [])
+
+    def test_someone_elses_maintenance_flag_is_never_touched(self):
+        self.flag.write_text("")   # the update job's, say
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+        self.assertTrue(self.flag.exists(), "left as found on success")
+        self.put("dump_fail", "")
+        self.assertNotEqual(self.backup("20261025T201500Z", "--tag=final").returncode, 0)
+        self.assertTrue(self.flag.exists(), "left as found on failure")
+
+    def test_other_backups_never_touch_the_flag(self):
+        for n, args in enumerate(((), ("--tag=pre-update",), ("--force",))):
+            self.assertEqual(self.backup("2026102%dT201500Z" % (1 + n), *args).returncode, 0)
+            self.assertFalse(self.flag.exists(), args); self.assertEqual(self.dump_flag()[-1], "dump flag=down")
+
+    def test_a_final_backup_of_a_stopped_or_frozen_site_raises_no_flag(self):
+        (self.site / "stopped.flag").write_text("")
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 2); self.assertFalse(self.flag.exists())
+        (self.site / "stopped.flag").unlink(); (self.tmp / "freeze").write_text("")
+        r = self.backup("20261025T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0); self.assertIn("frozen", r.stdout); self.assertFalse(self.flag.exists(), "skipped as a success, nothing touched")
+        r = self.backup("20261026T201500Z", "--tag=final", "--force")
+        self.assertEqual(r.returncode, 0); self.assertTrue(self.flag.exists(), "--force backs up anyway, and quiets the site")
+
+    def test_final_snapshots_are_kept_on_their_own_and_nothing_else_is_pushed_out(self):
+        old = self.fabricate(12)
+        self.tagged("20261020T020000Z", "20261021T020000Z", "20261022T020000Z")   # pre-update, as before
+        for st in ("20261001T030000Z", "20261015T030000Z", "20261023T030000Z"):
+            d = self.backups / "wptest" / st
+            (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x"); (d / "MANIFEST").write_text("site=wptest\nstamp=%s\ntag=final\n" % st)
+        self.assertEqual(self.backup("20261026T031500Z").returncode, 0)
+        left = set(self.snapshots())
+        self.assertEqual({s for s in left if s.endswith("T030000Z")}, {"20261023T030000Z"}, "the newest final snapshot only")
+        self.assertEqual({s for s in left if s.endswith("T020000Z")}, {"20261021T020000Z", "20261022T020000Z"}, "the pre-update ones keep their own rule")
+        plain = {s for s in left if s.endswith("T201500Z") or s.endswith("T031500Z")}
+        self.assertEqual(plain, self.expected_keep(old + ["20261026T031500Z"], 7, 3), "tagged ones take no daily or weekly place")
+
+    def test_an_unknown_tag_is_refused(self):
+        for bad in ("--tag=finl", "--tag=final;id", "--tag=Final"):
+            self.assertEqual(self.backup("20261024T201500Z", bad).returncode, 2, bad)
+        self.assertEqual(self.snapshots(), [])
+
     def test_a_first_ever_snapshot_that_is_tagged_prunes_without_error(self):
         r = self.backup("20261024T020000Z", "--tag=pre-update")
         self.assertEqual(r.returncode, 0, r.stderr); self.assertEqual(self.snapshots(), ["20261024T020000Z"])
@@ -272,6 +333,12 @@ class Backup(Base):
         self.assertEqual(len([s for s in self.snapshots() if s.endswith("T020000Z")]), 4)
         for bad in ("--tag=other", "--tag=", "--tag", "pre-update"):
             self.assertEqual(self.backup("20261025T031500Z", bad).returncode, 2, bad)
+
+    def test_a_stopped_site_is_refused_and_touches_nothing(self):
+        (self.site / "stopped.flag").write_text("")
+        r = self.backup("20261024T201500Z")
+        self.assertEqual(r.returncode, 2); self.assertIn("is stopped", r.stderr); self.assertIn("wp_sites.py start wptest", r.stderr)
+        self.assertEqual(self.log("docker.calls"), ""); self.assertEqual(self.snapshots(), [])
 
     def test_retention_with_few_snapshots_deletes_nothing(self):
         old = self.fabricate(5)
@@ -320,7 +387,11 @@ class Backup(Base):
     def test_every_site_is_backed_up_every_night_hold_or_live_and_a_failure_alerts(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
         t = [x for x in tasks if "wp-backup@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]
-        self.assertIs(t["enabled"], True); self.assertEqual(t["state"], "started")
+        import jinja2
+        e = jinja2.Environment()
+        for state in ("hold", "live"):
+            self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state})), ("True", "started"), state)
+        self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": "stopped"}), e.from_string(t["state"]).render(wp_s={"state": "stopped"})), ("False", "stopped"), "no database to dump while stopped")
         svc = self.env_j.get_template("wp_backup.service.j2").render(**self.ctx)
         self.assertIn("OnFailure=wp-job-failed@%N.service", svc)
         self.assertIn("ExecStart=%s/wp-site-backup %%i" % self.ctx["wp_tools_bin"], svc)
@@ -392,6 +463,15 @@ class BackupCheck(Base):
         self.run_script(self.script)
         self.assertEqual(len(self.said()), 1, "once unfrozen it is judged on its age")
 
+    def test_a_stopped_site_is_not_called_stale_and_is_judged_again_when_started(self):
+        self.mark(40)
+        (self.site / "stopped.flag").write_text("")
+        self.run_script(self.script); self.run_script(self.script)
+        self.assertEqual(self.said(), [], "a stopped site has its backup timer off on purpose")
+        (self.site / "stopped.flag").unlink()
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "once started it is judged on its age")
+
     def test_the_environment_can_make_every_site_stale_at_once_for_the_rehearsal(self):
         self.mark(1)
         self.run_script(self.script, WP_BACKUP_STALE_HOURS="0")
@@ -437,6 +517,26 @@ class Drill(Base):
         r = self.run_script(self.script, WP_DRILL_SITE="../x")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.log("restore.calls").count("\n"), 1, "nothing else was run")
+
+    def test_with_no_site_at_all_there_is_nothing_to_drill_and_nothing_is_wrong(self):
+        for label, sites in (("none ever made", []), ("every one closed", [{"name": "gone", "state": "closed"}, {"name": "gone2", "state": "closed"}])):
+            with self.subTest(label):
+                script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=sites)
+                self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=sites)   # the drill reads its site list from the shared library
+                (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
+                r = self.run_script(script)
+                self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("there are no sites", r.stdout)
+                self.assertEqual(self.log("restore.calls"), "", "no restore was started")
+
+    def test_a_closed_site_with_an_old_backup_is_never_drilled(self):
+        script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
+        self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
+        (self.backups / "alpha").mkdir(exist_ok=True); (self.backups / "alpha" / ".last-success").write_text("20261024T201500Z")
+        (self.backups / "gone").mkdir(exist_ok=True); (self.backups / "gone" / ".last-success").write_text("20261024T201500Z")
+        for _ in range(8):
+            (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
+            self.assertEqual(self.run_script(script).returncode, 0)
+            self.assertEqual(self.log("restore.calls").split()[0], "alpha")
 
     def test_with_no_backup_anywhere_it_fails_so_that_the_unit_alerts(self):
         for n in ("wptest", "alpha", "beta"):

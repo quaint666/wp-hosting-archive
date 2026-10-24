@@ -96,6 +96,8 @@ def main(argv=None, repo=REPO):
         print("note: the file already has uncommitted state changes (earlier flips); only the edit below is new.")
     try:
         now = current_state(text, a.site)
+        if now == "closed":
+            raise ValueError("%s is closed (a tombstone: nothing of it is on the VM); there is nothing to flip" % a.site)
         if now == a.state:
             print("%s is already %s; nothing to do." % (a.site, a.state))
             return 0

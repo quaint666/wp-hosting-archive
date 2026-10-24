@@ -137,6 +137,12 @@ class Recover(Base):
         self.put("db_current", ORIGINAL_DB)
         self.recover("20261024T201500Z", "--yes"); self.assertIn("SNAPSHOT-DB", self.db())
 
+    def test_a_stopped_site_is_refused_before_anything_is_touched(self):
+        (self.site / "stopped.flag").write_text("")
+        r = self.recover("--yes")
+        self.assertEqual(r.returncode, 2); self.assertIn("is stopped", r.stderr)
+        self.assert_untouched(); self.assertEqual(self.order(), [])
+
     # --- consent
     def test_at_a_terminal_the_site_name_must_be_typed_and_a_wrong_answer_changes_nothing(self):
         tty = self.tmp / "tty"

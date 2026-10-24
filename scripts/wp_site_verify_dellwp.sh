@@ -12,7 +12,7 @@ SITE=${1:-}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # name port quota_id quota_mb state (defaults merged), then the domain, uids, listen port and the data mount
-read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN PROBE MOUNT MEMP MEMD BQMB BOFF BDIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
+read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN PROBE MOUNT MEMP MEMD BQMB BOFF BDIR ARCH UNITDIR VHOSTDIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
 import sys, yaml
 repo, site = sys.argv[1:3]
 h = yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))
@@ -21,12 +21,12 @@ s = next((x for x in h["wp_sites"] if x["name"] == site), None)
 if s is None:
     sys.exit("no site '%s' in wp_sites" % site)
 s = {**h["wp_site_defaults"], **s}
-print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_nginx_probe_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"], s["backup_quota_mb"], h["wp_backup_quota_offset"], h["wp_data_mount"] + "/backups")
+print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_nginx_probe_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"], s["backup_quota_mb"], h["wp_backup_quota_offset"], h["wp_data_mount"] + "/backups", h["wp_data_mount"] + "/archive", h["wp_unit_dir"], h["wp_vhost_dir"])
 PY
 ) || exit 1
 [ -n "${MOUNT:-}" ] || exit 1
 
-ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN PROBE=$PROBE MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD BQMB=$BQMB BOFF=$BOFF BDIR=$BDIR bash -s" <<'REMOTE'
+ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN PROBE=$PROBE MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD BQMB=$BQMB BOFF=$BOFF BDIR=$BDIR ARCH=$ARCH UNITDIR=$UNITDIR VHOSTDIR=$VHOSTDIR bash -s" <<'REMOTE'
 set -u
 FAILS=0; TOTAL=0
 ok()   { TOTAL=$((TOTAL+1)); echo "ok:   $*"; }
@@ -38,6 +38,42 @@ code() { curl -s -o /dev/null -w '%{http_code}' --max-time 8 "$@" </dev/null; }
 SCRATCH="$MOUNT/sites/.quota-verify"; FLAG="$DIR/maintenance.flag"
 cleanup() { rm -f "$FLAG"; rm -rf "$SCRATCH"; setquota -P 4000000 0 0 0 0 "$MOUNT" 2>/dev/null; }
 trap cleanup EXIT
+
+if [ "$STATE" = closed ]; then
+  echo "== $SITE: closed"
+  [ ! -e "$DIR" ] && ok "no site directory ($DIR)" || bad "$DIR still exists"
+  [ ! -e "$BDIR/$SITE" ] && ok "no backup directory ($BDIR/$SITE)" || bad "$BDIR/$SITE still exists"
+  [ ! -e "$UNITDIR/wp-$SITE.service" ] && ok "no stack unit" || bad "$UNITDIR/wp-$SITE.service still exists"
+  [ ! -e "$VHOSTDIR/wp_site_$SITE.conf" ] && ok "no nginx vhost" || bad "$VHOSTDIR/wp_site_$SITE.conf still exists"
+  for t in cron backup update; do systemctl is-enabled --quiet "wp-$t@$SITE.timer" </dev/null && bad "wp-$t@$SITE.timer is enabled" || ok "wp-$t@$SITE.timer is not enabled"; done
+  [ -z "$(docker ps -aq --filter "name=^wp_${SITE//-/_}_" </dev/null)" ] && ok "no container of the site exists" || bad "a container of the site still exists"
+  [ -z "$(docker network ls -q --filter "name=^wp-${SITE}_" </dev/null)" ] && ok "no network of the site exists" || bad "a network of the site still exists"
+  [ "$(code -H "Host: $HOST" "$BASE/")" = 000 ] && ok "the name gets the closed connection (no vhost claims it)" || bad "the name $HOST is still answered by nginx"
+  # the archive of the last backup is kept for a while and then purged: its absence is normal after that, a broken one is not
+  ARCHIVES=$(find "$ARCH" -mindepth 1 -maxdepth 1 -type d -name "$SITE-[0-9]*T*Z" </dev/null 2>/dev/null)
+  if [ -z "$ARCHIVES" ]; then echo "   (info) no archive of $SITE under $ARCH (never made, or already purged)"
+  else for A in $ARCHIVES; do
+    [ -f "$A/db.sql.gz" ] && [ -f "$A/wp-content.tar.gz" ] && gzip -t "$A/db.sql.gz" </dev/null && tar -tzf "$A/wp-content.tar.gz" </dev/null >/dev/null && ok "archive $(basename "$A") reads back (kept until $(sed -n 's/^expires=//p' "$A/MANIFEST"))" || bad "archive $A is incomplete or does not read back"
+  done; fi
+  echo "$TOTAL checks, $FAILS failed"
+  exit "$FAILS"
+fi
+
+if [ "$STATE" = stopped ]; then
+  echo "== $SITE: stopped"
+  [ -z "$(docker ps -q --filter "name=^wp_${SITE//-/_}_" </dev/null)" ] && ok "no container of the site is running" || bad "a container of the site is running although it is stopped"
+  systemctl is-active --quiet "wp-$SITE" </dev/null && bad "wp-$SITE.service is active" || ok "wp-$SITE.service is not active"
+  systemctl is-enabled --quiet "wp-$SITE" </dev/null && bad "wp-$SITE.service is enabled (it would start at boot)" || ok "wp-$SITE.service is not enabled"
+  [ -e "$DIR/stopped.flag" ] && ok "stopped.flag is there (the tools and the freshness check know)" || bad "stopped.flag is missing"
+  for t in cron backup update; do systemctl is-active --quiet "wp-$t@$SITE.timer" </dev/null && bad "wp-$t@$SITE.timer is running" || ok "wp-$t@$SITE.timer is not running"; done
+  [ -d "$DIR/db" ] && [ -f "$DIR/wp-config.php" ] && [ -d "$DIR/html/wp-content" ] && ok "the data is intact (db/, wp-config.php, wp-content/)" || bad "the site's data is incomplete"
+  PAGE=$(curl -s --max-time 8 -H "Host: $HOST" "$BASE/" </dev/null); C=$(code -H "Host: $HOST" "$BASE/")
+  [ "$C" = 503 ] && echo "$PAGE" | grep -q 'paused' && ok "visitors get the 503 'paused' page" || bad "the vhost answered $C '$PAGE', want 503 'This site is paused.'"
+  [ "$(code -H "Host: $HOST" -H 'CF-Connecting-IP: 198.51.100.9' "$BASE/wp-login.php")" = 503 ] && ok "even the login page is paused" || bad "the login page of a stopped site is not paused"
+  LINE=$(repquota -P -n "$MOUNT" </dev/null | grep "^#$QID "); [ -n "$LINE" ] && ok "project $QID still holds the site's data ($(echo "$LINE" | awk '{printf "%d MB used", $3/1024}'))" || bad "quota project $QID not found"
+  echo "$TOTAL checks, $FAILS failed"
+  exit "$FAILS"
+fi
 
 echo "== $SITE: containers"
 for n in "$PHP" "$DB"; do

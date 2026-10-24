@@ -13,7 +13,7 @@ set -u
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
 readonly MOUNT='{{ wp_data_mount }}'
-readonly VHOSTS="${WP_STATUS_VHOST_DIR:-/etc/nginx/conf.d}"
+readonly VHOSTS="${WP_STATUS_VHOST_DIR:-{{ wp_vhost_dir }}}"
 # name:state:quota project id:quota MB:backup project id:backup quota MB
 readonly TABLE='{{ wp_status_sites }}'
 {% raw %}
@@ -33,7 +33,7 @@ for entry in $TABLE; do
   [[ $name =~ ^[a-z][a-z0-9-]{1,23}$ && $qid =~ ^[0-9]+$ && $qmb =~ ^[0-9]+$ && $qmb -gt 0 && $bqid =~ ^[0-9]+$ && $bmb =~ ^[0-9]+$ && $bmb -gt 0 ]] || continue
   dir=$WP_DATA/$name
   vh=$VHOSTS/wp_site_$name.conf
-  if [ -f "$vh" ]; then if grep -q '^    deny all;' "$vh"; then actual=hold; else actual=live; fi; else actual=none; fi
+  if [ -f "$vh" ]; then if grep -q '^    deny all;' "$vh"; then actual=hold; elif grep -q 'return 503 "This site is paused' "$vh"; then actual=stopped; else actual=live; fi; else actual=none; fi
   unit=$(systemctl is-active "wp-$name" 2>/dev/null) || true; unit=${unit:-unknown}
   up=0; cn=${name//-/_}
   for c in php db; do

@@ -27,11 +27,15 @@ for a in "$@"; do printf '%s\n' "$a" >> "$SHIM_LOG/docker.argv"; done
 case "$1" in network) exit 0 ;; esac
 [ -n "${SHIM_RUN_RC:-}" ] && exit "$SHIM_RUN_RC"
 case " $* " in *" is-installed "*) [ "${SHIM_INSTALLED:-0}" = 1 ] && exit 0 || exit 1 ;; esac
+case " $* " in *" user get "*) [ "${SHIM_NO_USER:-0}" = 1 ] && exit 1; echo 1; exit 0 ;; esac
 case " $* " in *" verify-checksums "*) if [ "${SHIM_VERIFY_FAIL:-0}" = 1 ]; then echo "Error: checksums do not match"; exit 1; fi; echo "Success: Verified 1 of 1 plugins."; exit 0 ;; esac
 # like Docker: the container sees the caller's stdin only when -i is given
 case " $* " in *" -i "*)
   in=$(cat); { echo "--- stdin"; printf '%s\n' "$in"; } >> "$SHIM_LOG/docker.stdin" 2>/dev/null
   # like WP-CLI's prompt mode (seen on dellwp 2026-10-24, twice in the output): the prompt line shows the typed value, and then it PRINTS the command it built, password included, shell-quoted
+  case " $* " in *" user update "*"--prompt=user_pass"*)
+    [ "${SHIM_UPDATE_FAIL:-0}" = 1 ] && { echo "Error: could not update"; exit 1; }
+    echo "1/1 [--user_pass=<password>]: $in"; echo "wp user update adminuser --user_pass='${in//\'/\'\\\'\'}'"; echo "Success: Updated user 1." ;; esac
   case " $* " in *" core install "*"--prompt=admin_password"*)
     echo "2/3 [--admin_password=<password>]: $in"; echo "wp core install --skip-email --admin_password='${in//\'/\'\\\'\'}'"
     # and a message that has the value in it but not the option name (a validation warning, say)
@@ -59,7 +63,7 @@ class Tools(unittest.TestCase):
             (self.tmp / d).mkdir(parents=True)
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
-        for src, dest in (("wp_tools_common.sh.j2", "lib/common.sh"), ("wp_site_cli.sh.j2", "bin/wp-site-cli"), ("wp_site_install.sh.j2", "bin/wp-site-install"),
+        for src, dest in (("wp_tools_common.sh.j2", "lib/common.sh"), ("wp_site_cli.sh.j2", "bin/wp-site-cli"), ("wp_site_install.sh.j2", "bin/wp-site-install"), ("wp_site_password.sh.j2", "bin/wp-site-password"),
                           ("wp_site_login_check.sh.j2", "bin/wp-site-login-check"), ("wp_site_ext.sh.j2", "bin/wp-site-ext"), ("wp_site_cron.sh.j2", "bin/wp-site-cron")):
             (self.tmp / dest).write_text(env.get_template(src).render(**v))
             if dest.startswith("bin/"):
@@ -154,7 +158,7 @@ class Tools(unittest.TestCase):
     def test_code_mode_allows_only_wordpress_org_slugs_and_a_few_flags(self):
         allowed = [("core", "update", "--minor"), ("core", "version"), ("plugin", "install", "woocommerce", "--version=9.3.1"), ("plugin", "update", "--all"),
                    ("plugin", "update", "woocommerce", "--dry-run"), ("plugin", "delete", "foo-bar"), ("theme", "install", "twentytwentysix"), ("plugin", "list", "--format=json"),
-                   ("plugin", "verify-checksums", "--all")]
+                   ("plugin", "verify-checksums", "--all"), ("core", "check-update", "--major", "--field=version"), ("core", "check-update", "--minor", "--field=version")]
         for cmd in allowed:
             with self.subTest(("allowed",) + cmd):
                 (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
@@ -186,7 +190,8 @@ class Tools(unittest.TestCase):
                     ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--locale=de_DE"), ("core", "download", "--version=7.1.3;id", "--force", "--skip-content"),
                     ("core", "download", "--version=latest", "--force", "--skip-content"), ("core", "download", "--version=https://evil.example/w.zip", "--force", "--skip-content"),
                     ("core", "download", "--skip-content", "--force", "--version=7.1.3"), ("core", "download", "--version=7.1.3", "--force", "--skip-content", "--path=/x"),
-                    ("plugin", "install", "x", "--skip-content"), ("plugin", "update", "x", "--force")):
+                    ("plugin", "install", "x", "--skip-content"), ("plugin", "update", "x", "--force"),
+                    ("core", "update", "--major"), ("plugin", "update", "--all", "--major"), ("core", "update", "--version=7.2", "--major")):
             with self.subTest(cmd):
                 (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
                 self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *cmd).returncode, 2, cmd)
@@ -319,6 +324,91 @@ class Tools(unittest.TestCase):
                 r = self.run_tool("wp-site-install", "wptest", *opts, tty=pw)
                 self.assertEqual(r.returncode, 2, (opts, r.stderr))
                 self.assertNotIn("install", [x for x in self.argv() if x == "install"], "nothing may be installed")
+
+    # --- changing a password
+    def words(self):
+        return self.log("docker.argv").splitlines()
+
+    def at(self, *seq):
+        w = self.words()
+        for i in range(len(w) - len(seq) + 1):
+            if w[i:i + len(seq)] == list(seq):
+                return i
+        return -1
+
+    def pw_answers(self, pw=GOOD, pw2=None):
+        return "%s\n%s\n" % (pw, pw if pw2 is None else pw2)
+
+    def test_password_asks_at_a_hidden_prompt_and_never_shows_or_passes_the_value(self):
+        for pw in (GOOD, "it's a long 'quoted' pass$word"):
+            with self.subTest(pw):
+                (self.tmp / "log" / "docker.stdin").unlink(missing_ok=True); (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers(pw))
+                shown = r.stdout + r.stderr
+                self.assertNotIn(pw, shown); self.assertNotIn(pw, self.log("docker.argv"), "password in a docker argument"); self.assertNotIn(pw, self.log("curl.argv"))
+                for piece in (pw.split()[-1], "quoted", "pass$word", "correct-horse"):
+                    self.assertNotIn(piece, shown, "a piece of the password is on screen: " + piece)
+                self.assertIn("--user_pass=REDACTED", shown, "WP-CLI's echo reaches the screen with the value removed")
+                self.assertIn(pw, self.log("docker.stdin"), "the password reaches WP-CLI on stdin")
+                self.assertIn("%d characters" % len(pw), r.stderr)
+                self.assertIn("--prompt=user_pass", self.words())
+                if pw == GOOD:
+                    self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("right password ok, wrong password refused", r.stderr)
+
+    def test_password_checks_the_user_changes_ends_the_other_sessions_then_proves_the_result_in_that_order(self):
+        r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        get, upd, ses = self.at("user", "get", "adminuser"), self.at("user", "update", "adminuser"), self.at("user", "session", "destroy", "adminuser", "--all")
+        self.assertTrue(0 <= get < upd < ses, (get, upd, ses))
+        self.assertGreater(self.log("curl.argv").count("--- curl"), 1, "the login check runs after the sessions are ended")
+        self.assertIn("other sessions ended", r.stderr)
+
+    def test_password_stops_at_each_failure_before_doing_anything_further(self):
+        r = self.run_tool("wp-site-password", "wptest", "ghost", tty=self.pw_answers(), env_extra={"SHIM_NO_USER": "1"})
+        self.assertEqual(r.returncode, 2); self.assertIn("has no user 'ghost'", r.stderr); self.assertEqual(self.at("user", "update"), -1); self.assertNotIn("Password", r.stderr)
+        for label, ans in (("mismatch", self.pw_answers(pw2="different-entry-xyz")), ("short", self.pw_answers(pw="short"))):
+            with self.subTest(label):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                self.assertEqual(self.run_tool("wp-site-password", "wptest", "adminuser", tty=ans).returncode, 2)
+                self.assertEqual(self.at("user", "update"), -1, "nothing may be changed")
+        (self.tmp / "log" / "docker.argv").unlink(missing_ok=True); (self.tmp / "log" / "curl.argv").unlink(missing_ok=True)
+        r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers(), env_extra={"SHIM_UPDATE_FAIL": "1"})
+        self.assertNotEqual(r.returncode, 0, "a failing update must not be hidden by the pipe through the redaction")
+        self.assertEqual(self.at("user", "session", "destroy"), -1); self.assertEqual(self.log("curl.argv"), "", "no login check after a failed update")
+
+    def test_password_refuses_odd_arguments_and_names_and_has_no_password_option(self):
+        pw = self.pw_answers()
+        for args in (("wptest",), ("wptest", "adminuser", "extra"), ("wptest", "adminuser", "--password=" + GOOD), ("nosuch", "adminuser"), ("wptest", "bad user!"), ("wptest", "a;id"),
+                     ("wptest", "../x"), ("wptest", ""), ("wptest", "x" * 61), ()):
+            with self.subTest(args):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                self.assertEqual(self.run_tool("wp-site-password", *args, tty=pw).returncode, 2, args)
+                self.assertEqual(self.at("user", "update"), -1)
+
+    def test_password_wrong_password_after_the_change_is_reported(self):
+        (self.tmp / "shim" / "curl").write_text("#!/bin/bash\ncat >/dev/null\nprintf 'HTTP/1.1 200 OK\\r\\n\\r\\n'\n")
+        r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers())
+        self.assertEqual(r.returncode, 1); self.assertIn("right password FAILED", r.stderr)
+
+    def test_a_closed_site_is_not_in_the_tools_allowlist_and_has_no_update_policy(self):
+        import jinja2
+        sites = [{"name": "alive"}, {"name": "gone", "state": "closed"}, {"name": "held", "state": "hold"}, {"name": "tomb2", "state": "closed"}]
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
+        lib = env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=sites))
+        self.assertIn("readonly WP_SITES='alive held'", lib, "the tools act on sites that exist; a tombstone is 'not in wp_sites'")
+        self.assertEqual(env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=[{"name": "only"}])).count("readonly WP_SITES='only'"), 1)
+        tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
+        expr = [t for t in tools if t.get("name") == "Deploy the tools"][0]["vars"]["wp_update_policies"]
+        got = jinja2.Environment().from_string(expr).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()
+        self.assertEqual(got, "alive:%s held:%s" % (self.v["wp_site_defaults"]["update_policy"], self.v["wp_site_defaults"]["update_policy"]))
+
+    def test_install_and_password_refuse_a_stopped_site_before_asking_for_anything(self):
+        (self.tmp / "data/sites/wptest/stopped.flag").write_text("")
+        for tool, args in (("wp-site-install", ("wptest",)), ("wp-site-password", ("wptest", "adminuser"))):
+            (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+            r = self.run_tool(tool, *args, tty=self.answers() if tool == "wp-site-install" else self.pw_answers())
+            self.assertEqual(r.returncode, 2, tool); self.assertIn("is stopped", r.stderr); self.assertNotIn("not shown", r.stderr, "no prompt for anything")
+            self.assertEqual(self.at("user", "update"), -1); self.assertNotIn("install", [x for x in self.words() if x == "install"])
 
     def test_install_fails_loudly_when_the_login_does_not_work(self):
         (self.tmp / "shim" / "curl").write_text("#!/bin/bash\ncat >/dev/null\nprintf 'HTTP/1.1 200 OK\\r\\n\\r\\n'\n")
@@ -504,7 +594,7 @@ class Tools(unittest.TestCase):
         tasks = yaml.safe_load(text)
         names = [t.get("name", "") for t in tasks]
         deploy = names.index("Deploy the site's systemd unit")
-        start = names.index("Start the site, or restart it when its compose file or database settings changed")
+        start = names.index("Start the site, or restart it when its compose file or database settings changed; stop it when it is stopped")
         reload_ = names.index("Recreate only the php container when only its mounted files changed")
         self.assertLess(deploy, start)
         self.assertLess(start, reload_)
@@ -535,10 +625,24 @@ class Tools(unittest.TestCase):
         self.assertEqual(decide(env=True, php=True), (True, True), "both: the restart covers it (the reload task is skipped)")
         start = [t for t in tasks if t.get("name", "").startswith("Start the site, or restart it")][0]["ansible.builtin.systemd"]
         for restart, want in ((True, "restarted"), (False, "started")):
-            self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart).strip(), want, "the unit must act on the decision")
+            for state in ("hold", "live"):
+                self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": state}).strip(), want, "the unit must act on the decision")
+        for restart in (True, False):
+            self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": "stopped"}).strip(), "stopped", "a stopped site's unit is stopped whatever changed")
         reload_task = [t for t in tasks if t.get("name", "").startswith("Recreate only the php container")][0]
         self.assertEqual(reload_task["ansible.builtin.systemd"]["state"], "reloaded")
         self.assertIn("not (wp_site_restart | bool)", reload_task["when"])
+        self.assertIn("wp_s.state != 'stopped'", reload_task["when"], "no php to recreate in a stopped site")
+
+    def test_a_stopped_site_loses_the_final_backups_maintenance_flag_only_after_its_containers_are_down(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
+        names = [t.get("name", "") for t in tasks]
+        stop = [i for i, n in enumerate(names) if n.startswith("Start the site, or restart it") and "stop it when it is stopped" in n][0]
+        rm = names.index("Take the maintenance flag away from a stopped site")
+        self.assertGreater(rm, stop, "the flag keeps the site quiet until the unit has stopped")
+        t = tasks[rm]
+        self.assertEqual((t["ansible.builtin.file"]["state"], t["when"]), ("absent", "wp_s.state == 'stopped'"))
+        self.assertTrue(t["ansible.builtin.file"]["path"].endswith("/maintenance.flag"))
 
     def test_only_live_sites_get_a_running_timer_and_systemd_is_reloaded_first(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())

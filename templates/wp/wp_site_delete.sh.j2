@@ -1,0 +1,137 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_delete.sh.j2). Remove a stopped site for good, keeping its last backup for {{ wp_archive_keep_days }} days:   ssh -t dellwp sudo wp-site-delete <site>
+# THE ONLY PLACE THAT DELETES A SITE'S DATA. The play never does (tasks/wp_sites_common.yml stops while a closed site still has a directory); this tool is run by hand, or by
+# `python3 scripts/wp_sites.py delete <site>`, and asks for the site's name to be typed.
+# What must be true first (each is checked before anything is touched, and a failure changes nothing):
+#   - the site is stopped (stopped.flag, rendered by the play from state: stopped), is not frozen, and its directory and its backup directory are real directories, not links
+#   - the NEWEST snapshot of the site is a final one (tag=final, taken by `wp_sites.py stop` with the site in maintenance), so nothing newer exists that the archive would lose, and
+#     its dump passes gzip -t, has its completion marker and a wp_options table
+# Then: you type the site's name; the archive is built in a hidden directory under {{ wp_archive_dir }} and checked (gzip -t, tar -t, a checksum of each file); only a verified archive is
+# moved into place; and only then is anything removed: the unit and its timers, the containers and network (there are none while stopped), the nginx vhost (nginx -t must still pass
+# after it, or the vhost is put back and the tool stops), the site's directory and its backups, and the limits of its two quota projects. The archive is
+# {{ wp_archive_dir }}/<site>-<snapshot stamp>/ with db.sql.gz, wp-content.tar.gz and a MANIFEST that says when it expires; wp-archive-purge removes it then. Run again after an interruption it resumes:
+# an archive that is already there and verifies is used, and every removal tolerates what is already gone. The Proxmox backups of the whole VM keep older copies for months and cannot be purged per site.
+# After this the repo must say the site is closed (state: closed; scripts/wp_sites.py delete does it): the play then keeps the tombstone clean.
+set -eu -o pipefail
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+readonly ARCHIVE='{{ wp_archive_dir }}'
+readonly KEEP_DAYS='{{ wp_archive_keep_days }}'
+readonly UNIT_DIR='{{ wp_unit_dir }}'
+readonly VHOST_DIR='{{ wp_vhost_dir }}'
+readonly STATE_DIR='{{ wp_disk_state_dir }}'
+readonly MOUNT='{{ wp_data_mount }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST_NAME='{{ inventory_hostname }}'
+{% raw %}
+usage() { echo "usage: wp-site-delete <site>   (run with ssh -t: it asks you to type the site's name)" >&2; exit 2; }
+[ "$#" -eq 1 ] || usage
+require_site "$1"
+bk=$BACKUPS/$site
+unit=wp-$site.service; vhost=$VHOST_DIR/wp_site_$site.conf
+php=wp_${site//-/_}_php; db=wp_${site//-/_}_db; net=wp-${site}_default
+log() { echo "wp-site-delete: $*"; command -v logger >/dev/null && logger -t wp-site-delete -- "site=$site $*" || true; }
+real_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }   # a real directory, not a link: rm -rf must never follow one
+
+# --- 1. what is there, and whether this run is a fresh delete or the resumption of one
+have_site=no; have_bk=no
+[ -e "$dir" ] || [ -L "$dir" ] && have_site=yes
+[ -e "$bk" ] || [ -L "$bk" ] && have_bk=yes
+shopt -s nullglob
+existing=("$ARCHIVE/$site"-[0-9]*T*Z)
+shopt -u nullglob
+if [ "$have_site" = no ] && [ "${#existing[@]}" = 0 ]; then die "$site has no directory and no archive: there is nothing to delete (backups at $bk, if there are any, are left alone: look at them)"; fi
+resume=no; [ "$have_site" = yes ] || resume=yes   # the site's directory is the first thing to go, so a missing one plus an archive means an earlier run got that far
+
+if [ "$resume" = no ]; then
+  [ "$have_site" = yes ] && real_dir "$dir" || die "$dir is not a real directory (missing or a link): refusing"
+  real_dir "$bk" || die "$bk is not a real directory (missing or a link): refusing"
+  [ -e "$dir/stopped.flag" ] || die "$site is not stopped: stop it first with python3 scripts/wp_sites.py stop $site (it takes the final backup this tool archives)"
+  for f in "$WP_FREEZE" "$dir/freeze"; do [ ! -e "$f" ] || die "$site is frozen ($f exists): a freeze means leave it exactly as it is"; done
+  [ -z "$(docker ps -q --filter "name=^wp_${site//-/_}_" </dev/null)" ] || die "a container of $site is running although it is marked stopped; stop it properly first"
+  newest=$(find "$bk" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort | tail -n 1)
+  [ -n "$newest" ] || die "there is no snapshot of $site under $bk"
+  snap=$bk/$newest
+  grep -qx 'tag=final' "$snap/MANIFEST" 2>/dev/null || die "the newest snapshot of $site ($newest) is not a final one: stop the site with python3 scripts/wp_sites.py stop $site, which takes the final backup, then delete it"
+  [ -f "$snap/db.sql.gz" ] && [ -d "$snap/files" ] || die "$snap is not a complete snapshot"
+  gzip -t "$snap/db.sql.gz" || die "the final snapshot's dump fails gzip's integrity check"
+  case "$(gzip -dc "$snap/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the final snapshot's dump has no completion marker (truncated?)" ;; esac
+  [ "$(gzip -dc "$snap/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the final snapshot's dump has no wp_options table"
+  snap_core=$(sed -n 's/^core=//p' "$snap/MANIFEST" | head -n 1)
+  size_kb=$(du -sk "$snap" | cut -f1)
+  expires=$(date -u -d "+$KEEP_DAYS days" +%Y-%m-%d)
+  echo "About to DELETE $site ($host) for good:"
+  echo "  its final snapshot $newest (core ${snap_core:-unknown}, about $((size_kb / 1024)) MB) is archived in $ARCHIVE/$site-$newest and kept until $expires;"
+  echo "  its containers, unit, timers, nginx vhost, directory $dir and backups $bk are removed."
+  open_tty
+  ask "Type the site's name ($site) to go on: " answer
+  [ "$answer" = "$site" ] || die "not confirmed; nothing was changed"
+else
+  [ "${#existing[@]}" -ge 1 ] || die "nothing to resume"
+  echo "$site's directory is already gone and the archive ${existing[0]} exists: finishing the clean-up."
+  newest=${existing[0]##*-}
+fi
+
+# --- 2. the archive: built hidden, checked, and only then moved into place
+final=$ARCHIVE/$site-$newest
+if [ "$resume" = no ]; then
+  umask 077
+  if [ -d "$final" ]; then
+    # left by an earlier, interrupted run: usable only if it verifies exactly like a new one would
+    tmp=$final
+    echo "an archive for this snapshot already exists: checking it"
+  else
+    tmp=$ARCHIVE/.partial-$site-$newest
+    rm -rf -- "${tmp:?}"
+    mkdir -- "$tmp"
+    trap 'rm -rf -- "${tmp:?}"' EXIT
+    cp -- "$snap/db.sql.gz" "$tmp/db.sql.gz"
+    tar -C "$snap" -czf "$tmp/wp-content.tar.gz" files
+    {
+      echo "site=$site"; echo "snapshot=$newest"; echo "core=${snap_core:-unknown}"; echo "deleted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "expires=$expires"
+      echo "db_sha256=$(sha256sum "$tmp/db.sql.gz" | cut -d' ' -f1)"; echo "files_sha256=$(sha256sum "$tmp/wp-content.tar.gz" | cut -d' ' -f1)"
+    } > "$tmp/MANIFEST"
+  fi
+  gzip -t "$tmp/db.sql.gz" || die "the archived dump fails gzip's integrity check; nothing was removed"
+  tar -tzf "$tmp/wp-content.tar.gz" >/dev/null || die "the archived wp-content does not read back; nothing was removed"
+  [ "$(sed -n 's/^db_sha256=//p' "$tmp/MANIFEST")" = "$(sha256sum "$tmp/db.sql.gz" | cut -d' ' -f1)" ] || die "the archived dump does not match its checksum; nothing was removed"
+  [ "$(sed -n 's/^files_sha256=//p' "$tmp/MANIFEST")" = "$(sha256sum "$tmp/wp-content.tar.gz" | cut -d' ' -f1)" ] || die "the archived wp-content does not match its checksum; nothing was removed"
+  if [ "$tmp" != "$final" ]; then mv -- "$tmp" "$final"; fi
+  trap - EXIT
+  log "archived $newest to $final, kept until $(sed -n 's/^expires=//p' "$final/MANIFEST")"
+fi
+
+# --- 3. the removal. Every step tolerates what is already gone, so an interrupted run can be run again.
+log "removing the site"
+for t in cron backup update; do systemctl disable --now "wp-$t@$site.timer" </dev/null >/dev/null 2>&1 || true; done
+systemctl disable --now "$unit" </dev/null >/dev/null 2>&1 || true
+docker rm -f "$php" "$db" </dev/null >/dev/null 2>&1 || true
+docker network rm "$net" </dev/null >/dev/null 2>&1 || true
+if [ -e "$vhost" ]; then
+  cp -- "$vhost" "$vhost.deleting"
+  rm -f -- "$vhost"
+  if ! nginx -t </dev/null >/dev/null 2>&1; then
+    mv -- "$vhost.deleting" "$vhost"
+    die "nginx -t fails without the vhost of $site; the vhost was put back and nothing else was removed. Look at nginx -t, then run this again"
+  fi
+  rm -f -- "$vhost.deleting"
+  systemctl reload nginx </dev/null
+fi
+rm -f -- "$UNIT_DIR/$unit"
+systemctl daemon-reload </dev/null
+systemctl reset-failed "wp-$site.service" "wp-cron@$site.service" "wp-backup@$site.service" "wp-update@$site.service" </dev/null >/dev/null 2>&1 || true
+rm -f -- "$STATE_DIR/backup-stale-$site.flag"
+# the quota projects: the limits go (the ids stay reserved in the repo for good). The project of each directory is read from the directory itself, before it is removed.
+for d in "$dir" "$bk"; do
+  if real_dir "$d"; then
+    pid=$(lsattr -dp "$d" | awk '{print $1}')
+    rm -rf -- "${d:?}"
+    [[ $pid =~ ^[0-9]+$ ]] && [ "$pid" -gt 0 ] && setquota -P "$pid" 0 0 0 0 "$MOUNT" || true
+  elif [ -L "$d" ]; then
+    die "$d is a link; it was not followed and not removed"
+  fi
+done
+log "removed. The archive $final stays until $(sed -n 's/^expires=//p' "$final/MANIFEST")"
+command -v ntfy-notify >/dev/null && ntfy-notify "$TOPIC" "$HOST_NAME site $site was deleted; its last backup is archived in $final until $(sed -n 's/^expires=//p' "$final/MANIFEST"). Set it to state: closed in the repo (python3 scripts/wp_sites.py delete does)" || true
+echo "== $site deleted. Archive: $final (until $(sed -n 's/^expires=//p' "$final/MANIFEST"))" >&2
+{% endraw %}

@@ -78,6 +78,8 @@ class Edit(unittest.TestCase):
         text = (ROOT / S.VARS).read_text()
         for site in [s["name"] for s in yaml.safe_load(text)["wp_sites"]]:
             now = S.current_state(text, site)
+            if now not in S.STATES:
+                continue   # a stopped or closed site is not this script's to flip (stop, start and delete are wp_sites.py's); it is the real file's layout that is round-tripped here
             other = "hold" if now == "live" else "live"
             flipped = S.set_state(text, site, other)
             self.assertEqual(S.current_state(flipped, site), other)
@@ -134,6 +136,16 @@ class Orchestration(unittest.TestCase):
         r = self.run_in_repo("alpha", "hold", stdin="n\n")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.called(), "")
+
+    def test_a_closed_site_is_never_flipped(self):
+        vars_ = self.repo / S.VARS
+        vars_.write_text(vars_.read_text().replace("  - name: gamma\n    port: 9103\n    state: hold\n", "  - name: gamma\n    port: 9103\n    state: closed\n", 1))
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-am", "gamma closed"], check=True, capture_output=True)
+        before = vars_.read_text()
+        for state in ("hold", "live"):
+            r = self.run_in_repo("gamma", state, "--yes")
+            self.assertEqual(r.returncode, 2, r.stdout); self.assertIn("is closed", r.stderr)
+        self.assertEqual(vars_.read_text(), before); self.assertEqual(self.called(), "")
 
     def test_a_failed_play_stops_before_the_verifier_and_says_so(self):
         self.env["SHIM_RC"] = "2"
