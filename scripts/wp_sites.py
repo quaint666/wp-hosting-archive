@@ -51,7 +51,7 @@ EDITABLE = {
     "allow_xmlrpc": ("bool",),
 }
 # What each change costs, so the question can say it: the compose file changes (the whole stack restarts, about ten seconds), or only the vhost or php.ini (a reload).
-RESTARTS = {"php_mem_mb": "restarts the whole stack (about ten seconds offline)", "db_mem_mb": "restarts the whole stack (about ten seconds offline)",
+RESTARTS = {"php_mem_mb": "restarts the whole stack, about ten seconds offline", "db_mem_mb": "restarts the whole stack, about ten seconds offline",
             "upload_mb": "reloads nginx and php", "allow_xmlrpc": "reloads nginx"}
 
 
@@ -383,7 +383,7 @@ class Sites:
     # --- menu
     def menu(self):
         while True:
-            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit" % HOST)
+            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit   (python3 scripts/wp_sites.py --help lists every option)" % HOST)
             try:
                 choice = self._ask("> ").strip()
             except EOFError:
@@ -403,20 +403,80 @@ class Sites:
                 self.out("wp_sites: %s" % e)
 
 
-def main(argv=None, repo=REPO, ask=input, run=None, out=print):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = ap.add_subparsers(dest="cmd")
-    sub.add_parser("list")
-    c = sub.add_parser("create")
-    c.add_argument("--name"); c.add_argument("--state", choices=STATES); c.add_argument("--policy", choices=POLICIES)
-    c.add_argument("--title"); c.add_argument("--user"); c.add_argument("--email")
-    m = sub.add_parser("modify")
-    m.add_argument("site")
+def field_help(keys=None):
+    """One line per editable field: what it takes (generated from EDITABLE, the table the script validates against, so the help cannot drift from the checks)."""
+    lines = []
+    for key, spec in EDITABLE.items():
+        if keys is not None and key not in keys:
+            continue
+        what = "|".join(spec[1]) if spec[0] == "choice" else ("true|false" if spec[0] == "bool" else "%d..%d" % (spec[1], spec[2]))
+        lines.append("  %-16s %-20s%s" % (key, what, "[%s]" % RESTARTS[key] if key in RESTARTS else ""))
+    return "\n".join(lines)
+
+
+TOOLS_HELP = """\
+On the VM (run as: ssh -t dellwp sudo <tool>; every tool prints its usage when run with no arguments):
+  wp-site-update <site> [--check|--apply]      what is available / apply it, with a snapshot first and a rollback
+  wp-site-recover <site> [stamp|latest]        put a site back to a snapshot (database, wp-content, core)
+  wp-site-backup <site> [--force]              back a site up now
+  wp-site-restore <site> [stamp|latest]        prove a backup restores (a drill into scratch; never touches the site)
+  wp-site-install <site> [--title --user --email]   install WordPress into a site that has none (asks the password, hidden)
+  wp-site-ext <site> plugin|theme install|update|delete <slug>   plugins and themes, wordpress.org slugs only
+  wp-site-cli <site> <wp arguments>            WP-CLI against a site as the web app
+Other scripts here: wp_sites_status.py (the table), wp_site_state.py <site> hold|live, wp_site_verify_dellwp.sh <site>, and the rehearsals wp_*_rehearsal_dellwp.sh."""
+
+EXAMPLES = """\
+examples:
+  python3 scripts/wp_sites.py                          a numbered menu (list, create, change)
+  python3 scripts/wp_sites.py list
+  python3 scripts/wp_sites.py create                   asks for everything it needs
+  python3 scripts/wp_sites.py create --name shop --state hold --policy notify --title "Shop" --user owner --email owner@example.org
+  python3 scripts/wp_sites.py modify shop --set update_policy=auto
+  python3 scripts/wp_sites.py modify shop --set state=live --set upload_mb=128
+  python3 scripts/wp_sites.py modify shop --no-run     edit the file and show the diff, run nothing
+
+notes:
+  The administrator password is never an option and is not asked by this script: wp-site-install asks for it on the VM at a hidden prompt.
+  Going live (public on the internet) always asks its own question; --yes does not answer it, --yes-public does.
+  A new site gets no check run (check mode cannot handle a site that does not exist yet); a change to an existing site does.
+  The file must be committed first, and the script leaves the commit to you: it prints the command.
+  Not here yet: delete, rename, password reset.
+
+""" + TOOLS_HELP
+
+
+def build_parser():
+    fmt = argparse.RawDescriptionHelpFormatter
+    ap = argparse.ArgumentParser(prog="wp_sites.py", formatter_class=fmt, description="Manage the WordPress sites on dellwp: list them, create one, change one. With no command it shows a menu.", epilog=EXAMPLES)
+    sub = ap.add_subparsers(dest="cmd", title="commands", metavar="<command>")
+    sub.add_parser("list", formatter_class=fmt, help="the one-table view of every site (wp_sites_status.py)", description="Show every site: state, stack, WordPress version, plugins, backup age, quota use, cron.")
+    c = sub.add_parser("create", formatter_class=fmt, help="create a site: edit wp_sites, run the play, install WordPress, verify",
+                       description="Create a site at <name>.%s. Every value not given as an option is asked. Steps: validate against the play's own rules, show the diff, write, run the play "
+                                   "(real run and a second run that must end changed=0), run wp-site-install on the VM (the password is typed there, hidden), run the verifier.\n\n"
+                                   "limits you may set with --set (the defaults apply when not set):\n" % "example.com" + field_help(("quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc")),
+                       )
+    c.add_argument("--name", help="the site name: letters, digits, single hyphens inside; 2 to 24 characters; the hostname is <name>.<domain>")
+    c.add_argument("--state", choices=STATES, help="hold (only the VM itself can reach it; the default) or live (public)")
+    c.add_argument("--policy", choices=POLICIES, help="update policy: auto applies updates nightly with a snapshot first and a rollback if the site breaks (core: minor and security releases only; plugins and themes: any newer version, "
+                                                         "majors included); notify only tells you, once per set (the default); freeze does nothing")
+    c.add_argument("--title", help="the WordPress site title (1 to 100 characters)")
+    c.add_argument("--user", help="the administrator's user name (3 to 30 characters of letters, digits, . _ -)")
+    c.add_argument("--email", help="the administrator's email address")
+    m = sub.add_parser("modify", formatter_class=fmt, help="change a site's state, update policy, quotas, memory, upload size",
+                       description="Change one site. With no --set it shows the current values and asks which field to change, until you give an empty answer. "
+                                   "The new site list is checked against the play's own rules before anything is written; a change to an existing site gets a check run first.\n\n"
+                                   "fields (--set KEY=VALUE):\n" + field_help() + "\n\nNot editable here: name, port, quota_id, secret_rev.")
+    m.add_argument("site", help="the site's name, as in wp_sites")
     for p in (c, m):
-        p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="; ".join(EDITABLE))
+        p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="set a field; can be repeated (the fields are listed above)")
         p.add_argument("--yes", action="store_true", help="do not ask before writing and running (it does not answer the question about going public)")
         p.add_argument("--yes-public", action="store_true", help="answer yes to 'make it public?'")
         p.add_argument("--no-run", action="store_true", help="edit the file and show the diff, run nothing")
+    return ap
+
+
+def main(argv=None, repo=REPO, ask=input, run=None, out=print):
+    ap = build_parser()
     a = ap.parse_args(argv)
     s = Sites(repo, ask, run, out)
     try:

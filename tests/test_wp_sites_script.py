@@ -29,10 +29,13 @@ class Base(unittest.TestCase):
         self.vars = self.tmp / "host_vars/dellwp/vars.yml"
         # the committed file, not the working copy: an uncommitted edit (a site this script just added, say) must not change what the tests start from
         head = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:host_vars/dellwp/vars.yml"], capture_output=True, text=True)
-        if head.returncode == 0:
-            self.vars.write_text(head.stdout)
-        else:
-            shutil.copy(ROOT / "host_vars/dellwp/vars.yml", self.vars)
+        text = head.stdout if head.returncode == 0 else (ROOT / "host_vars/dellwp/vars.yml").read_text()
+        # ...and only its first site: the repo gains sites (helloworld is committed), and every expectation here (ports, ids, names) is about a list that starts with one
+        lines = text.split("\n")
+        for extra in [x["name"] for x in yaml.safe_load(text)["wp_sites"]][1:]:
+            start, end = w.site_span(lines, extra)
+            del lines[start:end]
+        self.vars.write_text("\n".join(lines))
         for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
             subprocess.run(["git", "-C", str(self.tmp), *cmd], check=True, capture_output=True)
         self.original = self.vars.read_text()
@@ -342,6 +345,58 @@ class Modify(Base):
         self.vars.write_text(self.original + "# x\n")
         with self.assertRaises(w.Refuse):
             self.sites().modify("wptest", sets=("update_policy=notify",), yes=True)
+
+
+class Help(Base):
+    def help_text(self, *argv):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as cm:
+            w.main(list(argv) + ["--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=self.out)
+        self.assertEqual(cm.exception.code, 0)
+        return buf.getvalue()
+
+    def test_every_command_explains_itself(self):
+        top = self.help_text()
+        for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: delete, rename, password reset"):
+            self.assertIn(needle, top)
+        self.assertIn("wp-site-update", top); self.assertIn("ssh -t dellwp sudo", top)
+        for cmd, needles in (("create", ("--name", "--state", "--policy", "--title", "--user", "--email", "--set", "--yes", "--yes-public", "--no-run", "example.com", "second run that must end changed=0")),
+                             ("modify", ("site", "--set", "--yes", "--yes-public", "--no-run", "Not editable here: name, port, quota_id, secret_rev")), ("list", ("state, stack",))):
+            text = self.help_text(cmd)
+            for n in needles:
+                self.assertIn(n, text, "%s --help lacks %r" % (cmd, n))
+
+    def test_the_fields_in_the_help_are_the_ones_the_script_validates(self):
+        text = self.help_text("modify")
+        for key, spec in w.EDITABLE.items():
+            line = next((l for l in text.splitlines() if l.strip().startswith(key + " ")), None)
+            self.assertIsNotNone(line, key + " is not in the help")
+            if spec[0] == "choice":
+                self.assertIn("|".join(spec[1]), line)
+            elif spec[0] == "int":
+                self.assertIn("%d..%d" % (spec[1], spec[2]), line)
+        for key in w.RESTARTS:
+            self.assertIn(w.RESTARTS[key], text)
+        for key in ("port", "quota_id", "secret_rev"):
+            self.assertNotIn("\n  %s " % key, text.split("Not editable here")[0], "an uneditable field is listed as editable")
+
+    def test_the_help_says_what_auto_really_does_about_major_updates(self):
+        # the operator asked whether auto asks permission for major updates; the help must not leave that to memory
+        text = self.help_text("create")
+        flat = " ".join(text.split())   # argparse wraps lines
+        self.assertIn("core: minor and security releases only; plugins and themes: any newer version, majors included", flat)
+
+    def test_the_tools_the_help_names_exist_and_print_a_usage_line(self):
+        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
+        top = self.help_text()
+        for tool in ("wp-site-update", "wp-site-recover", "wp-site-backup", "wp-site-restore", "wp-site-install", "wp-site-ext", "wp-site-cli"):
+            self.assertIn(tool, deployed, tool + " is not deployed"); self.assertIn(tool, top)
+            src = (ROOT / "templates/wp" / ("wp_" + tool.replace("wp-", "", 1).replace("-", "_") + ".sh.j2")).read_text()
+            self.assertIn("usage: " + tool, src, tool + " does not print a usage line")
+        for script in ("wp_sites_status.py", "wp_site_state.py", "wp_site_verify_dellwp.sh"):
+            self.assertTrue((ROOT / "scripts" / script).exists(), script)
 
 
 class Surface(Base):
