@@ -518,6 +518,26 @@ class Drill(Base):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.log("restore.calls").count("\n"), 1, "nothing else was run")
 
+    def test_with_no_site_at_all_there_is_nothing_to_drill_and_nothing_is_wrong(self):
+        for label, sites in (("none ever made", []), ("every one closed", [{"name": "gone", "state": "closed"}, {"name": "gone2", "state": "closed"}])):
+            with self.subTest(label):
+                script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=sites)
+                self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=sites)   # the drill reads its site list from the shared library
+                (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
+                r = self.run_script(script)
+                self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("there are no sites", r.stdout)
+                self.assertEqual(self.log("restore.calls"), "", "no restore was started")
+
+    def test_a_closed_site_with_an_old_backup_is_never_drilled(self):
+        script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
+        self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
+        (self.backups / "alpha").mkdir(exist_ok=True); (self.backups / "alpha" / ".last-success").write_text("20261024T201500Z")
+        (self.backups / "gone").mkdir(exist_ok=True); (self.backups / "gone" / ".last-success").write_text("20261024T201500Z")
+        for _ in range(8):
+            (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
+            self.assertEqual(self.run_script(script).returncode, 0)
+            self.assertEqual(self.log("restore.calls").split()[0], "alpha")
+
     def test_with_no_backup_anywhere_it_fails_so_that_the_unit_alerts(self):
         for n in ("wptest", "alpha", "beta"):
             (self.backups / n / ".last-success").unlink()

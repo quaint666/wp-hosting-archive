@@ -2,12 +2,14 @@
 # Managed by Ansible (templates/wp/wp_restore_drill.sh.j2). The monthly restore drill:   wp-restore-drill
 # Picks one site at random among those that have a good backup (.last-success) and runs wp-site-restore on its newest snapshot with --notify, so the result reaches ntfy every month:
 # "restore drill of <site> from <stamp>: OK (...)" or "... FAILED: <why>". Random on purpose: over a few months every site is tried, and nobody has to remember which. If no
-# site has a backup at all it fails, which fails the unit, whose OnFailure= tells ntfy: a drill that cannot even start is a finding. WP_DRILL_SITE in the environment names the site
+# site has a backup at all it fails, which fails the unit, whose OnFailure= tells ntfy: a drill that cannot even start is a finding. With NO site at all (none was made, or every one is
+# closed) there is nothing to drill and nothing is wrong: it says so and succeeds, so an empty VM does not alert every month. WP_DRILL_SITE in the environment names the site
 # (for a hand run or a rehearsal). The drill restores into a scratch copy and never touches a site, so it does not look at the freeze flags.
 set -eu
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
 {% raw %}
+if [ -z "${WP_SITES// /}" ]; then echo "restore drill: there are no sites on this VM (none made, or all closed); nothing to drill"; exit 0; fi
 candidates=()
 for s in $WP_SITES; do
   [[ $s =~ ^[a-z][a-z0-9-]{1,23}$ ]] && [ -f "$BACKUPS/$s/.last-success" ] && candidates+=("$s")
