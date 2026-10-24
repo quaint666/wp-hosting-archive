@@ -173,6 +173,7 @@ class Render(unittest.TestCase):
         self.assertIn("session.upload_progress.enabled = 0", self.render("site_php.ini.j2"))
 
     def test_nginx_vhost_rules(self):
+        self.ctx["wp_s"] = {**self.ctx["wp_s"], "state": "hold", "allow_xmlrpc": False}  # the test sets the state it tests; the repo's site may be live
         conf = self.render("site_nginx.conf.j2")
         self.assertNotIn("default_server", conf)
         self.assertIn("allow 127.0.0.1;\n    deny all;", conf, "a site on hold must be local-only")
