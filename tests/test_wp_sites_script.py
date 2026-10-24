@@ -359,7 +359,7 @@ class Help(Base):
 
     def test_every_command_explains_itself(self):
         top = self.help_text()
-        for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: delete, rename."):
+        for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: rename."):
             self.assertIn(needle, top)
         self.assertIn("wp-site-update", top); self.assertIn("ssh -t dellwp sudo", top)
         for cmd, needles in (("create", ("--name", "--state", "--policy", "--title", "--user", "--email", "--set", "--yes", "--yes-public", "--no-run", "example.com", "second run that must end changed=0")),
@@ -704,6 +704,121 @@ class Tombstones(Base):
         self.sites().menu()
         self.assertTrue(all("gone" not in s for s in self.said if s.startswith("PROMPT Site (")))
         self.assertIn("No site is stopped.", self.text())
+
+
+class Deleting(Base):
+    def stopped_repo(self, name="wptest"):
+        self.vars.write_text(w.set_site_field(self.vars.read_text(), name, "state", "stopped")); self.commit("stopped")
+
+    def git_out(self, *a):
+        return subprocess.run(["git", "-C", str(self.tmp), *a], capture_output=True, text=True).stdout.strip()
+
+    def test_the_vm_tool_runs_first_then_the_repo_says_closed_then_the_play_and_the_verifier(self):
+        self.stopped_repo()
+        seen = []
+        orig = self.fake_run
+        def spy(cmd, tee=False):
+            if cmd[0] == "ssh":
+                seen.append(self.vars.read_text())
+            return orig(cmd, tee)
+        s = self.sites(); s.run = spy
+        self.answers = ["y", "y", "y"]   # run the tool; write the change; run the play for real
+        rc = s.delete("wptest")
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.kinds(), ["ssh", "play-check", "play", "play", "bash", "python3"])
+        self.assertEqual(self.calls[0], ["ssh", "-t", "dellwp", "sudo wp-site-delete wptest"])
+        self.assertIn("state: stopped", seen[0], "when the tool ran, vars.yml still said stopped: the repo never claims a deletion that has not happened")
+        self.assertEqual(self.site("wptest")["state"], "closed")
+        self.assertEqual({k: self.site("wptest")[k] for k in ("name", "port", "quota_id")}, {"name": "wptest", "port": 9101, "quota_id": 1001}, "the tombstone keeps the ids")
+        self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
+        for needle in ("FOR GOOD", "14 days", "tombstone", "Proxmox"):
+            self.assertIn(needle, self.text())
+
+    def test_only_a_stopped_site_can_be_deleted_and_the_refusal_says_how(self):
+        for state, text in (("hold", "stop it"), ("live", "stop it")):
+            self.vars.write_text(w.set_site_field(self.vars.read_text(), "wptest", "state", state)); self.commit(state)
+            with self.assertRaises(w.Refuse) as cm:
+                self.sites().delete("wptest", yes=True)
+            self.assertIn("wp_sites.py stop wptest", str(cm.exception)); self.assertIn("final backup", str(cm.exception))
+        with self.assertRaises(w.Refuse):
+            self.sites().delete("nosuch", yes=True)
+        self.assertEqual(self.calls, [])
+        self.stopped_repo()
+        t = w.set_site_field(self.vars.read_text(), "wptest", "state", "closed"); self.vars.write_text(t); self.commit("closed")
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().delete("wptest", yes=True)
+        self.assertIn("already closed", str(cm.exception)); self.assertEqual(self.calls, [])
+        self.vars.write_text(t + "# stray\n")
+        with self.assertRaises(w.Refuse):
+            self.sites().delete("wptest", yes=True)
+
+    def test_declining_runs_nothing(self):
+        self.stopped_repo(); before = self.vars.read_text()
+        self.answers = ["n"]
+        self.assertEqual(self.sites().delete("wptest"), 1)
+        self.assertEqual(self.calls, []); self.assertEqual(self.vars.read_text(), before)
+
+    def test_a_tool_that_fails_leaves_the_repo_alone_and_says_to_run_it_again(self):
+        self.stopped_repo(); before = self.vars.read_text()
+        self.rc = {"ssh": 2}
+        self.assertEqual(self.sites().delete("wptest", yes=True), 2)
+        self.assertEqual(self.kinds(), ["ssh"]); self.assertEqual(self.vars.read_text(), before)
+        self.assertIn("the repo was not changed", self.text()); self.assertIn("the tool resumes", self.text())
+
+    def test_declining_after_the_tool_succeeded_says_to_run_delete_again_and_a_play_failure_says_to_run_the_play(self):
+        self.stopped_repo()
+        self.answers = ["y", "n"]   # run the tool; decline writing the change
+        rc = self.sites().delete("wptest")
+        self.assertEqual(rc, 1); self.assertEqual(self.site("wptest")["state"], "stopped")
+        self.assertIn("already gone from the VM, but vars.yml still says stopped", self.text()); self.assertIn("delete wptest", self.text())
+        self.said.clear(); self.calls.clear(); self.rc = {"ansible-playbook": 4}
+        rc = self.sites().delete("wptest", yes=True)
+        self.assertEqual(rc, 4); self.assertEqual(self.site("wptest")["state"], "closed")
+        self.assertIn("vars.yml now says closed, but the play did not finish", self.text()); self.assertIn("ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml", self.text())
+
+    def test_yes_skips_this_scripts_questions_only(self):
+        self.stopped_repo()
+        self.assertEqual(self.sites().delete("wptest", yes=True), 0)
+        self.assertEqual(self.kinds(), ["ssh", "play", "play", "bash", "python3"], "no check run, as with every --yes")
+        self.assertEqual([s for s in self.said if s.startswith("PROMPT")], [])
+        self.assertEqual(self.calls[0][2:], ["dellwp", "sudo wp-site-delete wptest"], "the name is still typed on the VM: the tool asks it, the script cannot answer it")
+
+    def test_commit_makes_the_commit_when_the_verifier_ends_clean_and_not_otherwise(self):
+        self.stopped_repo()
+        self.assertEqual(self.sites().delete("wptest", yes=True, commit=True), 0)
+        self.assertEqual(self.git_out("log", "-1", "--format=%s"), "ops(wp): delete site wptest"); self.assertEqual(self.git_out("status", "--short"), "")
+        self.vars.write_text(self.original); self.commit("back"); self.stopped_repo(); before = self.git_out("rev-list", "--count", "HEAD")
+        self.rc = {"bash": 2}
+        self.assertEqual(self.sites().delete("wptest", yes=True, commit=True), 2)
+        self.assertEqual(self.git_out("rev-list", "--count", "HEAD"), before); self.assertIn("--commit did not commit", self.text())
+
+    def test_the_deleted_names_and_ids_stay_reserved(self):
+        self.stopped_repo(); self.sites().delete("wptest", yes=True); self.commit("closed")
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().create(**self.create_args(name="wptest"))
+        self.assertIn("name of a closed site", str(cm.exception))
+        self.sites().create(**self.create_args(name="alpha"))
+        self.assertEqual((self.site("alpha")["port"], self.site("alpha")["quota_id"]), (9102, 1002), "above the tombstone, never on it")
+
+    def test_the_menu_offers_only_stopped_sites_and_the_help_explains_delete(self):
+        import contextlib
+        import io
+        self.answers = ["8", "4"]
+        self.sites().menu(); self.assertIn("No site is stopped; a site is deleted only after it is stopped.", self.text())
+        self.stopped_repo(); self.said.clear(); self.answers = ["8", "nosuch", "wptest", "y", "y", "y", "4"]
+        self.sites().menu()
+        self.assertIn("one of the sites above", self.text()); self.assertEqual(self.site("wptest")["state"], "closed")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            w.main(["delete", "--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=lambda *a: None)
+        flat = " ".join(buf.getvalue().split())
+        for needle in ("FOR GOOD" if False else "for good", "TYPE the site's name", "tombstone", "never reused", "months", "stopped", "--commit", "--yes"):
+            self.assertIn(needle, flat)
+        self.assertNotIn("--no-run", flat, "there is no half-way: a closed state with the data still there would be refused by the play")
+        top = io.StringIO()
+        with contextlib.redirect_stdout(top), self.assertRaises(SystemExit):
+            w.main(["--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=lambda *a: None)
+        self.assertIn("wp-site-delete", top.getvalue()); self.assertIn("Not here yet: rename.", top.getvalue())
 
 
 class Surface(Base):
