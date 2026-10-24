@@ -1,0 +1,54 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_sites_status.sh.j2). What is each site doing right now?   wp-sites-status
+# Prints tab-separated values: a header and one line per site. It is the host's half of scripts/wp_sites_status.py, which adds what the repo declares, lines the three up and flags
+# what needs attention; read it on the VM with   wp-sites-status | column -t -s "$(printf '\t')"   Read-only and quick: the filesystem, systemctl, one docker ps and one repquota, no
+# WP-CLI container, so it works when a stack is down. Columns:
+#   deployed  the state the sites play last rendered (a held site is on hold for the tool too)    actual  what the nginx vhost on disk really does (hold = deny all; live; none)
+#   unit      systemctl is-active wp-<site>     containers  how many of the two are up and not unhealthy, starting or restarting
+#   core      WordPress version from the files    plugins  installed plugins, directories and single-file ones (not "active": that needs the database)
+#   backup_age_h / backup_stamp   hours since the last good backup (.last-success) and its stamp      quota_pct / backup_quota_pct   share of the site's and the backups' quota used
+#   cron_timer / backup_timer   systemctl is-active of the two timers       frozen   yes while the global or the site's freeze flag exists
+# "?" in a quota column means repquota could not be read. WP_STATUS_VHOST_DIR in the environment replaces nginx's own conf.d (the tests use that).
+set -u
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+readonly MOUNT='{{ wp_data_mount }}'
+readonly VHOSTS="${WP_STATUS_VHOST_DIR:-/etc/nginx/conf.d}"
+# name:state:quota project id:quota MB:backup project id:backup quota MB
+readonly TABLE='{{ wp_status_sites }}'
+{% raw %}
+report=$(repquota -P -n "$MOUNT" 2>/dev/null) || report=""
+dps=$(docker ps -a --format '{{.Names}}|{{.Status}}' 2>/dev/null) || dps=""
+now=$(date +%s)
+
+pct() {   # <project id> <quota MB>
+  [ -n "$report" ] || { echo "?"; return; }
+  local kb; kb=$(printf '%s\n' "$report" | awk -v id="#$1" '$1 == id {print $3}')
+  echo $(( ${kb:-0} * 100 / ($2 * 1024) ))
+}
+
+printf 'site\tdeployed\tactual\tunit\tcontainers\tcore\tplugins\tbackup_age_h\tbackup_stamp\tquota_pct\tbackup_quota_pct\tcron_timer\tbackup_timer\tfrozen\n'
+for entry in $TABLE; do
+  IFS=: read -r name state qid qmb bqid bmb <<< "$entry"
+  [[ $name =~ ^[a-z][a-z0-9-]{1,23}$ && $qid =~ ^[0-9]+$ && $qmb =~ ^[0-9]+$ && $qmb -gt 0 && $bqid =~ ^[0-9]+$ && $bmb =~ ^[0-9]+$ && $bmb -gt 0 ]] || continue
+  dir=$WP_DATA/$name
+  vh=$VHOSTS/wp_site_$name.conf
+  if [ -f "$vh" ]; then if grep -q '^    deny all;' "$vh"; then actual=hold; else actual=live; fi; else actual=none; fi
+  unit=$(systemctl is-active "wp-$name" 2>/dev/null) || true; unit=${unit:-unknown}
+  up=0; cn=${name//-/_}
+  for c in php db; do
+    st=$(printf '%s\n' "$dps" | awk -F'|' -v n="wp_${cn}_$c" '$1 == n {print $2}')
+    case "$st" in Up*) case "$st" in *unhealthy*|*starting*|*Restarting*) ;; *) up=$((up + 1)) ;; esac ;; esac
+  done
+  core=$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/version.php" 2>/dev/null | head -n 1); core=${core:--}
+  # a plugin is a directory, or a single .php file at the top (Hello Dolly is hello.php); index.php there is WordPress's "silence is golden" stub
+  plugins=$(find "$dir/html/wp-content/plugins" -mindepth 1 -maxdepth 1 \( -type d -o \( -type f -name '*.php' ! -name index.php \) \) 2>/dev/null | wc -l)
+  ok=$BACKUPS/$name/.last-success
+  if [ -f "$ok" ]; then age=$(( (now - $(stat -c %Y "$ok")) / 3600 )); stamp=$(cat "$ok"); else age=-; stamp=never; fi
+  cron=$(systemctl is-active "wp-cron@$name.timer" 2>/dev/null) || true
+  bt=$(systemctl is-active "wp-backup@$name.timer" 2>/dev/null) || true
+  frozen=no; if [ -e "$WP_FREEZE" ] || [ -e "$dir/freeze" ]; then frozen=yes; fi
+  printf '%s\t%s\t%s\t%s\t%s/2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$state" "$actual" "$unit" "$up" "$core" "$plugins" "$age" "$stamp" \
+    "$(pct "$qid" "$qmb")" "$(pct "$bqid" "$bmb")" "${cron:-unknown}" "${bt:-unknown}" "$frozen"
+done
+{% endraw %}

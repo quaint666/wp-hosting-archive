@@ -1,0 +1,15 @@
+---
+# tasks/wp_status_common.yml
+# The host's half of the status command: wp-sites-status. No hosts:/become:; included at the end of tasks/wp_sites_common.yml because it needs wp_sites_merged (each site's state and
+# its two quota projects), like tasks/wp_disk_check_common.yml. The other half, which adds what the repo declares and flags what needs attention, runs on the ThinkPad:
+# scripts/wp_sites_status.py. tests/test_wp_status.py runs both.
+- name: Deploy the sites status tool
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_sites_status.sh.j2"
+    dest: "{{ wp_tools_bin }}/wp-sites-status"
+    owner: root
+    group: root
+    mode: "0750"
+  vars:
+    wp_status_sites: >-
+      {% for s in wp_sites_merged %}{{ s.name }}:{{ s.state }}:{{ s.quota_id }}:{{ s.quota_mb }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}

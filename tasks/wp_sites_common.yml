@@ -70,3 +70,6 @@
 
 - name: Watch the data disk and every site's quota (tasks/wp_disk_check_common.yml)
   ansible.builtin.include_tasks: wp_disk_check_common.yml
+
+- name: Install the status tool (tasks/wp_status_common.yml)
+  ansible.builtin.include_tasks: wp_status_common.yml
