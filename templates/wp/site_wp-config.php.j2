@@ -1,0 +1,34 @@
+{#- The eight salts and the database password derive from the master secret, the site name and secret_rev: bumping secret_rev rotates this site only. -#}
+{% macro derive(purpose) -%}{{ (wp_secret_base ~ '|' ~ purpose) | hash('sha256') }}{%- endmacro -%}
+<?php
+// Managed by Ansible (templates/wp/site_wp-config.php.j2). Mounted read-only into the php container; edit the template, not this file.
+define( 'DB_NAME', 'wordpress' );
+define( 'DB_USER', 'wp' );
+define( 'DB_PASSWORD', '{{ wp_db_password }}' );
+define( 'DB_HOST', 'db' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+
+{% for key in ['AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT'] %}
+define( '{{ key }}', '{{ derive(key) }}' );
+{% endfor %}
+
+$table_prefix = 'wp_';
+
+define( 'WP_HOME', 'https://{{ wp_host }}' );
+define( 'WP_SITEURL', 'https://{{ wp_host }}' );
+define( 'COOKIE_DOMAIN', '{{ wp_host }}' );
+define( 'FORCE_SSL_ADMIN', true );
+define( 'WP_ENVIRONMENT_TYPE', 'production' );
+define( 'WP_MEMORY_LIMIT', '{{ wp_s.php_memory_limit }}' );
+define( 'WP_DEBUG', false );
+
+// A systemd timer runs the due events; the per-visit cron stays off. No file edits or installs from the admin; our job updates through WP-CLI.
+define( 'DISABLE_WP_CRON', true );
+define( 'DISALLOW_FILE_MODS', true );
+define( 'AUTOMATIC_UPDATER_DISABLED', true );
+
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';

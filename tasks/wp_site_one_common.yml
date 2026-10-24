@@ -1,0 +1,230 @@
+---
+# tasks/wp_site_one_common.yml
+# One WordPress site on dellwp; included by tasks/wp_sites_common.yml with wp_s = the site merged over wp_site_defaults. No hosts:/become:. The layout under
+# {{ wp_data_mount }}/sites/<name>/:
+#   html/            WordPress core, plugins, themes (root-owned, read-only to PHP); html/wp-content/uploads is the one directory PHP may write
+#   db/              the MariaDB data directory (owned by the image's mysql uid)
+#   wp-config.php    rendered here, mounted read-only into the php container; .env (database password, 0600); compose.yml, php.ini, fpm-pool.conf
+# The whole directory is one ext4 project (wp_s.quota_id) with a hard limit of quota_mb, so a runaway site fills its own quota. Core comes from the image once
+# (the seed); after that it changes only through WP-CLI. The configs are rendered from templates/wp/; the secrets derive from the master secret.
+
+- name: Note the names and paths of this site
+  ansible.builtin.set_fact:
+    wp_host: "{{ wp_s.name }}.{{ wp_domain }}"
+    wp_site_dir: "{{ wp_data_mount }}/sites/{{ wp_s.name }}"
+    wp_secret_base: "{{ wp_master_secret ~ '|' ~ wp_s.name ~ '|' ~ wp_s.secret_rev }}"
+  no_log: true
+
+- name: Derive this site's database password
+  ansible.builtin.set_fact:
+    wp_db_password: "{{ (wp_secret_base ~ '|db') | hash('sha256') }}"
+  no_log: true
+
+- name: Make the site directory
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Before anything is written below it: files and directories made later inherit the project id from the +P flag.
+- name: Read the project id of the site directory
+  ansible.builtin.command:
+    cmd: lsattr -dp {{ wp_site_dir }}
+  register: wp_site_lsattr
+  changed_when: false
+  check_mode: false
+
+- name: Put the site directory in its project (inherited by everything made below it)
+  ansible.builtin.command:
+    cmd: chattr -R +P -p {{ wp_s.quota_id }} {{ wp_site_dir }}
+  when: (wp_site_lsattr.stdout.split() | first | int) != (wp_s.quota_id | int)
+  changed_when: true
+
+- name: Read the project quotas
+  ansible.builtin.command:
+    cmd: repquota -P -n {{ wp_data_mount }}
+  register: wp_site_repquota
+  changed_when: false
+  check_mode: false
+
+# repquota prints "#<id> -- <used> <soft> <hard> <files> <soft> <hard>" in 1 KiB blocks; setquota takes the same unit.
+- name: Set the site's hard block limit
+  ansible.builtin.command:
+    cmd: setquota -P {{ wp_s.quota_id }} 0 {{ (wp_s.quota_mb | int) * 1024 }} 0 0 {{ wp_data_mount }}
+  when: >-
+    (wp_site_repquota.stdout_lines | select('match', '^#' ~ wp_s.quota_id ~ '\s') | list | first | default('') | regex_findall('\S+'))[4] | default('-1') | int
+    != (wp_s.quota_mb | int) * 1024
+  changed_when: true
+
+- name: Make the database directory
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/db"
+    state: directory
+    owner: "{{ wp_db_uid }}"
+    group: "{{ wp_db_uid }}"
+    mode: "0700"
+
+# Ownership only, no mode: with `recurse` the module would apply a mode to every data file too (mariadbd keeps its own at 0660). A change of wp_db_uid must reach the
+# files already in the directory, or mariadbd starts as the new uid and gets "Permission denied" on its own data (seen 2026-10-24).
+- name: Give the files in the database directory to the db uid
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/db"
+    state: directory
+    owner: "{{ wp_db_uid }}"
+    group: "{{ wp_db_uid }}"
+    recurse: true
+
+# One-shot, as root, only while core is missing. Copies core from the image, makes the code root-owned, the uploads directory the php uid's, and an empty
+# wp-config.php to be the mount point of the real one (Docker cannot create a mount point inside a read-only mount).
+- name: Seed WordPress core from the image (once)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --memory
+      - 256m
+      - --memory-swap
+      - 256m
+      - --entrypoint
+      - sh
+      - -v
+      - "{{ wp_site_dir }}/html:/var/www/html"
+      - "{{ wp_image_php }}"
+      - -c
+      - >-
+        cp -a /usr/src/wordpress/. /var/www/html/ &&
+        chown -R 0:0 /var/www/html &&
+        mkdir -p /var/www/html/wp-content/uploads &&
+        chown {{ wp_php_uid }}:{{ wp_php_uid }} /var/www/html/wp-content/uploads &&
+        touch /var/www/html/wp-config.php &&
+        chmod 0644 /var/www/html/wp-config.php
+    creates: "{{ wp_site_dir }}/html/wp-includes/version.php"
+
+- name: Deploy the database environment file
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/site_env.j2"
+    dest: "{{ wp_site_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: wp_site_env
+  no_log: true
+  diff: false
+
+- name: Deploy wp-config.php
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/site_wp-config.php.j2"
+    dest: "{{ wp_site_dir }}/wp-config.php"
+    owner: root
+    group: "{{ wp_php_uid }}"
+    mode: "0640"
+  register: wp_site_wpconfig
+  no_log: true
+  diff: false
+
+- name: Deploy the php settings, the pool and the compose file
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "{{ wp_site_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: site_php.ini.j2, dest: php.ini }
+    - { src: site_fpm_pool.conf.j2, dest: fpm-pool.conf }
+    - { src: site_compose.yml.j2, dest: compose.yml }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: wp_site_files
+
+- name: Pull the images ahead of the first start
+  community.docker.docker_image_pull:
+    name: "{{ item }}"
+    pull: not_present
+  loop:
+    - "{{ wp_image_php }}"
+    - "{{ wp_image_db }}"
+
+- name: Deploy the site's systemd unit
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/site_unit.service.j2"
+    dest: /etc/systemd/system/wp-{{ wp_s.name }}.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable the site's unit
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    daemon_reload: true
+    enabled: true
+
+# A changed .env, wp-config.php, php.ini or pool is mounted into the container, which only reads it at start: recreate on any change. compose.yml is on the
+# project directory because the unit and `docker compose` read it there by name.
+- name: Bring the site up (recreate when a mounted file changed)
+  community.docker.docker_compose_v2:
+    project_src: "{{ wp_site_dir }}"
+    files: [compose.yml]
+    state: present
+    recreate: "{{ 'always' if (wp_site_env.changed or wp_site_wpconfig.changed or wp_site_files.changed) else 'auto' }}"
+    wait: true
+    wait_timeout: 180
+
+- name: Deploy and validate the site's nginx vhost
+  block:
+    - name: Deploy the vhost
+      ansible.builtin.template:
+        src: "{{ wp_template_dir }}/site_nginx.conf.j2"
+        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: wp_site_vhost
+      notify: Reload nginx
+
+    - name: Validate the nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      check_mode: false
+  rescue:
+    - name: Restore the previous vhost
+      ansible.builtin.copy:
+        src: "{{ wp_site_vhost.backup_file }}"
+        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        mode: "0644"
+        remote_src: true
+      when: (wp_site_vhost | default({})).backup_file is defined
+
+    - name: Remove a first-ever vhost that failed validation
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        state: absent
+      when:
+        - (wp_site_vhost | default({})).changed | default(false)
+        - (wp_site_vhost | default({})).backup_file is not defined
+
+    - name: Fail after restoring the previous vhost
+      ansible.builtin.fail:
+        msg: The new vhost for {{ wp_s.name }} failed validation; the previous one was restored and nginx was not reloaded.
+
+# The probe below goes through nginx, so the reload ("Reload nginx" in the wrapper) must have happened by then.
+- name: Reload nginx now if the vhost changed
+  ansible.builtin.meta: flush_handlers
+
+# The installer page is served by php through the whole path (nginx, FastCGI, the container, the database connection check). A local request keeps 127.0.0.1,
+# so a site on hold answers it. Not a proof of the public path: that is the first request through the tunnel, once the site is live.
+- name: Check that the site answers through nginx and php
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wp_nginx_listen_port }}/wp-admin/install.php"
+    headers:
+      Host: "{{ wp_host }}"
+    timeout: 10
+  register: wp_site_probe
+  retries: 6
+  delay: 5
+  until: wp_site_probe.status is defined and wp_site_probe.status == 200
+  when: not ansible_check_mode

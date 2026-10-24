@@ -1,0 +1,72 @@
+# Managed by Ansible (templates/wp/site_compose.yml.j2). Site {{ wp_s.name }}: one MariaDB and one php-fpm container on a network of their own.
+# Nothing is published but php-fpm on 127.0.0.1:{{ wp_s.port }} (nginx on this VM talks to it); the database is reachable from the php container only.
+name: wp-{{ wp_s.name }}
+services:
+  db:
+    container_name: wp_{{ wp_s.name | replace('-', '_') }}_db
+    image: {{ wp_image_db }}
+    restart: always
+    user: "{{ wp_db_uid }}:{{ wp_db_uid }}"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: {{ wp_s.db_mem_mb }}m
+    memswap_limit: {{ wp_s.db_mem_mb }}m
+    cpus: {{ wp_s.cpus }}
+    pids_limit: {{ wp_s.pids_limit }}
+    env_file: [.env]
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size={{ wp_s.db_buffer_pool_mb }}M
+      - --local-infile=0
+      - --skip-name-resolve
+      - --max-connections=40
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --slow-query-log=1
+      - --long-query-time=1
+    volumes:
+      - ./db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  php:
+    container_name: wp_{{ wp_s.name | replace('-', '_') }}_php
+    image: {{ wp_image_php }}
+    restart: always
+    # Bypasses the WordPress entrypoint: it would try to seed or write wp-config.php, and this container may write nothing but uploads and /tmp.
+    entrypoint: ["docker-php-entrypoint"]
+    command: ["php-fpm"]
+    user: "{{ wp_php_uid }}:{{ wp_php_uid }}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: {{ wp_s.php_mem_mb }}m
+    memswap_limit: {{ wp_s.php_mem_mb }}m
+    cpus: {{ wp_s.cpus }}
+    pids_limit: {{ wp_s.pids_limit }}
+    ports:
+      - "127.0.0.1:{{ wp_s.port }}:9000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./html:/var/www/html:ro
+      - ./html/wp-content/uploads:/var/www/html/wp-content/uploads
+      - ./wp-config.php:/var/www/html/wp-config.php:ro
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-site.ini:ro
+      - ./fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-pool.conf:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

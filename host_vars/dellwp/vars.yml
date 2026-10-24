@@ -10,3 +10,36 @@ wp_health_host: wp-healthz.internal
 wp_data_device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
 wp_data_label: wpdata
 wp_data_mount: /srv/wp
+
+# The sites (tasks/wp_sites_common.yml, dellwp/wp_sites_dellwp.yml). The domain is the shop's zone; a site's host name is always <name>.<wp_domain> (no friend domains).
+wp_domain: example.com
+# Names no site may take: the shop, the lab and the tunnel names, plus the health vhost's label.
+wp_reserved_names: [bloomy, bloomy-staging, ntfy, ntfy-acer, hub, wg, lab, wp-healthz, www, mail]
+# What the sites may not spend: RAM for the OS, nginx, cloudflared, Alloy, node_exporter and the page cache; disk for backups, intake and scratch. The play refuses a
+# list whose limits do not fit.
+wp_vm_ram_reserve_mb: 1536
+wp_data_reserve_mb: 12288
+# Functions php-fpm may not call (a site can list exceptions in php_allow_functions). The WP-CLI one-shot containers do not load this file.
+wp_php_disable_functions: [exec, passthru, shell_exec, system, proc_open, popen, pcntl_exec, pcntl_fork, pcntl_signal, pcntl_alarm, posix_kill, posix_setuid, posix_setgid, dl, symlink, link, show_source]
+# Every field a site may omit; wp_sites entries override these. name, port and quota_id are required. state: hold = nginx answers only a local curl and the
+# timers skip; live = public. secret_rev: bump it to rotate that site's database password and salts (they derive from dellwp_wp_master_secret).
+wp_site_defaults:
+  state: hold
+  secret_rev: 1
+  php_mem_mb: 512
+  db_mem_mb: 256
+  cpus: 1.0
+  pids_limit: 200
+  php_memory_limit: 256M
+  fpm_max_children: 4
+  opcache_mb: 128
+  db_buffer_pool_mb: 64
+  quota_mb: 3072
+  upload_mb: 64
+  allow_xmlrpc: false
+  php_allow_functions: []
+# port = the loopback port of the site's php-fpm container (unique per site); quota_id = its ext4 project id (unique, never reused for another site).
+wp_sites:
+  - name: wptest
+    port: 9101
+    quota_id: 1001

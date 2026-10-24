@@ -1,0 +1,11 @@
+; Managed by Ansible (templates/wp/site_fpm_pool.conf.j2). Site {{ wp_s.name }}. Loaded after the image's www.conf and zz-docker.conf (which sets the listen port).
+[www]
+pm = ondemand
+pm.max_children = {{ wp_s.fpm_max_children }}
+pm.process_idle_timeout = 20s
+pm.max_requests = 500
+request_terminate_timeout = 120s
+request_slowlog_timeout = 10s
+slowlog = /proc/self/fd/2
+catch_workers_output = yes
+decorate_workers_output = no

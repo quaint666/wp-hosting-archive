@@ -1,7 +1,9 @@
 ---
 # tasks/wp_nginx_base_common.yml
 # The nginx base for the WordPress sites on dellwp. No hosts:/become: and no handlers here: imported via import_tasks into the thin wrapper
-# (dellwp/nginx_base_dellwp.yml), which defines the "Reload nginx" handler. Vars (set by the wrapper):
+# (dellwp/nginx_base_dellwp.yml), which defines the "Restart nginx" handler.
+# The base RESTARTS nginx: a reload that nginx refuses (a zone redefined with another key) leaves the old config running while every tool says ok; a restart that
+# fails is a failed unit and a red play. A site's vhost keeps the graceful reload. Vars (set by the wrapper):
 #   wp_nginx_listen_port   the loopback port every vhost and the catch-all listen on (cloudflared dials this; terraform/cloudflare wp_origin must match)
 #   wp_health_host         a host name only a local curl can send; its vhost answers 200 so the tunnel check can tell "nginx is up" from the catch-all's closed
 #                          connection (both are in host_vars/dellwp/vars.yml)
@@ -11,8 +13,11 @@
 #   to this VM, so without it the first vhost would answer typos and scanners. Site vhosts must not declare default_server.
 # - The only client that ever connects is cloudflared on this VM (every listener is 127.0.0.1), so it is the one proxy trusted to say who the visitor is:
 #   CF-Connecting-IP. Without this nginx would see the connector's address for everyone, and a rate limit would lock out every visitor at once.
-# - The login rate limit zone (10 requests a minute per visitor address, shared by all sites). A site's vhost applies it to /wp-login.php with
-#   `limit_req zone=wp_login burst=5 nodelay;`.
+# - The login rate limit zone (10 requests a minute per visitor address, shared by all sites), keyed so only /wp-login.php counts. A site's vhost applies it with
+#   `limit_req zone=wp_login_attempts burst=5 nodelay;` at server level. The zone is named for its key: nginx keeps a zone alive across a reload, and a reload that
+#   redefines the same name with another key is refused ([emerg], the old config keeps running, `nginx -t` still passes, `systemctl reload` still says ok; seen on
+#   dellwp 2026-10-24). Change a zone's key or size and you change its name.
+# - $wp_https ("on" when the tunnel forwarded an https request), for the sites' `fastcgi_param HTTPS`.
 # - Upload cap 64 MB. (server_tokens is already set in the distribution's nginx.conf: a second directive fails nginx -t, seen on dellwp 2026-10-23.)
 #
 # The write is validated like tasks/bloomy_nginx_loopback_common.yml: if nginx -t fails the previous file is restored and the play fails before nginx is
@@ -32,8 +37,20 @@
           set_real_ip_from 127.0.0.1;
           real_ip_header CF-Connecting-IP;
 
-          limit_req_zone $binary_remote_addr zone=wp_login:10m rate=10r/m;
+          # Keyed on the visitor address for /wp-login.php only: an empty key is not counted, so a site's server-level `limit_req zone=wp_login_attempts burst=5 nodelay;`
+          # throttles logins and nothing else.
+          map $request_uri $wp_login_key {
+              default "";
+              ~^/wp-login\.php $binary_remote_addr;
+          }
+          limit_req_zone $wp_login_key zone=wp_login_attempts:10m rate=10r/m;
           limit_req_status 429;
+
+          # The tunnel terminates TLS; php must be told the request was HTTPS or WordPress loops on redirects. Safe to trust: only cloudflared on this VM connects.
+          map $http_x_forwarded_proto $wp_https {
+              default off;
+              https on;
+          }
 
           server {
               listen 127.0.0.1:{{ wp_nginx_listen_port }} default_server;
@@ -49,7 +66,7 @@
               return 200 "ok\n";
           }
       register: wp_nginx_base
-      notify: Reload nginx
+      notify: Restart nginx
 
     - name: Validate the nginx configuration
       ansible.builtin.command: nginx -t

@@ -1,0 +1,70 @@
+# Managed by Ansible (templates/wp/site_nginx.conf.j2). Site {{ wp_s.name }} ({{ wp_s.state }}). Needs the base in wp_base.conf ($wp_https, the wp_login_attempts zone).
+server {
+    listen 127.0.0.1:{{ wp_nginx_listen_port }};
+    server_name {{ wp_host }};
+    root {{ wp_site_dir }}/html;
+    index index.php;
+    client_max_body_size {{ wp_s.upload_mb }}m;
+    access_log /var/log/nginx/wp_{{ wp_s.name }}.access.log;
+    error_log /var/log/nginx/wp_{{ wp_s.name }}.error.log;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    limit_req zone=wp_login_attempts burst=5 nodelay;
+{% if wp_s.state == 'hold' %}
+
+    # On hold: only a local curl gets in (a visitor's address is replaced by CF-Connecting-IP, a local request keeps 127.0.0.1).
+    allow 127.0.0.1;
+    deny all;
+{% endif %}
+
+    # Our own maintenance flag (WordPress ignores a .maintenance file older than 10 minutes); the update job creates and removes it.
+    if (-f {{ wp_site_dir }}/maintenance.flag) {
+        return 503;
+    }
+    if ($args ~* "(^|&)author=[0-9]") {
+        return 403;
+    }
+
+    # PHP never runs from places a visitor or an upload can write to.
+    location ~* ^/wp-content/(uploads|upgrade)/.*\.(php|phar|phtml|php[0-9])$ {
+        return 403;
+    }
+    location ~* ^/wp-content/.*\.(sql|zip|tar|gz|log|bak)$ {
+        return 403;
+    }
+    location ~* ^/wp-content/(ai1wm-backups|backup|backups|backup-db|updraft)/ {
+        return 403;
+    }
+    location ~* ^/wp-content/debug\.log$ {
+        return 403;
+    }
+    location ~ /\.(?!well-known) {
+        return 403;
+    }
+    location ~* ^/(readme\.html|license\.txt|wp-config\.php|wp-config-sample\.php)$ {
+        return 404;
+    }
+{% if not wp_s.allow_xmlrpc %}
+    location = /xmlrpc.php {
+        return 403;
+    }
+{% endif %}
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        # The php container sees the site at /var/www/html, not at {{ wp_site_dir }}/html.
+        fastcgi_param SCRIPT_FILENAME /var/www/html$fastcgi_script_name;
+        fastcgi_param DOCUMENT_ROOT /var/www/html;
+        fastcgi_param HTTPS $wp_https;
+        fastcgi_pass 127.0.0.1:{{ wp_s.port }};
+        fastcgi_read_timeout 60s;
+    }
+}

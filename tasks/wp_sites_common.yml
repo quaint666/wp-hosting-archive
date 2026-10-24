@@ -1,0 +1,66 @@
+---
+# tasks/wp_sites_common.yml
+# The WordPress site engine on dellwp. No hosts:/become: and no handlers here: imported via import_tasks into the thin wrapper (dellwp/wp_sites_dellwp.yml), which
+# loads vars/wp.yml and sets wp_master_secret. Vars: wp_sites and wp_site_defaults (host_vars/dellwp/vars.yml), wp_master_secret, the image pins (vars/wp.yml).
+# Run order on a fresh VM: dellwp/wp_data_disk_dellwp.yml, dellwp/nginx_base_dellwp.yml, then this.
+#
+# This file only checks the list and loops; one site is tasks/wp_site_one_common.yml. The checks fail the play before anything changes: names, ports and project ids
+# unique, the RAM limits and the disk quotas within what the VM and the data disk have (declared in host_vars/delloptiplex3040/vars.yml), reserved names refused.
+# The same expressions are evaluated by tests/test_wp_sites_render.py, in CI and by hand, including the cases they must refuse.
+# Removing an entry from wp_sites stops nothing and deletes nothing: a site that has to go is stopped and removed by hand (data is never deleted by this play).
+# Check mode cannot show: the seed, the containers, the quota calls, whether the images pull, or whether nginx accepts the vhost.
+
+# The vhosts use the zone and the maps the base defines; without them nginx -t fails and the vhost is rolled back (it did, 2026-10-24). Say so before changing anything.
+- name: Read the nginx base on the VM
+  ansible.builtin.slurp:
+    src: /etc/nginx/conf.d/wp_base.conf
+  register: wp_base_conf
+  check_mode: false
+
+- name: Stop if the nginx base is missing or out of date
+  ansible.builtin.assert:
+    that:
+      - "'zone=wp_login_attempts:' in (wp_base_conf.content | b64decode)"
+      - "'$wp_https' in (wp_base_conf.content | b64decode)"
+    fail_msg: >-
+      Run dellwp/nginx_base_dellwp.yml first: /etc/nginx/conf.d/wp_base.conf lacks the login zone or $wp_https that the site vhosts use. Nothing was changed.
+    quiet: true
+
+- name: Read this VM's declared size from the Proxmox host's list
+  ansible.builtin.set_fact:
+    wp_vm: "{{ hostvars['delloptiplex3040'].proxmox_vms | selectattr('name', 'eq', inventory_hostname) | first }}"
+
+- name: Merge each site with the defaults
+  ansible.builtin.set_fact:
+    wp_sites_merged: "{{ (wp_sites_merged | default([])) + [wp_site_defaults | combine(item)] }}"
+  loop: "{{ wp_sites }}"
+  loop_control:
+    label: "{{ item.name | default('(no name)') }}"
+
+- name: Stop early if the site list does not fit this VM
+  ansible.builtin.assert:
+    that:
+      - wp_sites | length > 0
+      - wp_sites | selectattr('name', 'defined') | selectattr('port', 'defined') | selectattr('quota_id', 'defined') | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='name') | select('match', '^[a-z][a-z0-9-]{1,23}$') | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='name') | intersect(wp_reserved_names) | length == 0
+      - wp_sites_merged | map(attribute='name') | unique | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='port') | unique | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='quota_id') | unique | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='port') | map('int') | select('gt', 1024) | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='quota_id') | map('int') | select('ge', 1000) | list | length == wp_sites | length
+      - wp_sites_merged | map(attribute='state') | difference(['hold', 'live']) | length == 0
+      - (wp_sites_merged | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
+      - (wp_sites_merged | map(attribute='quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
+    fail_msg: >-
+      wp_sites (host_vars/dellwp/vars.yml) does not fit: every entry needs name, port and quota_id; names are 2 to 24 characters of a-z, 0-9 and -, not reserved, unique;
+      ports above 1024 and project ids from 1000 are unique; state is hold or live; the containers' memory limits plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
+      {{ wp_vm.memory }} MB and the quotas plus {{ wp_data_reserve_mb }} MB in its {{ wp_vm.data_disk }} GB data disk. Nothing was changed.
+    quiet: true
+
+- name: Deploy each site (tasks/wp_site_one_common.yml)
+  ansible.builtin.include_tasks: wp_site_one_common.yml
+  loop: "{{ wp_sites_merged }}"
+  loop_control:
+    loop_var: wp_s
+    label: "{{ wp_s.name }} ({{ wp_s.state }})"
