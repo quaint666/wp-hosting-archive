@@ -271,6 +271,45 @@ class Assertions(unittest.TestCase):
     def test_the_real_list_fits(self):
         self.assertTrue(self.ok(self.good))
 
+    def test_a_closed_site_is_a_tombstone_that_keeps_its_ids_and_holds_no_ram_and_no_disk(self):
+        small = {"quota_mb": 512, "backup_quota_mb": 512}
+        gone = {"name": "gone", "port": 9150, "quota_id": 1050, "state": "closed", **small}
+        live = {"name": "alive", "port": 9151, "quota_id": 1051, "state": "live", **small}
+        self.assertTrue(self.ok([live, gone]), "closed is a valid state")
+        for label, other in (("name", {**live, "name": "gone"}), ("port", {**live, "port": 9150}), ("quota project id", {**live, "quota_id": 1050})):
+            self.assertFalse(self.ok([other, gone]), "a new site cannot take a closed site's %s" % label)
+        # no RAM and no disk: a list that is too big for either fits once the extra sites are closed
+        mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
+        n = (6144 - self.v["wp_vm_ram_reserve_mb"]) // mem + 3
+        many = [{"name": "s%d" % i, "port": 9200 + i, "quota_id": 1100 + i, "state": "hold", **small} for i in range(n)]
+        self.assertFalse(self.ok(many)); self.assertTrue(self.ok(many[:3] + [{**s, "state": "closed"} for s in many[3:]]))
+        big = [{"name": "b%d" % i, "port": 9300 + i, "quota_id": 1200 + i, "state": "hold", "quota_mb": 15000, "backup_quota_mb": 15000} for i in range(2)]
+        self.assertFalse(self.ok(big)); self.assertTrue(self.ok([big[0], {**big[1], "state": "closed"}]))
+
+    def test_the_play_refuses_to_deploy_while_a_closed_site_still_has_data_and_never_deletes_any(self):
+        tasks = load("tasks/wp_sites_common.yml")
+        names = [t.get("name", "") for t in tasks]
+        first_deploy = names.index("Deploy each site that exists (tasks/wp_site_one_common.yml)")
+        for n in ("Look for the site directories of the closed sites", "Look for the backup directories of the closed sites", "Stop if a closed site still has its data on the VM"):
+            self.assertLess(names.index(n), first_deploy, n + " must come before anything is deployed")
+        stat_dirs = tasks[names.index("Look for the site directories of the closed sites")]; stat_bk = tasks[names.index("Look for the backup directories of the closed sites")]
+        self.assertEqual(stat_dirs["ansible.builtin.stat"]["path"], "{{ wp_data_mount }}/sites/{{ item.name }}"); self.assertEqual(stat_bk["ansible.builtin.stat"]["path"], "{{ wp_backup_dir }}/{{ item.name }}")
+        for t in (stat_dirs, stat_bk):
+            self.assertIs(t["check_mode"], False, "stat is read-only: it must also run in check mode"); self.assertIn("'closed'", t["loop"])
+        stop = tasks[names.index("Stop if a closed site still has its data on the VM")]
+        self.assertEqual(stop["ansible.builtin.assert"]["that"], ["not item.stat.exists"]); self.assertIn("never deletes data", stop["ansible.builtin.assert"]["fail_msg"])
+        self.assertIn("wp_closed_dirs.results + wp_closed_backups.results", stop["loop"])
+        deploy = tasks[first_deploy]; tomb = tasks[names.index("Remove what a closed site left behind (tasks/wp_site_closed_common.yml)")]
+        self.assertIn("rejectattr('state', 'eq', 'closed')", deploy["loop"]); self.assertIn("selectattr('state', 'eq', 'closed')", tomb["loop"])
+        # the tombstone tasks delete no data: only the stack's unit, the vhost and the timers
+        closed = load("tasks/wp_site_closed_common.yml")
+        text = (ROOT / "tasks/wp_site_closed_common.yml").read_text()
+        for forbidden in ("/sites/", "wp_data_mount", "wp_backup_dir", "docker", "rm -", "shell:", "command:", "recurse"):
+            self.assertNotIn(forbidden, text, "the tombstone tasks must not touch data: " + forbidden)
+        paths = [t["ansible.builtin.file"]["path"] for t in closed if "ansible.builtin.file" in t]
+        self.assertEqual(sorted(p.rsplit("/", 1)[0] for p in paths), ["/etc/nginx/conf.d", "/etc/systemd/system"])
+        self.assertEqual({t.get("notify") for t in closed if "notify" in t}, {"Reload systemd", "Reload nginx"})
+
     def test_a_stopped_site_is_a_valid_state_and_does_not_count_against_the_vms_ram_but_does_against_its_disk(self):
         mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
         budget = 6144 - self.v["wp_vm_ram_reserve_mb"]   # dellwp's declared memory less the reserve
@@ -298,7 +337,7 @@ class Assertions(unittest.TestCase):
             "project id below 1000": [{**site, "quota_id": 5}],
             "unknown state": [{**site, "state": "paused"}],
             "unknown update policy": [{**site, "update_policy": "sometimes"}],
-            "closed is not a state yet": [{**site, "state": "closed"}],
+            "a state that does not exist": [{**site, "state": "deleted"}],
             "an empty update policy": [{**site, "update_policy": ""}],
             "RAM does not fit": [{**site, "php_mem_mb": 9000}],
             "quota does not fit": [{**site, "quota_mb": 100000}],

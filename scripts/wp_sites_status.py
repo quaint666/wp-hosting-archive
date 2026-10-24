@@ -7,8 +7,8 @@
 The exit code is the number of things that need attention (0 = nothing), so it can sit in a script. Read-only: it changes nothing anywhere. The host's report is the filesystem, systemctl,
 docker ps and repquota, no WP-CLI container, so it works when a stack is down. A line is flagged for: the repo and the host disagreeing about a site's state (not deployed yet, or the vhost
 drifted), a stack that is not fully up, no recent backup (not while frozen: a freeze pauses backups on purpose), a quota near its limit, a cron timer that does not match the state, a missing
-nightly backup timer, a site the repo declares that the host does not report. A STOPPED site is expected to have no containers, no running unit and no timers, and is flagged if it has
-any, and it is not judged on its backups (they are paused). States that exist today are hold, live and stopped; inbox and closed come with the import and the delete work.
+nightly backup timer, a site the repo declares that the host does not report. A CLOSED site is a tombstone in wp_sites: it is listed after the table and the host is not expected to report it. A STOPPED site is expected to have no containers, no running unit and no timers, and is flagged if it has
+any, and it is not judged on its backups (they are paused). States that exist today are hold, live, stopped and closed; inbox comes with the import.
 """
 import argparse
 import subprocess
@@ -27,7 +27,14 @@ def load_declaration(repo):
     """{site: declared state}, plus the thresholds and the tools directory the host uses, all from the repo's own variables."""
     v = yaml.safe_load((Path(repo) / VARS).read_text())
     declared = {s["name"]: {**v["wp_site_defaults"], **s}["state"] for s in v["wp_sites"]}
+    declared = {n: st for n, st in declared.items() if st != "closed"}   # a closed site is a tombstone: nothing of it is on the VM, so the host is not expected to report it
     return declared, int(v["wp_backup_stale_hours"]), int(v["wp_disk_warn_pct"]), v["wp_tools_bin"]
+
+
+def closed_sites(repo):
+    """The names of the closed sites (tombstones: in wp_sites so that their name, port and project id are never reused, nothing on the VM)."""
+    v = yaml.safe_load((Path(repo) / VARS).read_text())
+    return sorted(s["name"] for s in v["wp_sites"] if {**v["wp_site_defaults"], **s}["state"] == "closed")
 
 
 def parse(tsv):
@@ -126,6 +133,9 @@ def main(argv=None, repo=REPO, runner=subprocess.run, stdin=sys.stdin):
         print("wp_sites_status: %s" % e, file=sys.stderr)
         return 99
     print(render(rows, declared))
+    closed = closed_sites(repo)
+    if closed:
+        print("\nClosed (tombstones, nothing on the VM): %s" % ", ".join(closed))
     items = attention(rows, declared, stale_h, warn_pct)
     print()
     if items:

@@ -1,0 +1,24 @@
+---
+# tasks/wp_site_closed_common.yml
+# A closed site (state: closed in wp_sites) is a tombstone. wp-site-delete has already removed everything of it (tasks/wp_sites_common.yml refuses to run while its directory or its
+# backups still exist), so this only makes sure nothing of it is left in the places the play owns: its stack's unit file, its three timers and its nginx vhost. Idempotent: on a
+# closed site that is already clean every task reports ok. It deletes no data. Included once per closed site with loop_var wp_s.
+
+- name: Stop and disable the closed site's timers
+  ansible.builtin.systemd:
+    name: "wp-{{ item }}@{{ wp_s.name }}.timer"
+    enabled: false
+    state: stopped
+  loop: [cron, backup, update]
+
+- name: Remove the closed site's stack unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/wp-{{ wp_s.name }}.service
+    state: absent
+  notify: Reload systemd
+
+- name: Remove the closed site's nginx vhost
+  ansible.builtin.file:
+    path: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+    state: absent
+  notify: Reload nginx

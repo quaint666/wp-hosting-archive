@@ -39,6 +39,20 @@ SCRATCH="$MOUNT/sites/.quota-verify"; FLAG="$DIR/maintenance.flag"
 cleanup() { rm -f "$FLAG"; rm -rf "$SCRATCH"; setquota -P 4000000 0 0 0 0 "$MOUNT" 2>/dev/null; }
 trap cleanup EXIT
 
+if [ "$STATE" = closed ]; then
+  echo "== $SITE: closed"
+  [ ! -e "$DIR" ] && ok "no site directory ($DIR)" || bad "$DIR still exists"
+  [ ! -e "$BDIR/$SITE" ] && ok "no backup directory ($BDIR/$SITE)" || bad "$BDIR/$SITE still exists"
+  [ ! -e "/etc/systemd/system/wp-$SITE.service" ] && ok "no stack unit" || bad "/etc/systemd/system/wp-$SITE.service still exists"
+  [ ! -e "/etc/nginx/conf.d/wp_site_$SITE.conf" ] && ok "no nginx vhost" || bad "/etc/nginx/conf.d/wp_site_$SITE.conf still exists"
+  for t in cron backup update; do systemctl is-enabled --quiet "wp-$t@$SITE.timer" </dev/null && bad "wp-$t@$SITE.timer is enabled" || ok "wp-$t@$SITE.timer is not enabled"; done
+  [ -z "$(docker ps -aq --filter "name=^wp_${SITE//-/_}_" </dev/null)" ] && ok "no container of the site exists" || bad "a container of the site still exists"
+  [ -z "$(docker network ls -q --filter "name=^wp-${SITE}_" </dev/null)" ] && ok "no network of the site exists" || bad "a network of the site still exists"
+  [ "$(code -H "Host: $HOST" "$BASE/")" = 000 ] && ok "the name gets the closed connection (no vhost claims it)" || bad "the name $HOST is still answered by nginx"
+  echo "$TOTAL checks, $FAILS failed"
+  exit "$FAILS"
+fi
+
 if [ "$STATE" = stopped ]; then
   echo "== $SITE: stopped"
   [ -z "$(docker ps -q --filter "name=^wp_${SITE//-/_}_" </dev/null)" ] && ok "no container of the site is running" || bad "a container of the site is running although it is stopped"

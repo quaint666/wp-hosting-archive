@@ -12,4 +12,4 @@
     mode: "0750"
   vars:
     wp_status_sites: >-
-      {% for s in wp_sites_merged %}{{ s.name }}:{{ s.state }}:{{ s.quota_id }}:{{ s.quota_mb }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}
+      {% for s in wp_sites_merged if s.state != 'closed' %}{{ s.name }}:{{ s.state }}:{{ s.quota_id }}:{{ s.quota_mb }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}

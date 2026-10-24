@@ -132,6 +132,8 @@ class HostTool(Base):
         merged = [{**self.v["wp_site_defaults"], **s} for s in [{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "live"}]]
         got = jinja2.Environment().from_string(t["vars"]["wp_status_sites"]).render(wp_sites_merged=merged, wp_backup_quota_offset=self.v["wp_backup_quota_offset"]).strip()
         self.assertEqual(got, "wptest:live:1001:3072:2001:3072")
+        closed = merged + [{**self.v["wp_site_defaults"], "name": "gone", "port": 9103, "quota_id": 1003, "state": "closed"}]
+        self.assertEqual(jinja2.Environment().from_string(t["vars"]["wp_status_sites"]).render(wp_sites_merged=closed, wp_backup_quota_offset=self.v["wp_backup_quota_offset"]).strip(), got, "the host is not asked about a tombstone")
         sites = [x.get("name", "") for x in yaml.safe_load((ROOT / "tasks/wp_sites_common.yml").read_text())]
         self.assertIn("Install the status tool (tasks/wp_status_common.yml)", sites)
 
@@ -174,6 +176,27 @@ class Wrapper(unittest.TestCase):
         out = W.render([self.stopped(site="a"), self.stopped(site="b", containers="2/2", unit="active")], {"a": "stopped", "b": "stopped"})
         lines = {l.split()[0]: l for l in out.splitlines()[1:]}
         self.assertIn("stopped", lines["a"].split()[2]); self.assertIn("NOT STOPPED", lines["b"])
+
+    def test_a_closed_site_is_a_tombstone_the_host_is_not_expected_to_report(self):
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="wpstatus-")); (d / "host_vars/dellwp").mkdir(parents=True)
+        text = (ROOT / "host_vars/dellwp/vars.yml").read_text()
+        text = text.rstrip("\n") + "\n"
+        a = text.index("wp_sites:\n") + len("wp_sites:\n")
+        text = text[:a] + "  - name: gone\n    port: 9190\n    quota_id: 1090\n    state: closed\n" + text[a:]
+        (d / "host_vars/dellwp/vars.yml").write_text(text)
+        declared, *_ = W.load_declaration(d)
+        self.assertNotIn("gone", declared, "a tombstone is not declared as something the host should run")
+        self.assertEqual(W.closed_sites(d), ["gone"])
+        self.assertEqual([s for s, _ in W.attention([], declared, 30, 80) if s == "gone"], [], "and nobody is told it is missing")
+        out = io.StringIO()
+        old = sys.stdout; sys.stdout = out
+        try:
+            W.main(["--file", "-"], repo=d, stdin=io.StringIO(tsv(*[row(site=s, deployed=declared[s], actual=declared[s], cron_timer="active" if declared[s] == "live" else "inactive") for s in declared])))
+        finally:
+            sys.stdout = old
+        self.assertIn("Closed (tombstones, nothing on the VM): gone", out.getvalue())
+        self.assertNotIn("gone:", out.getvalue().split("Closed (tombstones")[1].split("\n", 1)[1] if "Needs attention" in out.getvalue() else "")
 
     def test_a_healthy_site_needs_no_attention(self):
         self.assertEqual(self.check(row()), [])

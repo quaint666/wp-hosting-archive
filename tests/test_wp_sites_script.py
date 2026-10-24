@@ -662,6 +662,50 @@ class Committing(Base):
         self.assertEqual(subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout, before, "the real repo was not touched by a test")
 
 
+class Tombstones(Base):
+    def closed_repo(self):
+        t = w.add_site(self.vars.read_text(), {"name": "gone", "port": 9150, "quota_id": 1050, "state": "closed", "update_policy": "notify"})
+        self.vars.write_text(t); self.commit("a tombstone")
+
+    def git_out(self, *a):
+        return subprocess.run(["git", "-C", str(self.tmp), *a], capture_output=True, text=True).stdout.strip()
+
+    def test_no_command_works_on_a_closed_site_and_each_says_why(self):
+        self.closed_repo()
+        for call, args, kw in ((self.sites().stop, ("gone",), {}), (self.sites().start, ("gone",), {}), (self.sites().modify, ("gone",), dict(sets=("update_policy=auto",))),
+                               (self.sites().password, ("gone",), dict(user="adminuser"))):
+            with self.assertRaises(w.Refuse) as cm:
+                call(*args, yes=True, **kw)
+            self.assertIn("closed", str(cm.exception))
+        self.assertEqual(self.calls, []); self.assertEqual(self.git_out("status", "--short"), "")
+
+    def test_a_closed_sites_name_cannot_be_reused_and_the_message_says_so(self):
+        self.closed_repo()
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().create(**self.create_args(name="gone"))
+        self.assertIn("name of a closed site", str(cm.exception)); self.assertIn("never reused", str(cm.exception))
+        self.answers = ["gone", "alpha", "", "", "n", "T", "alphaadmin", "alpha@example.org", "y", "y"]
+        self.assertEqual(self.sites().create(), 0, self.text())
+        self.assertIn("closed site", self.text(), "asked again after the refusal")
+
+    def test_the_new_sites_ids_are_above_the_tombstones(self):
+        self.closed_repo()
+        self.sites().create(**self.create_args(name="alpha"))
+        self.assertEqual((self.site("alpha")["port"], self.site("alpha")["quota_id"]), (9151, 1051))
+
+    def test_the_menus_do_not_offer_a_tombstone(self):
+        self.closed_repo()
+        self.answers = ["3", "gone", "wptest", "", "4"]   # change a site: 'gone' is not one of the choices, 'wptest' is
+        self.sites().menu()
+        self.assertIn("one of the sites above", self.text())
+        prompts = [s for s in self.said if s.startswith("PROMPT Site (")]
+        self.assertTrue(prompts and all("gone" not in p for p in prompts), prompts)
+        self.said.clear(); self.answers = ["5", "wptest", "adminuser", "n", "6", "wptest", "n", "7", "4"]
+        self.sites().menu()
+        self.assertTrue(all("gone" not in s for s in self.said if s.startswith("PROMPT Site (")))
+        self.assertIn("No site is stopped.", self.text())
+
+
 class Surface(Base):
     def test_list_runs_the_status_command(self):
         self.assertEqual(self.sites().list(), 0); self.assertEqual(self.calls, [["python3", "scripts/wp_sites_status.py"]])

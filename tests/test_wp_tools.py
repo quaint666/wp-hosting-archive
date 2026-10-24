@@ -390,6 +390,18 @@ class Tools(unittest.TestCase):
         r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers())
         self.assertEqual(r.returncode, 1); self.assertIn("right password FAILED", r.stderr)
 
+    def test_a_closed_site_is_not_in_the_tools_allowlist_and_has_no_update_policy(self):
+        import jinja2
+        sites = [{"name": "alive"}, {"name": "gone", "state": "closed"}, {"name": "held", "state": "hold"}, {"name": "tomb2", "state": "closed"}]
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
+        lib = env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=sites))
+        self.assertIn("readonly WP_SITES='alive held'", lib, "the tools act on sites that exist; a tombstone is 'not in wp_sites'")
+        self.assertEqual(env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=[{"name": "only"}])).count("readonly WP_SITES='only'"), 1)
+        tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
+        expr = [t for t in tools if t.get("name") == "Deploy the tools"][0]["vars"]["wp_update_policies"]
+        got = jinja2.Environment().from_string(expr).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()
+        self.assertEqual(got, "alive:%s held:%s" % (self.v["wp_site_defaults"]["update_policy"], self.v["wp_site_defaults"]["update_policy"]))
+
     def test_install_and_password_refuse_a_stopped_site_before_asking_for_anything(self):
         (self.tmp / "data/sites/wptest/stopped.flag").write_text("")
         for tool, args in (("wp-site-install", ("wptest",)), ("wp-site-password", ("wptest", "adminuser"))):

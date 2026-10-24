@@ -49,25 +49,65 @@
       - wp_sites_merged | map(attribute='quota_id') | unique | list | length == wp_sites | length
       - wp_sites_merged | map(attribute='port') | map('int') | select('gt', 1024) | list | length == wp_sites | length
       - wp_sites_merged | map(attribute='quota_id') | map('int') | select('ge', 1000) | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='state') | difference(['hold', 'live', 'stopped']) | length == 0
+      - wp_sites_merged | map(attribute='state') | difference(['hold', 'live', 'stopped', 'closed']) | length == 0
       - wp_sites_merged | map(attribute='update_policy') | difference(['auto', 'notify', 'freeze']) | length == 0
-      - (wp_sites_merged | rejectattr('state', 'eq', 'stopped') | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | rejectattr('state', 'eq', 'stopped') | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
-      - (wp_sites_merged | map(attribute='quota_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='backup_quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
+      - (wp_sites_merged | rejectattr('state', 'in', ['stopped', 'closed']) | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | rejectattr('state', 'in', ['stopped', 'closed']) | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
+      - (wp_sites_merged | rejectattr('state', 'eq', 'closed') | map(attribute='quota_mb') | map('int') | sum) + (wp_sites_merged | rejectattr('state', 'eq', 'closed') | map(attribute='backup_quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
       - (wp_backup_quota_offset | int) > (wp_sites_merged | map(attribute='quota_id') | map('int') | max) - (wp_sites_merged | map(attribute='quota_id') | map('int') | min)
       - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_scratch_quota_id | int)
     fail_msg: >-
       wp_sites (host_vars/dellwp/vars.yml) does not fit: every entry needs name, port and quota_id; names are 2 to 24 characters of a-z, 0-9 and -, not reserved, unique;
-      ports above 1024 and project ids from 1000 are unique; state is hold or live; the containers' memory limits plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
-      {{ wp_vm.memory }} MB; the site quotas plus the backup quotas plus {{ wp_data_reserve_mb }} MB must fit in its {{ wp_vm.data_disk }} GB data disk; wp_backup_quota_offset must be
+      ports above 1024 and project ids from 1000 are unique; state is hold, live, stopped or closed (a closed site is a tombstone: its name, port and project id stay reserved, but it holds no RAM and no disk); the memory limits of the sites that run plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
+      {{ wp_vm.memory }} MB; the quotas and backup quotas of the sites that exist plus {{ wp_data_reserve_mb }} MB must fit in its {{ wp_vm.data_disk }} GB data disk; wp_backup_quota_offset must be
       larger than the spread of the quota ids (a backup project id must never equal another site's id) and the highest backup id must stay below wp_scratch_quota_id. Nothing was changed.
     quiet: true
 
-- name: Deploy each site (tasks/wp_site_one_common.yml)
+# A closed site is a tombstone: it is in the list so that its name, port and project id are never given to another site, but nothing of it may be on the VM. The PLAY NEVER DELETES
+# DATA: a site whose state was edited to closed by hand, with its directory still there, stops the play here, before anything is deployed. The data goes only through wp-site-delete
+# (python3 scripts/wp_sites.py delete <site>), which makes the archive first and asks for the name to be typed.
+- name: Look for the site directories of the closed sites
+  ansible.builtin.stat:
+    path: "{{ wp_data_mount }}/sites/{{ item.name }}"
+  loop: "{{ wp_sites_merged | selectattr('state', 'eq', 'closed') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: wp_closed_dirs
+  check_mode: false
+
+- name: Look for the backup directories of the closed sites
+  ansible.builtin.stat:
+    path: "{{ wp_backup_dir }}/{{ item.name }}"
+  loop: "{{ wp_sites_merged | selectattr('state', 'eq', 'closed') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: wp_closed_backups
+  check_mode: false
+
+- name: Stop if a closed site still has its data on the VM
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists
+    fail_msg: >-
+      {{ item.invocation.module_args.path }} still exists, but the repo says that site is closed. The play never deletes data. Run python3 scripts/wp_sites.py delete <site>
+      (it archives the site first and removes it), or set the state back if the edit was a mistake. Nothing was changed.
+    quiet: true
+  loop: "{{ wp_closed_dirs.results + wp_closed_backups.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Deploy each site that exists (tasks/wp_site_one_common.yml)
   ansible.builtin.include_tasks: wp_site_one_common.yml
-  loop: "{{ wp_sites_merged }}"
+  loop: "{{ wp_sites_merged | rejectattr('state', 'eq', 'closed') | list }}"
   loop_control:
     loop_var: wp_s
     label: "{{ wp_s.name }} ({{ wp_s.state }})"
+
+- name: Remove what a closed site left behind (tasks/wp_site_closed_common.yml)
+  ansible.builtin.include_tasks: wp_site_closed_common.yml
+  loop: "{{ wp_sites_merged | selectattr('state', 'eq', 'closed') | list }}"
+  loop_control:
+    loop_var: wp_s
+    label: "{{ wp_s.name }} (closed)"
 
 - name: Watch the data disk and every site's quota (tasks/wp_disk_check_common.yml)
   ansible.builtin.include_tasks: wp_disk_check_common.yml

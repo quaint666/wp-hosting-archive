@@ -1,6 +1,6 @@
 # Managed by Ansible (templates/wp/wp_tools_common.sh.j2). Sourced by wp-site-cli, wp-site-install and wp-site-login-check; not run on its own. Root-only tools:
 # there is no sudoers entry and no setuid bit, so nobody can reach them who cannot already be root on this VM.
-readonly WP_SITES='{{ wp_sites | map(attribute="name") | join(" ") }}'
+readonly WP_SITES='{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}{{ ' ' if not loop.last }}{% endfor %}'
 readonly WP_DATA='{{ wp_data_mount }}/sites'
 readonly WP_DOMAIN='{{ wp_domain }}'
 readonly WP_LISTEN='{{ wp_nginx_listen_port }}'

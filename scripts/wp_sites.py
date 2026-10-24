@@ -304,12 +304,15 @@ class Sites:
         text = self.path.read_text()
         d = self.data(text)
         domain, taken = d["wp_domain"], {s["name"] for s in d["wp_sites"]}
+        closed_names = {s["name"] for s in self.merged(d) if s["state"] == "closed"}
 
         def name_check(v):
             if not NAME_RE.fullmatch(v) or "--" in v:
                 return "letters, digits and single hyphens inside, 2 to 24 characters, starting with a letter"
             if v in d["wp_reserved_names"]:
                 return "'%s' is reserved" % v
+            if v in closed_names:
+                return "'%s' is the name of a closed site; a name is never reused" % v
             if v in taken:
                 return "'%s' already exists" % v
             return None
@@ -376,6 +379,8 @@ class Sites:
         if cur is None:
             raise Refuse("no site '%s' in wp_sites" % site)
         host = "%s.%s" % (site, d["wp_domain"])
+        if cur["state"] == "closed":
+            raise Refuse("%s is closed (a tombstone); nothing of it is on the VM. Make a new site instead; a closed site's name is never reused" % site)
         changes = {}
         for item in sets:
             key, _, raw = item.partition("=")
@@ -421,6 +426,8 @@ class Sites:
         cur = next((s for s in self.merged(d) if s["name"] == site), None)
         if cur is None:
             raise Refuse("no site '%s' in wp_sites" % site)
+        if cur["state"] == "closed":
+            raise Refuse("%s is closed (a tombstone: its name, port and project id are reserved, and nothing of it is on the VM)" % site)
         return d, cur, "%s.%s" % (site, d["wp_domain"])
 
     def stop(self, site, yes=False, no_run=False, commit=False):
@@ -473,6 +480,8 @@ class Sites:
         d = self.data(self.path.read_text())
         if site not in [x["name"] for x in d["wp_sites"]]:
             raise Refuse("no site '%s' in wp_sites" % site)
+        if site in [x["name"] for x in self.merged(d) if x["state"] == "closed"]:
+            raise Refuse("%s is closed (a tombstone); there is no site to change a password on" % site)
         host = "%s.%s" % (site, d["wp_domain"])
         user_check = lambda v: None if USER_NAME_RE.fullmatch(v) else "1 to 60 characters of letters, digits and . _ @ -"
         user = user or self.ask("User name on %s" % host, check=user_check)
@@ -503,15 +512,15 @@ class Sites:
                     self.create()
                 elif choice == "3":
                     d = self.data(self.path.read_text())
-                    names = [s["name"] for s in d["wp_sites"]]
+                    names = [x["name"] for x in self.merged(d) if x["state"] != "closed"]
                     self.modify(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
                 elif choice == "5":
                     d = self.data(self.path.read_text())
-                    names = [x["name"] for x in d["wp_sites"]]
+                    names = [x["name"] for x in self.merged(d) if x["state"] != "closed"]
                     self.password(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
                 elif choice in ("6", "7"):
                     d = self.data(self.path.read_text())
-                    names = [x["name"] for x in self.merged(d) if (x["state"] == "stopped") == (choice == "7")]
+                    names = [x["name"] for x in self.merged(d) if (x["state"] == "stopped" if choice == "7" else x["state"] in ("hold", "live"))]
                     if not names:
                         self.out("No site is %s." % ("stopped" if choice == "7" else "running"))
                         continue
