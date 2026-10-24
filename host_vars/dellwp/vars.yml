@@ -52,7 +52,7 @@ wp_sites:
   - name: wptest
     port: 9101
     quota_id: 1001
-    state: live
+    state: stopped
     update_policy: auto
   - name: helloworld
     port: 9102
