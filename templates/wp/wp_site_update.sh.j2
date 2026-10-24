@@ -36,6 +36,7 @@ usage() { echo "usage: wp-site-update <site> [--check | --apply]" >&2; exit 2; }
 require_site "$1"; shift
 mode=policy
 for a in "$@"; do case $a in --check) mode=check ;; --apply) mode=apply ;; *) usage ;; esac; done
+refuse_if_stopped
 policy=""
 for p in $POLICIES; do [ "${p%%:*}" = "$site" ] && policy=${p#*:}; done
 case $policy in auto|notify|freeze) ;; *) die "no valid update policy for $site ('$policy'): run dellwp/wp_sites_dellwp.yml" ;; esac

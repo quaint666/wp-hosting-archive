@@ -273,6 +273,12 @@ class Backup(Base):
         for bad in ("--tag=other", "--tag=", "--tag", "pre-update"):
             self.assertEqual(self.backup("20261025T031500Z", bad).returncode, 2, bad)
 
+    def test_a_stopped_site_is_refused_and_touches_nothing(self):
+        (self.site / "stopped.flag").write_text("")
+        r = self.backup("20261024T201500Z")
+        self.assertEqual(r.returncode, 2); self.assertIn("is stopped", r.stderr); self.assertIn("wp_sites.py start wptest", r.stderr)
+        self.assertEqual(self.log("docker.calls"), ""); self.assertEqual(self.snapshots(), [])
+
     def test_retention_with_few_snapshots_deletes_nothing(self):
         old = self.fabricate(5)
         self.assertEqual(self.backup("20261024T201500Z").returncode, 0)
@@ -320,7 +326,11 @@ class Backup(Base):
     def test_every_site_is_backed_up_every_night_hold_or_live_and_a_failure_alerts(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
         t = [x for x in tasks if "wp-backup@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]
-        self.assertIs(t["enabled"], True); self.assertEqual(t["state"], "started")
+        import jinja2
+        e = jinja2.Environment()
+        for state in ("hold", "live"):
+            self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state})), ("True", "started"), state)
+        self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": "stopped"}), e.from_string(t["state"]).render(wp_s={"state": "stopped"})), ("False", "stopped"), "no database to dump while stopped")
         svc = self.env_j.get_template("wp_backup.service.j2").render(**self.ctx)
         self.assertIn("OnFailure=wp-job-failed@%N.service", svc)
         self.assertIn("ExecStart=%s/wp-site-backup %%i" % self.ctx["wp_tools_bin"], svc)
@@ -391,6 +401,15 @@ class BackupCheck(Base):
         (self.site / "freeze").unlink()
         self.run_script(self.script)
         self.assertEqual(len(self.said()), 1, "once unfrozen it is judged on its age")
+
+    def test_a_stopped_site_is_not_called_stale_and_is_judged_again_when_started(self):
+        self.mark(40)
+        (self.site / "stopped.flag").write_text("")
+        self.run_script(self.script); self.run_script(self.script)
+        self.assertEqual(self.said(), [], "a stopped site has its backup timer off on purpose")
+        (self.site / "stopped.flag").unlink()
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "once started it is judged on its age")
 
     def test_the_environment_can_make_every_site_stale_at_once_for_the_rehearsal(self):
         self.mark(1)

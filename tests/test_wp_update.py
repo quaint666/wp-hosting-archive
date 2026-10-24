@@ -360,6 +360,14 @@ class Update(Base):
         self.assertFalse((self.site / ".update-failed").exists(), "a success clears the failure marker")
 
     # --- guards
+    def test_a_stopped_site_is_refused_in_every_mode_before_anything_is_asked_of_it(self):
+        (self.site / "stopped.flag").write_text("")
+        self.have(plugins=["akismet,5.3,5.4"])
+        for args in ((), ("--check",), ("--apply",)):
+            r = self.run_update(*args)
+            self.assertEqual(r.returncode, 2, args); self.assertIn("is stopped", r.stderr)
+        self.assertEqual(self.order(), []); self.assertFalse(self.flag.exists()); self.assertEqual(self.told(), [])
+
     def test_only_one_update_runs_at_a_time_and_bad_arguments_are_refused(self):
         import fcntl
         self.have(plugins=["akismet,5.3,5.4"])

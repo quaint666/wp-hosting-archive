@@ -449,6 +449,114 @@ class Password(Base):
         self.assertEqual(self.calls, [["ssh", "-t", "dellwp", "sudo wp-site-password wptest adminuser"]])
 
 
+class Lifecycle(Base):
+    def stopped_repo(self, name="wptest"):
+        self.vars.write_text(w.set_site_field(self.vars.read_text(), name, "state", "stopped")); self.commit("stopped")
+
+    def crowded_repo(self):
+        """Seven small sites, the last one stopped: the six running ones fill the RAM budget exactly, so starting the seventh cannot fit."""
+        t = w.set_site_field(w.set_site_field(self.vars.read_text(), "wptest", "quota_mb", 512), "wptest", "backup_quota_mb", 512)
+        for i in range(2, 8):
+            t = w.add_site(t, {"name": "s%d" % i, "port": 9100 + i, "quota_id": 1000 + i, "state": "hold", "update_policy": "notify", "quota_mb": 512, "backup_quota_mb": 512})
+        t = w.set_site_field(t, "s7", "state", "stopped")
+        self.vars.write_text(t); self.commit("crowded")
+
+    def test_stop_takes_the_final_backup_after_the_answer_and_before_the_edit_then_runs_the_play(self):
+        self.answers = ["y", "y"]   # write the change, run the play for real
+        rc = self.sites().stop("wptest")
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.kinds(), ["ssh", "play-check", "play", "play", "bash", "python3"])
+        self.assertEqual(self.calls[0], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force"], "forced, so a frozen site is backed up too")
+        self.assertEqual(self.site("wptest")["state"], "stopped")
+        self.assertIn("'This site is paused.'", self.text()); self.assertIn("It is LIVE", self.text()); self.assertIn("wp_sites.py start wptest", self.text())
+        self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
+
+    def test_declining_the_diff_takes_no_backup_and_writes_nothing(self):
+        self.answers = ["n"]
+        self.assertEqual(self.sites().stop("wptest"), 1)
+        self.assertEqual(self.calls, []); self.assertEqual(self.vars.read_text(), self.original)
+
+    def test_a_failed_final_backup_stops_everything_before_a_byte_is_written(self):
+        self.rc = {"ssh": 3}
+        rc = self.sites().stop("wptest", yes=True)
+        self.assertEqual(rc, 3); self.assertEqual(self.kinds(), ["ssh"]); self.assertEqual(self.vars.read_text(), self.original)
+        self.assertIn("nothing was stopped and nothing was written", self.text())
+
+    def test_yes_skips_the_questions_and_the_check_run_but_not_the_backup(self):
+        self.assertEqual(self.sites().stop("wptest", yes=True), 0)
+        self.assertEqual(self.kinds(), ["ssh", "play", "play", "bash", "python3"])
+
+    def test_no_run_edits_only_and_takes_no_backup(self):
+        self.assertEqual(self.sites().stop("wptest", yes=True, no_run=True), 0)
+        self.assertEqual(self.calls, []); self.assertEqual(self.site("wptest")["state"], "stopped"); self.assertIn("Edited only", self.text())
+
+    def test_stop_and_start_refuse_what_does_not_apply(self):
+        with self.assertRaises(w.Refuse):
+            self.sites().stop("nosuch", yes=True)
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().start("wptest", yes=True)
+        self.assertIn("is not stopped", str(cm.exception))
+        self.stopped_repo()
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().stop("wptest", yes=True)
+        self.assertIn("already stopped", str(cm.exception)); self.assertEqual(self.calls, [])
+        self.vars.write_text(self.vars.read_text() + "# stray\n")
+        with self.assertRaises(w.Refuse):
+            self.sites().start("wptest", yes=True)
+
+    def test_start_brings_a_stopped_site_back_on_hold_and_says_how_to_go_live(self):
+        self.stopped_repo()
+        self.answers = ["y", "y"]
+        rc = self.sites().start("wptest")
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.site("wptest")["state"], "hold", "always hold: going live is a separate, explicit step")
+        self.assertEqual(self.kinds(), ["play-check", "play", "play", "bash", "python3"], "no backup on a start")
+        self.assertIn("modify wptest --set state=live", self.text())
+
+    def test_a_start_that_would_not_fit_in_the_vms_ram_is_refused_by_the_plays_own_rule(self):
+        self.crowded_repo()
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().start("s7", yes=True)
+        self.assertIn("php_mem_mb", str(cm.exception)); self.assertEqual(self.calls, [])
+        self.assertEqual(self.site("s7")["state"], "stopped")
+        self.assertEqual(self.sites().stop("s2", yes=True), 0, "stopping never needs room")
+        self.commit("stopped s2")
+        self.assertEqual(self.sites().start("s7", yes=True), 0, "with one of the others stopped, it fits")
+
+    def test_modify_cannot_move_a_stopped_site_around_the_final_backup(self):
+        self.stopped_repo()
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().modify("wptest", sets=("state=live",), yes=True)
+        self.assertIn("start wptest", str(cm.exception)); self.assertEqual(self.calls, [])
+        self.assertEqual(self.sites().modify("wptest", sets=("update_policy=freeze",), yes=True), 0, "other fields can still be changed")
+        with self.assertRaises(w.Refuse):
+            self.sites().modify("wptest", sets=("state=stopped",), yes=True)   # stopped is not a value modify takes
+
+    def test_the_menu_stops_and_starts_and_says_when_there_is_nothing_to_choose(self):
+        self.answers = ["7", "6", "wptest", "y", "y", "4"]   # nothing is stopped; stop wptest; write; run
+        self.assertEqual(self.sites().menu(), 0)
+        self.assertIn("No site is stopped.", self.text()); self.assertEqual(self.site("wptest")["state"], "stopped")
+        self.assertEqual(self.calls[0], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force"])
+        self.commit("stopped"); self.calls.clear(); self.answers = ["6", "4"]
+        self.sites().menu(); self.assertIn("No site is running.", self.text())
+
+    def test_main_parses_stop_and_start_and_the_help_explains_them(self):
+        out = []
+        self.assertEqual(w.main(["stop", "wptest", "--yes", "--no-run"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append), 0)
+        self.assertEqual(self.site("wptest")["state"], "stopped")
+        self.commit("stopped")
+        self.assertEqual(w.main(["start", "wptest", "--yes", "--no-run"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append), 0)
+        self.assertEqual(self.site("wptest")["state"], "hold")
+        import contextlib
+        import io
+        for cmd, needles in (("stop", ("final backup", "paused", "--no-run")), ("start", ("on hold", "separate step"))):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+                w.main([cmd, "--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
+            for n in needles:
+                self.assertIn(n, buf.getvalue(), "%s --help lacks %r" % (cmd, n))
+
+
 class Surface(Base):
     def test_list_runs_the_status_command(self):
         self.assertEqual(self.sites().list(), 0); self.assertEqual(self.calls, [["python3", "scripts/wp_sites_status.py"]])

@@ -39,6 +39,22 @@ SCRATCH="$MOUNT/sites/.quota-verify"; FLAG="$DIR/maintenance.flag"
 cleanup() { rm -f "$FLAG"; rm -rf "$SCRATCH"; setquota -P 4000000 0 0 0 0 "$MOUNT" 2>/dev/null; }
 trap cleanup EXIT
 
+if [ "$STATE" = stopped ]; then
+  echo "== $SITE: stopped"
+  [ -z "$(docker ps -q --filter "name=^wp_${SITE//-/_}_" </dev/null)" ] && ok "no container of the site is running" || bad "a container of the site is running although it is stopped"
+  systemctl is-active --quiet "wp-$SITE" </dev/null && bad "wp-$SITE.service is active" || ok "wp-$SITE.service is not active"
+  systemctl is-enabled --quiet "wp-$SITE" </dev/null && bad "wp-$SITE.service is enabled (it would start at boot)" || ok "wp-$SITE.service is not enabled"
+  [ -e "$DIR/stopped.flag" ] && ok "stopped.flag is there (the tools and the freshness check know)" || bad "stopped.flag is missing"
+  for t in cron backup update; do systemctl is-active --quiet "wp-$t@$SITE.timer" </dev/null && bad "wp-$t@$SITE.timer is running" || ok "wp-$t@$SITE.timer is not running"; done
+  [ -d "$DIR/db" ] && [ -f "$DIR/wp-config.php" ] && [ -d "$DIR/html/wp-content" ] && ok "the data is intact (db/, wp-config.php, wp-content/)" || bad "the site's data is incomplete"
+  PAGE=$(curl -s --max-time 8 -H "Host: $HOST" "$BASE/" </dev/null); C=$(code -H "Host: $HOST" "$BASE/")
+  [ "$C" = 503 ] && echo "$PAGE" | grep -q 'paused' && ok "visitors get the 503 'paused' page" || bad "the vhost answered $C '$PAGE', want 503 'This site is paused.'"
+  [ "$(code -H "Host: $HOST" -H 'CF-Connecting-IP: 198.51.100.9' "$BASE/wp-login.php")" = 503 ] && ok "even the login page is paused" || bad "the login page of a stopped site is not paused"
+  LINE=$(repquota -P -n "$MOUNT" </dev/null | grep "^#$QID "); [ -n "$LINE" ] && ok "project $QID still holds the site's data ($(echo "$LINE" | awk '{printf "%d MB used", $3/1024}'))" || bad "quota project $QID not found"
+  echo "$TOTAL checks, $FAILS failed"
+  exit "$FAILS"
+fi
+
 echo "== $SITE: containers"
 for n in "$PHP" "$DB"; do
   S=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$n" </dev/null 2>/dev/null)

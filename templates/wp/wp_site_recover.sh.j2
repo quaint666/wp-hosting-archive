@@ -35,6 +35,7 @@ if [ "$stamp" = latest ]; then
   stamp=$(find "$BACKUPS/$site" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tail -n 1)
   [ -n "$stamp" ] || die "there is no snapshot of $site under $BACKUPS/$site"
 fi
+refuse_if_stopped
 src=$BACKUPS/$site/$stamp
 db=wp_${site//-/_}_db; php=wp_${site//-/_}_php
 flag=$dir/maintenance.flag; undo_dir=$dir/.recover-undo

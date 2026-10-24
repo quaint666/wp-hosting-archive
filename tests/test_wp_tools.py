@@ -390,6 +390,14 @@ class Tools(unittest.TestCase):
         r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers())
         self.assertEqual(r.returncode, 1); self.assertIn("right password FAILED", r.stderr)
 
+    def test_install_and_password_refuse_a_stopped_site_before_asking_for_anything(self):
+        (self.tmp / "data/sites/wptest/stopped.flag").write_text("")
+        for tool, args in (("wp-site-install", ("wptest",)), ("wp-site-password", ("wptest", "adminuser"))):
+            (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+            r = self.run_tool(tool, *args, tty=self.answers() if tool == "wp-site-install" else self.pw_answers())
+            self.assertEqual(r.returncode, 2, tool); self.assertIn("is stopped", r.stderr); self.assertNotIn("not shown", r.stderr, "no prompt for anything")
+            self.assertEqual(self.at("user", "update"), -1); self.assertNotIn("install", [x for x in self.words() if x == "install"])
+
     def test_install_fails_loudly_when_the_login_does_not_work(self):
         (self.tmp / "shim" / "curl").write_text("#!/bin/bash\ncat >/dev/null\nprintf 'HTTP/1.1 200 OK\\r\\n\\r\\n'\n")
         r = self.run_tool("wp-site-install", "wptest", tty=self.answers())
@@ -574,7 +582,7 @@ class Tools(unittest.TestCase):
         tasks = yaml.safe_load(text)
         names = [t.get("name", "") for t in tasks]
         deploy = names.index("Deploy the site's systemd unit")
-        start = names.index("Start the site, or restart it when its compose file or database settings changed")
+        start = names.index("Start the site, or restart it when its compose file or database settings changed; stop it when it is stopped")
         reload_ = names.index("Recreate only the php container when only its mounted files changed")
         self.assertLess(deploy, start)
         self.assertLess(start, reload_)
@@ -605,10 +613,14 @@ class Tools(unittest.TestCase):
         self.assertEqual(decide(env=True, php=True), (True, True), "both: the restart covers it (the reload task is skipped)")
         start = [t for t in tasks if t.get("name", "").startswith("Start the site, or restart it")][0]["ansible.builtin.systemd"]
         for restart, want in ((True, "restarted"), (False, "started")):
-            self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart).strip(), want, "the unit must act on the decision")
+            for state in ("hold", "live"):
+                self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": state}).strip(), want, "the unit must act on the decision")
+        for restart in (True, False):
+            self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": "stopped"}).strip(), "stopped", "a stopped site's unit is stopped whatever changed")
         reload_task = [t for t in tasks if t.get("name", "").startswith("Recreate only the php container")][0]
         self.assertEqual(reload_task["ansible.builtin.systemd"]["state"], "reloaded")
         self.assertIn("not (wp_site_restart | bool)", reload_task["when"])
+        self.assertIn("wp_s.state != 'stopped'", reload_task["when"], "no php to recreate in a stopped site")
 
     def test_only_live_sites_get_a_running_timer_and_systemd_is_reloaded_first(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())

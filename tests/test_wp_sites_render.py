@@ -218,6 +218,23 @@ class Render(unittest.TestCase):
         origin = __import__("re").search(r'variable "wp_origin" \{[^}]*default\s*=\s*"([^"]+)"', tf).group(1)
         self.assertEqual(origin, "http://127.0.0.1:%s" % main, "terraform's wp_origin must be the visitor port, never the probe port")
 
+    def test_a_stopped_site_answers_a_paused_page_and_nothing_else(self):
+        self.ctx["wp_s"] = {**self.ctx["wp_s"], "state": "stopped"}
+        conf = self.render("site_nginx.conf.j2")
+        self.assertIn('return 503 "This site is paused.\\n";', conf); self.assertEqual(conf.count("server {"), 1); self.assertEqual(conf.count("{"), conf.count("}"))
+        for needle in ("fastcgi", "root ", "try_files", "limit_req", "maintenance.flag", "location"):
+            self.assertNotIn(needle, conf, "a stopped site serves and passes nothing: " + needle)
+        for port in (self.v["wp_nginx_listen_port"], self.v["wp_nginx_probe_port"]):
+            self.assertIn("listen 127.0.0.1:%s;" % port, conf)
+        self.assertIn("server_name %s;" % self.ctx["wp_host"], conf)
+        for state in ("hold", "live"):
+            self.ctx["wp_s"] = {**self.ctx["wp_s"], "state": state}
+            self.assertNotIn("paused", self.render("site_nginx.conf.j2"), state)
+
+    def test_the_status_tool_on_the_host_recognises_the_paused_vhost(self):
+        sh = (ROOT / "templates/wp/wp_sites_status.sh.j2").read_text()
+        self.assertIn('return 503 "This site is paused', sh); self.assertIn("actual=stopped", sh)
+
     def test_nginx_base_defines_what_the_vhost_uses(self):
         base = (ROOT / "tasks/wp_nginx_base_common.yml").read_text()
         for needle in ("$wp_https", "zone=wp_login_attempts:", "map $request_uri $wp_login_key"):
@@ -254,6 +271,17 @@ class Assertions(unittest.TestCase):
     def test_the_real_list_fits(self):
         self.assertTrue(self.ok(self.good))
 
+    def test_a_stopped_site_is_a_valid_state_and_does_not_count_against_the_vms_ram_but_does_against_its_disk(self):
+        mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
+        budget = 6144 - self.v["wp_vm_ram_reserve_mb"]   # dellwp's declared memory less the reserve
+        n = budget // mem + 1                            # one more than fits
+        small = {"quota_mb": 512, "backup_quota_mb": 512}
+        sites = [{"name": "s%d" % i, "port": 9100 + i, "quota_id": 1000 + i, "state": "hold", **small} for i in range(1, n + 1)]
+        self.assertFalse(self.ok(sites), "one site too many for the RAM is refused")
+        self.assertTrue(self.ok([*sites[:-1], {**sites[-1], "state": "stopped"}]), "the same list is fine when one of them is stopped: it runs nothing")
+        big = [{**s, "quota_mb": 20000, "backup_quota_mb": 20000} for s in sites[:2]]
+        self.assertFalse(self.ok([big[0], {**big[1], "state": "stopped"}]), "a stopped site still holds its data on the disk")
+
     def test_refused(self):
         site = self.good[0]
         cases = {
@@ -270,6 +298,7 @@ class Assertions(unittest.TestCase):
             "project id below 1000": [{**site, "quota_id": 5}],
             "unknown state": [{**site, "state": "paused"}],
             "unknown update policy": [{**site, "update_policy": "sometimes"}],
+            "closed is not a state yet": [{**site, "state": "closed"}],
             "an empty update policy": [{**site, "update_policy": ""}],
             "RAM does not fit": [{**site, "php_mem_mb": 9000}],
             "quota does not fit": [{**site, "quota_mb": 100000}],

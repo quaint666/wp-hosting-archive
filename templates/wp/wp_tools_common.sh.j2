@@ -20,6 +20,10 @@ require_site() {
   host=$site.$WP_DOMAIN
 }
 
+# A stopped site has no containers (templates/wp/site_nginx.conf.j2, tasks/wp_site_one_common.yml render stopped.flag from the state). A tool that needs the stack says so, instead of
+# failing on a missing container or network. Call it after require_site.
+refuse_if_stopped() { [ ! -e "$dir/stopped.flag" ] || die "$site is stopped (it has no containers); start it first: python3 scripts/wp_sites.py start $site"; }
+
 # Opens fd 3 on the terminal (WP_SITE_TTY exists for the tests). Secrets are read from fd 3, silently, and never put in an argument or the environment.
 open_tty() { exec 3<"${WP_SITE_TTY:-/dev/tty}" || die "no terminal to read from (use ssh -t)"; }
 ask() { printf '%s' "$1" >&2; IFS= read -r -u 3 "$2" || die "no answer"; }

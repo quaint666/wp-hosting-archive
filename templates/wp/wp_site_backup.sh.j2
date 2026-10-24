@@ -28,6 +28,7 @@ for a in "$@"; do case $a in --force) force=yes ;; --tag=pre-update) tag=pre-upd
 frozen=""
 for flag in "$WP_FREEZE" "$dir/freeze"; do [ -e "$flag" ] && frozen=$flag; done
 if [ -n "$frozen" ] && [ "$force" = no ]; then echo "wp-site-backup: $site is frozen ($frozen exists); skipped (--force backs up anyway)"; exit 0; fi
+refuse_if_stopped
 dest=$BACKUPS/$site
 [ -d "$dest" ] || die "$dest does not exist (run dellwp/wp_sites_dellwp.yml)"
 [ -f "$dir/wp-config.php" ] && [ -d "$dir/html/wp-content" ] || die "the site is not set up under $dir"

@@ -29,6 +29,24 @@
     mode: "0755"
 
 # Before anything is written below it: files and directories made later inherit the project id from the +P flag.
+# stopped.flag marks a stopped site for the tools that must not treat it as broken (the backup freshness check skips it) or touch it (the backup and update jobs refuse). The play
+# renders it from the state; `file: touch` would change on every run, so it is a copy that never overwrites.
+- name: Mark the site as stopped
+  ansible.builtin.copy:
+    dest: "{{ wp_site_dir }}/stopped.flag"
+    content: ""
+    force: false
+    owner: root
+    group: root
+    mode: "0644"
+  when: wp_s.state == 'stopped'
+
+- name: Take the stopped mark away
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/stopped.flag"
+    state: absent
+  when: wp_s.state != 'stopped'
+
 - name: Put the site in its quota project (tasks/wp_project_quota_common.yml)
   ansible.builtin.include_tasks: wp_project_quota_common.yml
   vars:
@@ -165,11 +183,12 @@
     compose_stack_stop_timeout_s: "{{ wp_stack_stop_timeout_s }}"
     compose_stack_reload_service: php
 
-- name: Enable the site's unit
+# A stopped site's unit is neither running nor enabled: no containers, and nothing starts it at boot. Its files stay rendered, so starting it again is only a state change.
+- name: Enable the site's unit (not for a stopped site)
   ansible.builtin.systemd:
     name: wp-{{ wp_s.name }}
     daemon_reload: true
-    enabled: true
+    enabled: "{{ wp_s.state != 'stopped' }}"
 
 # What changed decides what the unit does. A change to compose.yml (images, limits, ports) or to .env (the database's settings) restarts the whole stack: the database
 # container is recreated too. A change only to wp-config.php, php.ini or the pool touches the php container alone: `systemctl reload` recreates just that one (a mounted file
@@ -183,16 +202,17 @@
       {{ wp_site_wpconfig.changed
          or (wp_site_files.results | rejectattr('item.dest', 'eq', 'compose.yml') | selectattr('changed') | list | length) > 0 }}
 
-- name: Start the site, or restart it when its compose file or database settings changed
+- name: Start the site, or restart it when its compose file or database settings changed; stop it when it is stopped
   ansible.builtin.systemd:
     name: wp-{{ wp_s.name }}
-    state: "{{ 'restarted' if wp_site_restart | bool else 'started' }}"
+    state: "{{ 'stopped' if wp_s.state == 'stopped' else ('restarted' if wp_site_restart | bool else 'started') }}"
 
 - name: Recreate only the php container when only its mounted files changed
   ansible.builtin.systemd:
     name: wp-{{ wp_s.name }}
     state: reloaded
   when:
+    - wp_s.state != 'stopped'
     - wp_site_php_changed | bool
     - not (wp_site_restart | bool)
 
@@ -250,7 +270,9 @@
   retries: 6
   delay: 5
   until: wp_site_probe.status is defined and wp_site_probe.status == 200
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - wp_s.state != 'stopped'
 
 # WordPress's own per-visit cron is off (wp-config.php), so this timer is what runs scheduled posts, updates checks and WooCommerce's scheduler. It starts at go-live and
 # stops when the site goes back on hold. The unit runs the same script by hand any time: systemctl start wp-cron@<site>.service.
@@ -261,15 +283,15 @@
     state: "{{ 'started' if wp_s.state == 'live' else 'stopped' }}"
 
 # Every site is backed up every night, hold or live (a held site is often the one carrying freshly imported data). The job is wp-site-backup; the timer has no state condition.
-- name: Back the site up every night, whether it is on hold or live
+- name: Back the site up every night, whether it is on hold or live (not while it is stopped, as there is no database to dump)
   ansible.builtin.systemd:
     name: "wp-backup@{{ wp_s.name }}.timer"
-    enabled: true
-    state: started
+    enabled: "{{ wp_s.state != 'stopped' }}"
+    state: "{{ 'stopped' if wp_s.state == 'stopped' else 'started' }}"
 
 # Every site is considered for updates every night, hold or live; the site's `update_policy:` decides whether the job applies, only tells, or does nothing (templates/wp/wp_site_update.sh.j2).
-- name: Run the site's update job every night, whatever its state
+- name: Run the site's update job every night, whether it is on hold or live (not while it is stopped)
   ansible.builtin.systemd:
     name: "wp-update@{{ wp_s.name }}.timer"
-    enabled: true
-    state: started
+    enabled: "{{ wp_s.state != 'stopped' }}"
+    state: "{{ 'stopped' if wp_s.state == 'stopped' else 'started' }}"

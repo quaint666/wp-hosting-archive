@@ -33,7 +33,7 @@ for entry in $TABLE; do
   [[ $name =~ ^[a-z][a-z0-9-]{1,23}$ && $qid =~ ^[0-9]+$ && $qmb =~ ^[0-9]+$ && $qmb -gt 0 && $bqid =~ ^[0-9]+$ && $bmb =~ ^[0-9]+$ && $bmb -gt 0 ]] || continue
   dir=$WP_DATA/$name
   vh=$VHOSTS/wp_site_$name.conf
-  if [ -f "$vh" ]; then if grep -q '^    deny all;' "$vh"; then actual=hold; else actual=live; fi; else actual=none; fi
+  if [ -f "$vh" ]; then if grep -q '^    deny all;' "$vh"; then actual=hold; elif grep -q 'return 503 "This site is paused' "$vh"; then actual=stopped; else actual=live; fi; else actual=none; fi
   unit=$(systemctl is-active "wp-$name" 2>/dev/null) || true; unit=${unit:-unknown}
   up=0; cn=${name//-/_}
   for c in php db; do

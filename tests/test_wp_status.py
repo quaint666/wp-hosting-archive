@@ -151,6 +151,30 @@ class Wrapper(unittest.TestCase):
     def check(self, r, declared=None, stale=30, warn=80):
         return [m for _, m in W.attention([r], declared or {"wptest": r["deployed"]}, stale, warn)]
 
+    def stopped(self, **kw):
+        base = dict(deployed="stopped", actual="stopped", unit="inactive", containers="0/2", cron_timer="inactive", backup_timer="inactive", backup_stamp="20261024T201500Z", backup_age_h="400")
+        base.update(kw)
+        return row(**base)
+
+    def test_a_stopped_site_is_healthy_when_it_is_really_stopped_and_is_not_judged_on_its_backups(self):
+        self.assertEqual(self.check(self.stopped()), [])
+        self.assertEqual(self.check(self.stopped(backup_stamp="never", backup_age_h="-")), [], "no backup is expected from a site that is stopped")
+        self.assertEqual(self.check(self.stopped(frozen="yes")), [])
+
+    def test_a_stopped_site_that_is_still_running_something_is_flagged(self):
+        for kw, text in ((dict(unit="active"), "stopped but its unit"), (dict(containers="2/2"), "stopped but 2/2 containers are up"), (dict(backup_timer="active"), "stopped but its nightly backup timer"),
+                         (dict(cron_timer="active"), "stopped but its cron timer"), (dict(actual="live"), "vhost on the host is live")):
+            r = self.stopped(); r.update(kw)
+            self.assertTrue([m for m in self.check(r) if text in m], (kw, self.check(r)))
+
+    def test_a_running_site_that_the_repo_says_is_stopped_is_flagged_as_not_deployed(self):
+        self.assertTrue([m for m in self.check(row(), declared={"wptest": "stopped"}) if "repo says stopped but the host was last deployed as live" in m])
+
+    def test_the_table_says_stopped_for_a_stopped_site_and_shouts_for_one_that_is_not_really(self):
+        out = W.render([self.stopped(site="a"), self.stopped(site="b", containers="2/2", unit="active")], {"a": "stopped", "b": "stopped"})
+        lines = {l.split()[0]: l for l in out.splitlines()[1:]}
+        self.assertIn("stopped", lines["a"].split()[2]); self.assertIn("NOT STOPPED", lines["b"])
+
     def test_a_healthy_site_needs_no_attention(self):
         self.assertEqual(self.check(row()), [])
         self.assertEqual(self.check(row(deployed="hold", actual="hold", cron_timer="inactive")), [])
