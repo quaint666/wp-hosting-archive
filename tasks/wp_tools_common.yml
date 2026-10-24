@@ -1,6 +1,6 @@
 ---
 # tasks/wp_tools_common.yml
-# The operator's tools on dellwp: wp-site-cli (WP-CLI in a throwaway container), wp-site-install and wp-site-login-check, with the library they share. No hosts:/become: and no
+# The operator's tools on dellwp: wp-site-cli (WP-CLI in a throwaway container), wp-site-ext (plugins and themes, wordpress.org only), wp-site-install and wp-site-login-check, with the library they share. No hosts:/become: and no
 # handlers; imported via import_tasks into dellwp/wp_sites_dellwp.yml, which sets wp_template_dir. The scripts are rendered from templates/wp/ so the image pin, the site list,
 # the paths and the limits come from the variables and exist in one place. Root-only (0750 root:root): no sudoers entry, no setuid. The site names are the allowlist, so
 # adding a site means running this play again before the tools accept it. tests/test_wp_tools.py runs the rendered scripts against stand-ins for docker and curl.
@@ -37,6 +37,7 @@
   loop:
     - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
     - { src: wp_site_install.sh.j2, dest: wp-site-install }
+    - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
     - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
   loop_control:
     label: "{{ item.dest }}"

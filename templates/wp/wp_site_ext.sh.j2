@@ -1,0 +1,70 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_ext.sh.j2). Install, update or remove plugins and themes, from wordpress.org only:
+#   wp-site-ext <site> plugin install <slug> [--version=X.Y.Z] [--activate]
+#   wp-site-ext <site> plugin update <slug>... | --all          wp-site-ext <site> plugin delete <slug>...
+#   wp-site-ext <site> theme  install|update|delete ...        (same forms; no --activate on a theme here)
+# The policy (docs/handoff_wp_hosting_temp.md section 7): the WordPress admin cannot install or edit code (DISALLOW_FILE_MODS), so a friend asks and the operator runs this.
+# Slugs only: nothing here takes a URL, a zip file or a path, and wp-site-cli --code refuses them too. A plugin is checked against wordpress.org's checksums after it is
+# installed and removed again if that fails. WP-CLI has no checksum check for themes: a theme is official only because it comes from wordpress.org by slug.
+# Activation runs the plugin's own code, so it happens afterwards as the web app's identity (uid of php), never as root. Each action is one line in the journal.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+{% raw %}
+usage() { echo "usage: wp-site-ext <site> <plugin|theme> <install|update|delete> <slug>... [--version=X.Y.Z] [--activate] [--all]" >&2; exit 2; }
+[ "$#" -ge 4 ] || usage
+require_site "$1"; kind=$2; action=$3; shift 3
+case $kind in plugin|theme) ;; *) usage ;; esac
+case $action in install|update|delete) ;; *) usage ;; esac
+version=; activate=no; all=no; slugs=()
+for a in "$@"; do
+  case $a in
+    --activate) activate=yes ;;
+    --all) all=yes ;;
+    --version=*) version=${a#--version=}; [[ $version =~ ^[0-9][A-Za-z0-9.+-]*$ ]] || die "'$version' is not a version" ;;
+    -*) die "unknown option '$a'" ;;
+    *) [[ $a =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$a' is not a wordpress.org slug (lower case letters, digits and hyphens; no URL, no zip, no path)"; slugs+=("$a") ;;
+  esac
+done
+[ "$activate" = no ] || [ "$action" = install ] || die "--activate only goes with install"
+[ "$activate" = no ] || [ "$kind" = plugin ] || die "--activate applies to plugins; activate a theme with: wp-site-cli $site theme activate <slug>"
+[ -z "$version" ] || { [ "$action" = install ] && [ "${#slugs[@]}" = 1 ]; } || die "--version goes with install of exactly one slug"
+case $action in
+  install) [ "${#slugs[@]}" = 1 ] && [ "$all" = no ] || die "install takes exactly one slug" ;;
+  update)  { [ "$all" = yes ] && [ "${#slugs[@]}" = 0 ]; } || { [ "$all" = no ] && [ "${#slugs[@]}" -ge 1 ]; } || die "update takes slugs, or --all, not both" ;;
+  delete)  [ "${#slugs[@]}" -ge 1 ] && [ "$all" = no ] || die "delete takes one or more slugs" ;;
+esac
+
+cli() { "$WP_BIN/wp-site-cli" "$site" "$@"; }
+said() { command -v logger >/dev/null && logger -t wp-site-ext -- "site=$site $kind $action ${slugs[*]:-all}${version:+ version=$version} $1" || true; }
+fail() { said "result=FAILED"; die "$*"; }
+
+verify_plugin() {   # exit 0 only if wordpress.org's checksums match and the tool says so
+  local out; out=$(cli plugin verify-checksums "$1" 2>&1 </dev/null) && printf '%s' "$out" | grep -q '^Success' && { printf '%s\n' "$out"; return 0; }
+  printf '%s\n' "$out" >&2; return 1
+}
+
+case $action in
+  install)
+    slug=${slugs[0]}
+    cli --code "$kind" install "$slug" ${version:+"--version=$version"} || fail "wordpress.org install of $kind '$slug' failed"
+    if [ "$kind" = plugin ]; then
+      verify_plugin "$slug" || { cli --code plugin delete "$slug" >/dev/null 2>&1 || true; fail "plugin '$slug' did not match wordpress.org's checksums; it was removed"; }
+    else
+      echo "note: themes have no checksum check; '$slug' is official only because it came from wordpress.org by slug" >&2
+    fi
+    if [ "$activate" = yes ]; then cli plugin activate "$slug" || fail "installed '$slug' but activating it failed"; fi
+    ;;
+  update)
+    if [ "$all" = yes ]; then cli --code "$kind" update --all || fail "update --all failed"
+    else cli --code "$kind" update "${slugs[@]}" || fail "update failed"
+      if [ "$kind" = plugin ]; then for s in "${slugs[@]}"; do verify_plugin "$s" || fail "plugin '$s' does not match wordpress.org's checksums after the update"; done; fi
+    fi
+    ;;
+  delete)
+    # a plugin's own deactivation code runs first, as the web app's identity; delete itself needs no plugin code
+    if [ "$kind" = plugin ]; then for s in "${slugs[@]}"; do cli plugin deactivate "$s" >/dev/null 2>&1 || true; done; fi
+    cli --code "$kind" delete "${slugs[@]}" || fail "delete failed"
+    ;;
+esac
+said "result=ok"
+{% endraw %}

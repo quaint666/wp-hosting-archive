@@ -26,6 +26,7 @@ echo "--- docker" >> "$SHIM_LOG/docker.argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$SHIM_LOG/docker.argv"; done
 case "$1" in network) exit 0 ;; esac
 case " $* " in *" is-installed "*) [ "${SHIM_INSTALLED:-0}" = 1 ] && exit 0 || exit 1 ;; esac
+case " $* " in *" verify-checksums "*) if [ "${SHIM_VERIFY_FAIL:-0}" = 1 ]; then echo "Error: checksums do not match"; exit 1; fi; echo "Success: Verified 1 of 1 plugins."; exit 0 ;; esac
 # like Docker: the container sees the caller's stdin only when -i is given
 case " $* " in *" -i "*) { echo "--- stdin"; cat; } >> "$SHIM_LOG/docker.stdin" 2>/dev/null ;; esac
 exit 0
@@ -50,19 +51,21 @@ class Tools(unittest.TestCase):
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
         for src, dest in (("wp_tools_common.sh.j2", "lib/common.sh"), ("wp_site_cli.sh.j2", "bin/wp-site-cli"), ("wp_site_install.sh.j2", "bin/wp-site-install"),
-                          ("wp_site_login_check.sh.j2", "bin/wp-site-login-check")):
+                          ("wp_site_login_check.sh.j2", "bin/wp-site-login-check"), ("wp_site_ext.sh.j2", "bin/wp-site-ext")):
             (self.tmp / dest).write_text(env.get_template(src).render(**v))
             if dest.startswith("bin/"):
                 (self.tmp / dest).chmod(0o755)  # production: mode 0750 root:root from the play
-        for name, body in (("docker", DOCKER), ("curl", CURL), ("logger", "#!/bin/bash\nexit 0\n")):
+        for name, body in (("docker", DOCKER), ("curl", CURL), ("logger", "#!/bin/bash\necho \"$*\" >> \"$SHIM_LOG/logger.log\"\n")):
             f = self.tmp / "shim" / name
             f.write_text(body)
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
 
-    def run_tool(self, name, *args, stdin="", tty=None, installed=False):
+    def run_tool(self, name, *args, stdin="", tty=None, installed=False, verify_fails=False):
         env = {"PATH": "%s:/usr/bin:/bin" % (self.tmp / "shim"), "SHIM_LOG": str(self.tmp / "log"), "HOME": str(self.tmp)}
         if installed:
             env["SHIM_INSTALLED"] = "1"
+        if verify_fails:
+            env["SHIM_VERIFY_FAIL"] = "1"
         if tty is not None:
             (self.tmp / "tty").write_text(tty)
             env["WP_SITE_TTY"] = str(self.tmp / "tty")
@@ -131,13 +134,43 @@ class Tools(unittest.TestCase):
         self.assertIn("--skip-themes", a)
         self.assertEqual(a[a.index("plugin"):a.index("plugin") + 3], ["plugin", "update", "--all"])
 
-    def test_with_plugins_is_explicit_and_only_for_code_mode(self):
-        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--with-plugins", "core", "version").returncode, 2)
+    def test_with_plugins_is_gone_so_root_never_loads_a_plugin(self):
+        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", "--with-plugins", "plugin", "list").returncode, 2)
         self.assertEqual(self.log("docker.argv"), "")
-        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", "--with-plugins", "wc", "update").returncode, 0)
-        a = self.argv()
-        self.assertNotIn("--skip-plugins", a)
-        self.assertIn("--allow-root", a)
+        self.assertNotIn("with-plugins", (self.tmp / "bin/wp-site-cli").read_text())
+
+    def test_code_mode_allows_only_wordpress_org_slugs_and_a_few_flags(self):
+        allowed = [("core", "update", "--minor"), ("core", "version"), ("plugin", "install", "woocommerce", "--version=9.3.1"), ("plugin", "update", "--all"),
+                   ("plugin", "update", "woocommerce", "--dry-run"), ("plugin", "delete", "foo-bar"), ("theme", "install", "twentytwentysix"), ("plugin", "list", "--format=json"),
+                   ("plugin", "verify-checksums", "--all")]
+        for cmd in allowed:
+            with self.subTest(("allowed",) + cmd):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                self.assertEqual(self.run_tool("wp-site-cli", "wptest", "--code", *cmd).returncode, 0, cmd)
+        denied = [("eval", "phpinfo();"), ("eval-file", "x.php"), ("shell",), ("db", "query", "DROP TABLE wp_users"), ("user", "create", "a", "a@b.org"),
+                  ("plugin", "activate", "woocommerce"), ("plugin", "uninstall", "woocommerce"), ("theme", "activate", "x"), ("core", "download"), ("core", "update", "--force"),
+                  ("plugin", "install", "https://evil.example/x.zip"), ("plugin", "install", "x.zip"), ("plugin", "install", "/tmp/x"), ("plugin", "install", "../x"),
+                  ("plugin", "install", "woocommerce", "--activate"), ("plugin", "install", "woocommerce", "--force"), ("plugin", "install", "woocommerce", "--require=/x.php"),
+                  ("plugin", "install", "Woo"), ("plugin", "install", "woo;id"), ("plugin", "install", "woo$(id)"), ("plugin", "install", "woocommerce", "--version=1;id"),
+                  ("--require=/x.php", "plugin", "install", "a"), ("--path=/x", "plugin", "list"), ("plugin",), ("plugin", "")]
+        for cmd in denied:
+            with self.subTest(("denied",) + cmd):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                r = self.run_tool("wp-site-cli", "wptest", "--code", *cmd)
+                self.assertEqual(r.returncode, 2, cmd)
+                self.assertEqual(self.log("docker.argv"), "", "docker was called for %r" % (cmd,))
+
+    def test_user_mode_stays_unrestricted_because_it_is_only_the_web_apps_power(self):
+        for cmd in (("eval", "echo 1;"), ("plugin", "activate", "woocommerce"), ("db", "check")):
+            self.assertEqual(self.run_tool("wp-site-cli", "wptest", *cmd).returncode, 0, cmd)
+
+    def test_code_mode_logs_the_whole_checked_command_and_user_mode_two_words(self):
+        self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "install", "woocommerce", "--version=9.3.1")
+        self.run_tool("wp-site-cli", "wptest", "user", "update", "1", "--user_pass=secret-value-123")
+        text = self.log("logger.log")
+        self.assertIn("mode=code cmd=plugin install woocommerce --version=9.3.1", text)
+        self.assertIn("mode=user cmd=user update", text)
+        self.assertNotIn("secret-value-123", text)
 
     def test_stdin_is_not_swallowed_unless_asked_for(self):
         # the 2026-10-24 bug: `ssh host 'bash -s' <<EOF` lost every line after the first wp-site-cli call
@@ -217,6 +250,77 @@ class Tools(unittest.TestCase):
         self.assertIn("http://127.0.0.1:%s/wp-login.php" % self.ctx["wp_nginx_listen_port"], argv)
         self.assertEqual(self.run_tool("wp-site-login-check", "nosuch", "adminuser", stdin=GOOD).returncode, 2)
         self.assertEqual(self.run_tool("wp-site-login-check", "wptest", "bad user;", stdin=GOOD).returncode, 2)
+
+    # --- wp-site-ext: the one way to add or change plugins and themes
+    def wp_calls(self):
+        """Every docker run, as (is_root, the wp arguments after the image)."""
+        out = []
+        for block in self.log("docker.argv").split("--- docker\n")[1:]:
+            a = block.splitlines()
+            if a and a[0] == "run":
+                i = a.index(self.ctx["wp_image_cli"])
+                user = a[a.index("--user") + 1]
+                out.append((user == "0:0", [x for x in a[i + 1:] if x not in ("--allow-root", "--skip-plugins", "--skip-themes")]))
+        return out
+
+    def test_ext_install_is_root_then_verified_then_activated_as_the_web_app(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "woocommerce", "--version=9.3.1", "--activate")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.wp_calls()
+        self.assertEqual(calls[0], (True, ["plugin", "install", "woocommerce", "--version=9.3.1"]))
+        self.assertEqual(calls[1], (False, ["plugin", "verify-checksums", "woocommerce"]))
+        self.assertEqual(calls[2], (False, ["plugin", "activate", "woocommerce"]), "activation runs the plugin's code: never as root")
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("--activate", self.argv(), "--activate would run the plugin as root inside the install call")
+        self.assertIn("plugin install woocommerce version=9.3.1 result=ok", self.log("logger.log"))
+
+    def test_ext_removes_a_plugin_whose_checksums_do_not_match_and_does_not_activate_it(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "shady-plugin", "--activate", verify_fails=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("was removed", r.stderr)
+        calls = self.wp_calls()
+        self.assertEqual(calls[-1], (True, ["plugin", "delete", "shady-plugin"]))
+        self.assertNotIn("activate", [c[1][1] for c in calls if len(c[1]) > 1])
+        self.assertIn("result=FAILED", self.log("logger.log"))
+
+    def test_ext_installs_a_theme_by_slug_and_says_it_cannot_verify_it(self):
+        r = self.run_tool("wp-site-ext", "wptest", "theme", "install", "twentytwentysix")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.wp_calls(), [(True, ["theme", "install", "twentytwentysix"])])
+        self.assertIn("no checksum check", r.stderr)
+        self.assertEqual(self.run_tool("wp-site-ext", "wptest", "theme", "install", "twentytwentysix", "--activate").returncode, 2)
+
+    def test_ext_refuses_anything_that_is_not_a_slug_before_it_touches_docker(self):
+        for args in (("plugin", "install", "https://evil.example/x.zip"), ("plugin", "install", "x.zip"), ("plugin", "install", "../x"), ("plugin", "install", "Woo"),
+                     ("plugin", "install", "a;id"), ("plugin", "install", "woocommerce", "jetpack"), ("plugin", "install"), ("plugin", "install", "w", "--force"),
+                     ("plugin", "install", "w", "--version=1;id"), ("plugin", "update", "w", "--all"), ("plugin", "update"), ("plugin", "delete", "--all"),
+                     ("plugin", "update", "w", "--activate"), ("plugin", "install", "w", "--all"), ("plugin", "delete", "w", "--version=1.0"), ("widget", "install", "w"),
+                     ("plugin", "eval", "w")):
+            with self.subTest(args):
+                r = self.run_tool("wp-site-ext", "wptest", *args)
+                self.assertIn(r.returncode, (2,), args)
+                self.assertEqual(self.log("docker.argv"), "", "docker was called for %r" % (args,))
+        self.assertEqual(self.run_tool("wp-site-ext", "nosuch", "plugin", "install", "woocommerce").returncode, 2)
+
+    def test_ext_checks_slugs_on_its_own_even_if_wp_site_cli_would_accept_anything(self):
+        # each layer must hold alone: swap wp-site-cli for a stub that accepts everything and records what it is given
+        stub = self.tmp / "bin" / "wp-site-cli"
+        stub.write_text('#!/bin/bash\necho "$*" >> "%s"\n' % (self.tmp / "log" / "stub.calls"))
+        for args in (("plugin", "install", "https://evil.example/x.zip"), ("plugin", "install", "x.zip"), ("plugin", "install", "../x"), ("plugin", "install", "Woo"),
+                     ("theme", "install", "a/b"), ("plugin", "install", "w", "--version=1;id"), ("plugin", "update", "w;id")):
+            with self.subTest(args):
+                self.assertEqual(self.run_tool("wp-site-ext", "wptest", *args).returncode, 2, args)
+        self.assertEqual(self.log("stub.calls"), "", "wp-site-ext passed a bad argument down to wp-site-cli")
+
+    def test_ext_update_verifies_named_plugins_and_delete_deactivates_first(self):
+        self.assertEqual(self.run_tool("wp-site-ext", "wptest", "plugin", "update", "woocommerce").returncode, 0)
+        self.assertEqual(self.wp_calls(), [(True, ["plugin", "update", "woocommerce"]), (False, ["plugin", "verify-checksums", "woocommerce"])])
+        (self.tmp / "log" / "docker.argv").unlink()
+        self.assertEqual(self.run_tool("wp-site-ext", "wptest", "plugin", "update", "--all").returncode, 0)
+        self.assertEqual(self.wp_calls(), [(True, ["plugin", "update", "--all"])])
+        (self.tmp / "log" / "docker.argv").unlink()
+        self.assertEqual(self.run_tool("wp-site-ext", "wptest", "plugin", "delete", "woocommerce").returncode, 0)
+        self.assertEqual(self.wp_calls(), [(False, ["plugin", "deactivate", "woocommerce"]), (True, ["plugin", "delete", "woocommerce"])])
 
     # --- how they are installed
     def test_the_image_tag_is_built_from_the_two_pins(self):
