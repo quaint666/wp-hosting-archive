@@ -1,0 +1,85 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_backup.sh.j2). The nightly backup of one site:   wp-site-backup <site>
+# Run by wp-backup@<site>.timer every night for every site, on hold or live. One snapshot is a directory named by its UTC time, holding
+#   db.sql.gz  a consistent dump (mariadb-dump --single-transaction, as the site's own database user, compressed, checked before it counts)
+#   files/     wp-content (plugins, themes, uploads, mu-plugins, languages) as a hard-link snapshot of the previous one: unchanged files cost nothing, so a night is only what changed
+#   MANIFEST   what it is (site, time, WordPress version, sizes)
+# It is built in a hidden .partial-* directory and renamed into place only when everything checked out, so a half-made snapshot never looks like a backup. Core is not
+# saved: it comes from the image (the restore seeds it), and wp-config.php and .env are rendered from the repo and the vault. Snapshots live in their own quota project, so
+# the first one is a real copy (a hard link across projects is refused) and the later ones link inside it.
+# Retention: the newest {{ wp_backup_keep_daily }} snapshots, plus the newest of each of the {{ wp_backup_keep_weekly }} calendar weeks (ISO) before the oldest of those. While a freeze flag exists
+# (/srv/wp/freeze or the site's own) the backup still runs but NOTHING IS PRUNED: a frozen site is probably an incident, and old good snapshots must not be deleted while a
+# possibly compromised one is added. A failure exits non-zero, which fails the unit, whose OnFailure= tells ntfy. ".last-success" holds the stamp of the last good run;
+# wp-backup-check alerts when it is older than {{ wp_backup_stale_hours }} hours.
+set -eu -o pipefail
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+readonly KEEP_DAILY='{{ wp_backup_keep_daily }}'
+readonly KEEP_WEEKLY='{{ wp_backup_keep_weekly }}'
+{% raw %}
+[ "$#" -eq 1 ] || { echo "usage: wp-site-backup <site>" >&2; exit 2; }
+require_site "$1"
+dest=$BACKUPS/$site
+[ -d "$dest" ] || die "$dest does not exist (run dellwp/wp_sites_dellwp.yml)"
+[ -f "$dir/wp-config.php" ] && [ -d "$dir/html/wp-content" ] || die "the site is not set up under $dir"
+umask 077
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+partial=$dest/.partial-$stamp
+cleanup() { rm -rf -- "$partial"; }
+trap cleanup EXIT
+mkdir -- "$partial"
+db=wp_${site//-/_}_db
+
+# 1. the database. pipefail makes a failing dump fail the whole pipe even though gzip succeeds.
+echo "dumping the database of $site"
+docker exec "$db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MARIADB_USER" --single-transaction --quick --routines --events --triggers --default-character-set=utf8mb4 "$MARIADB_DATABASE"' </dev/null \
+  | gzip > "$partial/db.sql.gz" || die "mariadb-dump failed"
+gzip -t "$partial/db.sql.gz" || die "the dump fails gzip's integrity check"
+case "$(gzip -dc "$partial/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the dump has no completion marker (truncated?)" ;; esac
+[ "$(gzip -dc "$partial/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the dump has no wp_options table (an empty database?)"
+
+# 2. the files, hard-linked against the newest snapshot that is complete
+latest=$(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort | tail -n 1)
+link=(); [ -z "$latest" ] || link=("--link-dest=$dest/$latest/files")
+echo "copying wp-content (against ${latest:-nothing: this is a full copy})"
+rc=0
+rsync -a --delete --exclude=/cache/ --exclude=/upgrade/ --exclude=/debug.log "${link[@]}" "$dir/html/wp-content/" "$partial/files/" || rc=$?
+[ "$rc" = 0 ] || [ "$rc" = 24 ] || die "rsync failed (exit $rc)"   # 24 = a file vanished while copying: normal on a live site
+
+# 3. what it is
+core=$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/version.php" | head -n 1)
+{
+  echo "site=$site"; echo "stamp=$stamp"; echo "core=${core:-unknown}"
+  echo "dump_bytes=$(stat -c %s "$partial/db.sql.gz")"
+  echo "files=$(find "$partial/files" -type f | wc -l)"
+  echo "kbytes=$(du -sk "$partial" | cut -f1)"
+} > "$partial/MANIFEST"
+
+# 4. only now does it count. (mv into an existing directory would nest the new snapshot inside it, so a same-second collision is refused.)
+[ ! -e "$dest/$stamp" ] || die "snapshot $stamp already exists (two runs in the same second?)"
+mv -- "$partial" "$dest/$stamp"
+trap - EXIT
+echo "$stamp" > "$dest/.last-success"
+echo "OK: snapshot $stamp of $site ($(grep '^kbytes=' "$dest/$stamp/MANIFEST" | cut -d= -f2) KiB on disk, core $core)"
+
+# 5. retention, unless the site or the host is frozen
+for flag in "$WP_FREEZE" "$dir/freeze"; do
+  if [ -e "$flag" ]; then echo "frozen ($flag exists): the backup ran, nothing is pruned"; exit 0; fi
+done
+week() { local d=${1:0:8}; date -u -d "${d:0:4}-${d:4:2}-${d:6:2}" +%G-%V; }
+mapfile -t all < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort -r)
+keep=" "; n=0; seen=" "
+for s in "${all[@]}"; do
+  if [ "$n" -lt "$KEEP_DAILY" ]; then keep+="$s "; n=$((n + 1)); oldest_week=$(week "$s"); fi
+done
+seen+="$oldest_week "; w=0
+for s in "${all[@]}"; do
+  case "$keep" in *" $s "*) continue ;; esac
+  wk=$(week "$s")
+  case "$seen" in *" $wk "*) continue ;; esac
+  if [ "$w" -lt "$KEEP_WEEKLY" ]; then keep+="$s "; seen+="$wk "; w=$((w + 1)); fi
+done
+for s in "${all[@]}"; do
+  case "$keep" in *" $s "*) ;; *) rm -rf -- "${dest:?}/$s"; echo "pruned $s" ;; esac
+done
+{% endraw %}

@@ -51,11 +51,14 @@
       - wp_sites_merged | map(attribute='quota_id') | map('int') | select('ge', 1000) | list | length == wp_sites | length
       - wp_sites_merged | map(attribute='state') | difference(['hold', 'live']) | length == 0
       - (wp_sites_merged | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
-      - (wp_sites_merged | map(attribute='quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
+      - (wp_sites_merged | map(attribute='quota_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='backup_quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
+      - (wp_backup_quota_offset | int) > (wp_sites_merged | map(attribute='quota_id') | map('int') | max) - (wp_sites_merged | map(attribute='quota_id') | map('int') | min)
+      - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_scratch_quota_id | int)
     fail_msg: >-
       wp_sites (host_vars/dellwp/vars.yml) does not fit: every entry needs name, port and quota_id; names are 2 to 24 characters of a-z, 0-9 and -, not reserved, unique;
       ports above 1024 and project ids from 1000 are unique; state is hold or live; the containers' memory limits plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
-      {{ wp_vm.memory }} MB and the quotas plus {{ wp_data_reserve_mb }} MB in its {{ wp_vm.data_disk }} GB data disk. Nothing was changed.
+      {{ wp_vm.memory }} MB; the site quotas plus the backup quotas plus {{ wp_data_reserve_mb }} MB must fit in its {{ wp_vm.data_disk }} GB data disk; wp_backup_quota_offset must be
+      larger than the spread of the quota ids (a backup project id must never equal another site's id) and the highest backup id must stay below wp_scratch_quota_id. Nothing was changed.
     quiet: true
 
 - name: Deploy each site (tasks/wp_site_one_common.yml)

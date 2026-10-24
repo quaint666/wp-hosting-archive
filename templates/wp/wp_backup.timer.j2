@@ -1,0 +1,11 @@
+# Managed by Ansible (templates/wp/wp_backup.timer.j2). Enabled for every site, on hold or live. After the update window, before the Proxmox backup job.
+[Unit]
+Description=Nightly backup of WordPress site %i
+
+[Timer]
+OnCalendar={{ wp_backup_calendar }}
+RandomizedDelaySec={{ wp_backup_jitter_s }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

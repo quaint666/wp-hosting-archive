@@ -40,6 +40,9 @@
     - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
     - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
     - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
+    - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
+    - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
+    - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
   loop_control:
     label: "{{ item.dest }}"
 
@@ -56,6 +59,8 @@
     - { src: wp_cron.service.j2, dest: "wp-cron@.service" }
     - { src: wp_cron.timer.j2, dest: "wp-cron@.timer" }
     - { src: wp_job_failed.service.j2, dest: "wp-job-failed@.service" }
+    - { src: wp_backup.service.j2, dest: "wp-backup@.service" }
+    - { src: wp_backup.timer.j2, dest: "wp-backup@.timer" }
   loop_control:
     label: "{{ item.dest }}"
   notify: Reload systemd
@@ -63,3 +68,43 @@
 # The site tasks enable timers next, and systemd must know the units first.
 - name: Reload systemd now if a unit changed
   ansible.builtin.meta: flush_handlers
+
+# One check for all sites, not an instance per site: is every site still being backed up? (templates/wp/wp_backup_check.sh.j2)
+- name: Deploy the backup freshness check service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-backup-check.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check that every WordPress site has a recent backup
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-backup-check
+
+- name: Deploy the backup freshness check timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-backup-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check the WordPress backups are recent
+
+      [Timer]
+      OnCalendar={{ wp_backup_check_calendar }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the backup freshness check timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-backup-check.timer
+    enabled: true
+    state: started

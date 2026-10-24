@@ -242,6 +242,10 @@ class Assertions(unittest.TestCase):
             "unknown state": [{**site, "state": "paused"}],
             "RAM does not fit": [{**site, "php_mem_mb": 9000}],
             "quota does not fit": [{**site, "quota_mb": 100000}],
+            "backup quota does not fit": [{**site, "backup_quota_mb": 100000}],
+            "backups of two sites fit only together": [{**site, "quota_mb": 10000, "backup_quota_mb": 10000}, {"name": "other", "port": 9102, "quota_id": 1002, "quota_mb": 10000, "backup_quota_mb": 10000}],
+            "a backup project id could equal another site's id": [site, {"name": "other", "port": 9102, "quota_id": site["quota_id"] + 1499}],
+            "a backup project id would reach the scratch project": [{**site, "quota_id": 2999500}],
         }
         for label, sites in cases.items():
             with self.subTest(label):

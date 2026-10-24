@@ -29,34 +29,29 @@
     mode: "0755"
 
 # Before anything is written below it: files and directories made later inherit the project id from the +P flag.
-- name: Read the project id of the site directory
-  ansible.builtin.command:
-    cmd: lsattr -dp {{ wp_site_dir }}
-  register: wp_site_lsattr
-  changed_when: false
-  check_mode: false
+- name: Put the site in its quota project (tasks/wp_project_quota_common.yml)
+  ansible.builtin.include_tasks: wp_project_quota_common.yml
+  vars:
+    wp_pq_path: "{{ wp_site_dir }}"
+    wp_pq_id: "{{ wp_s.quota_id }}"
+    wp_pq_mb: "{{ wp_s.quota_mb }}"
 
-- name: Put the site directory in its project (inherited by everything made below it)
-  ansible.builtin.command:
-    cmd: chattr -R +P -p {{ wp_s.quota_id }} {{ wp_site_dir }}
-  when: (wp_site_lsattr.stdout.split() | first | int) != (wp_s.quota_id | int)
-  changed_when: true
+# The backups have a project and a limit of their own, so a site that fills its quota cannot starve its backups and a runaway backup cannot starve the site. Hard links
+# between snapshots stay inside this project; the first snapshot is a real copy because a hard link across projects is refused (the verifier proves that).
+- name: Make the site's backup directory
+  ansible.builtin.file:
+    path: "{{ wp_backup_dir }}/{{ wp_s.name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
 
-- name: Read the project quotas
-  ansible.builtin.command:
-    cmd: repquota -P -n {{ wp_data_mount }}
-  register: wp_site_repquota
-  changed_when: false
-  check_mode: false
-
-# repquota prints "#<id> -- <used> <soft> <hard> <files> <soft> <hard>" in 1 KiB blocks; setquota takes the same unit.
-- name: Set the site's hard block limit
-  ansible.builtin.command:
-    cmd: setquota -P {{ wp_s.quota_id }} 0 {{ (wp_s.quota_mb | int) * 1024 }} 0 0 {{ wp_data_mount }}
-  when: >-
-    (wp_site_repquota.stdout_lines | select('match', '^#' ~ wp_s.quota_id ~ '\s') | list | first | default('') | regex_findall('\S+'))[4] | default('-1') | int
-    != (wp_s.quota_mb | int) * 1024
-  changed_when: true
+- name: Put the backups in their own quota project (tasks/wp_project_quota_common.yml)
+  ansible.builtin.include_tasks: wp_project_quota_common.yml
+  vars:
+    wp_pq_path: "{{ wp_backup_dir }}/{{ wp_s.name }}"
+    wp_pq_id: "{{ (wp_s.quota_id | int) + (wp_backup_quota_offset | int) }}"
+    wp_pq_mb: "{{ wp_s.backup_quota_mb }}"
 
 - name: Make the database directory
   ansible.builtin.file:
@@ -264,3 +259,10 @@
     name: "wp-cron@{{ wp_s.name }}.timer"
     enabled: "{{ wp_s.state == 'live' }}"
     state: "{{ 'started' if wp_s.state == 'live' else 'stopped' }}"
+
+# Every site is backed up every night, hold or live (a held site is often the one carrying freshly imported data). The job is wp-site-backup; the timer has no state condition.
+- name: Back the site up every night, whether it is on hold or live
+  ansible.builtin.systemd:
+    name: "wp-backup@{{ wp_s.name }}.timer"
+    enabled: true
+    state: started

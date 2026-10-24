@@ -15,10 +15,10 @@ wp_data_mount: /srv/wp
 wp_domain: example.com
 # Names no site may take: the shop, the lab and the tunnel names, plus the health vhost's label.
 wp_reserved_names: [bloomy, bloomy-staging, ntfy, ntfy-acer, hub, wg, lab, wp-healthz, www, mail]
-# What the sites may not spend: RAM for the OS, nginx, cloudflared, Alloy, node_exporter and the page cache; disk for backups, intake and scratch. The play refuses a
+# What the sites may not spend: RAM for the OS, nginx, cloudflared, Alloy, node_exporter and the page cache; disk for intake and scratch (the backups have quotas of their own). The play refuses a
 # list whose limits do not fit.
 wp_vm_ram_reserve_mb: 1536
-wp_data_reserve_mb: 12288
+wp_data_reserve_mb: 6144
 # Functions php-fpm may not call (a site can list exceptions in php_allow_functions). The WP-CLI one-shot containers do not load this file.
 wp_php_disable_functions: [exec, passthru, shell_exec, system, proc_open, popen, pcntl_exec, pcntl_fork, pcntl_signal, pcntl_alarm, posix_kill, posix_setuid, posix_setgid, dl, symlink, link, show_source]
 # Every field a site may omit; wp_sites entries override these. name, port and quota_id are required. state: hold = nginx answers only a local curl and the
@@ -36,6 +36,7 @@ wp_site_defaults:
   db_buffer_pool_mb: 64
   quota_mb: 3072
   upload_mb: 64
+  backup_quota_mb: 3072
   allow_xmlrpc: false
   php_allow_functions: []
 # port = the loopback port of the site's php-fpm container (unique per site); quota_id = its ext4 project id (unique, never reused for another site).
@@ -75,3 +76,21 @@ wp_data_warn_pct: 75
 wp_data_crit_pct: 90
 wp_disk_state_dir: /var/lib/wp-disk-check
 wp_disk_calendar: "*:0/10"
+
+# Backups (tasks/wp_project_quota_common.yml, templates/wp/wp_site_backup.sh.j2). A site's backups live in wp_backup_dir/<site>, in their own quota project: its id is the site's
+# quota_id plus wp_backup_quota_offset (the play refuses an offset that could collide with another site's id, or reach wp_scratch_quota_id). One job per site per night, hold or live;
+# the newest wp_backup_keep_daily snapshots are kept, plus the newest of each of the wp_backup_keep_weekly weeks before them. Under a freeze backups still run but nothing is pruned.
+wp_backup_dir: "{{ wp_data_mount }}/backups"
+wp_backup_calendar: "*-*-* 03:15:00"
+wp_backup_jitter_s: 300
+wp_backup_timeout_s: 3600
+wp_backup_keep_daily: 7
+wp_backup_keep_weekly: 3
+wp_backup_quota_offset: 1000
+wp_backup_stale_hours: 30
+wp_backup_check_calendar: hourly
+# The restore drill (templates/wp/wp_site_restore.sh.j2) restores into a scratch copy under wp_data_mount/scratch in this project, one at a time, with a throwaway database.
+wp_scratch_quota_id: 3000001
+wp_scratch_quota_mb: 3072
+wp_restore_db_mem_mb: 384
+wp_restore_db_buffer_pool_mb: 64

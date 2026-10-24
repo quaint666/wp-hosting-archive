@@ -12,7 +12,7 @@ SITE=${1:-}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # name port quota_id quota_mb state (defaults merged), then the domain, uids, listen port and the data mount
-read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN MOUNT MEMP MEMD < <(python3 -I - "$REPO" "$SITE" <<'PY'
+read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN MOUNT MEMP MEMD BQMB BOFF BDIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
 import sys, yaml
 repo, site = sys.argv[1:3]
 h = yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))
@@ -21,12 +21,12 @@ s = next((x for x in h["wp_sites"] if x["name"] == site), None)
 if s is None:
     sys.exit("no site '%s' in wp_sites" % site)
 s = {**h["wp_site_defaults"], **s}
-print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"])
+print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"], s["backup_quota_mb"], h["wp_backup_quota_offset"], h["wp_data_mount"] + "/backups")
 PY
 ) || exit 1
 [ -n "${MOUNT:-}" ] || exit 1
 
-ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD bash -s" <<'REMOTE'
+ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD BQMB=$BQMB BOFF=$BOFF BDIR=$BDIR bash -s" <<'REMOTE'
 set -u
 FAILS=0; TOTAL=0
 ok()   { TOTAL=$((TOTAL+1)); echo "ok:   $*"; }
@@ -81,6 +81,15 @@ LINKOUT=$(setpriv --reuid "$PHPUID" --regid "$PHPUID" --clear-groups ln "$SCRATC
 if echo "$LINKOUT" | grep -qi 'cross-device'; then ok "a hard link across quota projects is refused (cross-device)"
 elif [ -e "$DIR/html/wp-content/uploads/.verify-link" ]; then bad "a hard link out of the quota project was ALLOWED"; rm -f "$DIR/html/wp-content/uploads/.verify-link"
 else bad "hard link refused for another reason: $LINKOUT"; fi
+
+echo "== $SITE: backups"
+BQID=$((QID + BOFF)); BLINE=$(repquota -P -n "$MOUNT" </dev/null | grep "^#$BQID ")
+[ "$(echo "$BLINE" | awk '{print $5}')" = "$((BQMB*1024))" ] && ok "backup project $BQID hard limit $BQMB MB ($(echo "$BLINE" | awk '{printf "%d MB used", $3/1024}'))" || bad "backup project $BQID line '$BLINE', want hard $((BQMB*1024)) KiB"
+[ "$(stat -c %a "$BDIR/$SITE")" = 700 ] && ok "the backup directory is private (700)" || bad "backup directory mode $(stat -c %a "$BDIR/$SITE")"
+systemctl is-enabled --quiet "wp-backup@$SITE.timer" </dev/null && ok "wp-backup@$SITE.timer enabled (nightly, on hold or live)" || bad "wp-backup@$SITE.timer is not enabled"
+systemctl is-enabled --quiet wp-backup-check.timer </dev/null && ok "wp-backup-check.timer enabled (a missing backup is noticed)" || bad "wp-backup-check.timer is not enabled"
+LAST=$(cat "$BDIR/$SITE/.last-success" 2>/dev/null)
+if [ -n "$LAST" ]; then echo "   (info) newest good backup: $LAST ($(( ($(date +%s) - $(stat -c %Y "$BDIR/$SITE/.last-success")) / 3600 )) hours ago)"; else echo "   (info) no backup has run yet for $SITE"; fi
 
 echo "== $SITE: nginx ($STATE)"
 if [ "$STATE" = hold ]; then

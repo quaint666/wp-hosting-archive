@@ -458,7 +458,8 @@ class Tools(unittest.TestCase):
         units = [x for x in tools if x.get("name") == "Deploy the WordPress job units"][0]
         self.assertEqual(units["notify"], "Reload systemd")
         names = [x.get("name") for x in tools]
-        self.assertEqual(names[-1], "Reload systemd now if a unit changed", "the reload must come before any site enables a timer")
+        self.assertGreater(names.index("Reload systemd now if a unit changed"), names.index("Deploy the WordPress job units"), "the reload must follow the units it loads")
+        self.assertLess(names.index("Reload systemd now if a unit changed"), names.index("Deploy the backup freshness check service"), "the tools tasks end by deploying their own timer; the sites come after all of them")
         wrapper = yaml.safe_load((ROOT / "dellwp/wp_sites_dellwp.yml").read_text())[0]
         self.assertIn("Reload systemd", [h["name"] for h in wrapper["handlers"]])
 
