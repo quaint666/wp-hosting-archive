@@ -17,7 +17,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wp_sites as w  # noqa: E402
+from test_wp_sites_render import fixture_vars_text  # noqa: E402
 
 GOOD_PW = "correct-horse-battery-staple"
 
@@ -27,15 +29,9 @@ class Base(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wpsites-"))
         (self.tmp / "host_vars/dellwp").mkdir(parents=True)
         self.vars = self.tmp / "host_vars/dellwp/vars.yml"
-        # the committed file, not the working copy: an uncommitted edit (a site this script just added, say) must not change what the tests start from
-        head = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:host_vars/dellwp/vars.yml"], capture_output=True, text=True)
-        text = head.stdout if head.returncode == 0 else (ROOT / "host_vars/dellwp/vars.yml").read_text()
-        # ...and only its first site: the repo gains sites (helloworld is committed), and every expectation here (ports, ids, names) is about a list that starts with one
-        lines = text.split("\n")
-        for extra in [x["name"] for x in yaml.safe_load(text)["wp_sites"]][1:]:
-            start, end = w.site_span(lines, extra)
-            del lines[start:end]
-        self.vars.write_text("\n".join(lines))
+        # the real variables with one fixed live site (tests/test_wp_sites_render.py FIXTURE_SITE): the repo's own sites come and go, and every expectation here (ports, ids, names) is about
+        # a list that starts with exactly this one
+        self.vars.write_text(fixture_vars_text())
         for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
             subprocess.run(["git", "-C", str(self.tmp), *cmd], check=True, capture_output=True)
         self.original = self.vars.read_text()
@@ -141,21 +137,21 @@ class Editing(Base):
 
 class Create(Base):
     def test_an_interactive_create_asks_edits_runs_the_play_installs_and_verifies(self):
-        self.answers = ["alpha", "", "", "n", "Alpha's site", "alphaadmin", "alpha@example.org", "y", "y"]   # name, state, policy, no limits, title, user, email, write, run for real
+        self.answers = ["alpha", "", "", "n", "Alpha's site", "alphaadmin", "alpha@example.org", "y"]   # name, state, policy, no limits, title, user, email, write and run
         rc = self.sites().create()
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.names(), ["wptest", "alpha"])
         self.assertEqual(self.site("alpha"), {"name": "alpha", "port": 9102, "quota_id": 1002, "state": "hold", "update_policy": "notify"})
-        self.assertEqual(self.kinds(), ["play", "play", "ssh", "bash", "python3"], "no check run for a new site: check mode cannot get past a directory that does not exist yet")
-        self.assertIn("No check run", self.text())
-        play, ssh = self.calls[0], self.calls[2]
+        self.assertEqual(self.kinds(), ["play", "ssh", "bash", "python3"], "one play run, no check run, no second run")
+        play, ssh = self.calls[0], self.calls[1]
         self.assertEqual(play, ["ansible-playbook", "-i", "inventory.yml", "dellwp/wp_sites_dellwp.yml"])
         self.assertEqual(ssh[:3], ["ssh", "-t", "dellwp"])
         self.assertEqual(shlex.split(ssh[3]), ["sudo", "wp-site-install", "alpha", "--title=Alpha's site", "--user=alphaadmin", "--email=alpha@example.org"], "one string, quoted for the remote shell")
-        self.assertEqual(self.calls[3], ["bash", "scripts/wp_site_verify_dellwp.sh", "alpha"])
+        self.assertEqual(self.calls[2], ["bash", "scripts/wp_site_verify_dellwp.sh", "alpha"])
         self.assertIn("hostname: alpha.example.com", self.text())
         self.assertIn("hidden prompt", self.text()); self.assertIn("git add host_vars/dellwp/vars.yml", self.text())
         self.assertIn("on hold", self.text())
+        self.assertEqual([x for x in self.said if x.startswith("PROMPT Write")], ["PROMPT Write this change to host_vars/dellwp/vars.yml and run the play? [y/N] "], "one question covers the write and the play")
 
     def test_the_password_is_never_asked_or_passed_anywhere(self):
         self.answers = ["alpha", "", "", "n", "T", "alphaadmin", "alpha@example.org", "y", "y"]
@@ -168,10 +164,10 @@ class Create(Base):
             self.assertNotIn(forbidden, code)
         self.assertNotIn("--password", [a for c in self.calls for a in c])
 
-    def test_yes_skips_the_questions_and_the_check_run_but_not_the_work(self):
+    def test_yes_skips_the_question_but_not_the_work(self):
         rc = self.sites().create(**self.create_args())
         self.assertEqual(rc, 0, self.text())
-        self.assertEqual(self.kinds(), ["play", "play", "ssh", "bash", "python3"])
+        self.assertEqual(self.kinds(), ["play", "ssh", "bash", "python3"])
         self.assertEqual([s for s in self.said if s.startswith("PROMPT")], [])
 
     def test_going_live_asks_a_question_that_yes_does_not_answer(self):
@@ -227,23 +223,24 @@ class Create(Base):
         self.assertEqual(rc, 1); self.assertEqual(self.vars.read_text(), self.original); self.assertEqual(self.calls, [])
         self.assertIn("Nothing was written", self.text())
 
-    def test_declining_the_real_run_leaves_the_edit_and_says_how_to_undo_it(self):
-        self.answers = ["y", "n"]
+    def test_declining_the_one_question_writes_nothing_and_runs_nothing(self):
+        self.answers = ["n"]
         rc = self.sites().create(**self.create_args(yes=False, sets=("quota_mb=2048",)))
-        self.assertEqual(rc, 1); self.assertEqual(self.kinds(), [], "nothing ran"); self.assertIn("alpha", self.names())
-        self.assertIn("git checkout -- host_vars/dellwp/vars.yml", self.text()); self.assertIn("it builds the new site", "\n".join(self.said))
+        self.assertEqual(rc, 1); self.assertEqual(self.kinds(), [], "nothing ran"); self.assertEqual(self.vars.read_text(), self.original); self.assertIn("Nothing was written", self.text())
 
-    def test_a_failing_check_run_of_a_change_stops_before_the_real_one(self):
-        # modify keeps the check run (its directories exist); create has none
-        self.rc = {"ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml --check": 2}
+    def test_a_failing_play_leaves_the_file_edited_says_how_to_undo_it_and_runs_no_verifier(self):
+        self.rc = {"ansible-playbook": 2}
         self.answers = ["y"]
         rc = self.sites().modify("wptest", sets=("update_policy=notify",), yes=False)
-        self.assertEqual(rc, 2); self.assertEqual(self.kinds(), ["play-check"]); self.assertIn("Nothing on the host changed", self.text())
+        self.assertEqual(rc, 2); self.assertEqual(self.kinds(), ["play"]); self.assertIn("git checkout -- host_vars/dellwp/vars.yml", self.text()); self.assertIn("half-way", self.text())
+        self.assertEqual(self.site("wptest")["update_policy"], "notify")
 
-    def test_a_good_check_run_of_a_change_asks_before_the_real_one(self):
-        self.answers = ["y", "y"]
+    def test_one_question_covers_the_write_and_the_play_and_there_is_no_check_run(self):
+        self.answers = ["y"]
         rc = self.sites().modify("wptest", sets=("update_policy=notify",), yes=False)
-        self.assertEqual(rc, 0, self.text()); self.assertEqual(self.kinds()[:3], ["play-check", "play", "play"]); self.assertNotIn("No check run", self.text())
+        self.assertEqual(rc, 0, self.text()); self.assertEqual(self.kinds(), ["play", "bash", "python3"])
+        self.assertEqual([c for c in self.calls if "--check" in c], [])
+        self.assertEqual(len([x for x in self.said if x.startswith("PROMPT")]), 1)
 
     def test_a_failing_play_stops_before_the_install(self):
         self.rc = {"ansible-playbook": 4}
@@ -255,13 +252,11 @@ class Create(Base):
         rc = self.sites().create(**self.create_args())
         self.assertEqual(rc, 2); self.assertIn("ssh -t dellwp sudo wp-site-install alpha", self.text()); self.assertNotIn("bash", self.kinds(), "no verifier on a site with no WordPress")
 
-    def test_a_second_run_that_changes_something_is_warned_about(self):
-        self.rc = {"changed": "3"}
+    def test_the_play_runs_once_with_no_check_flag_and_no_second_run_or_warning(self):
         self.sites().create(**self.create_args())
-        self.assertIn("WARNING: the second run should end changed=0", self.text())
-        self.commit("alpha"); self.said.clear(); self.rc = {}
-        self.sites().create(**self.create_args(name="beta"))
-        self.assertNotIn("WARNING", self.text())
+        plays = [c for c in self.calls if c[0] == "ansible-playbook"]
+        self.assertEqual(plays, [["ansible-playbook", "-i", "inventory.yml", "dellwp/wp_sites_dellwp.yml"]])
+        self.assertNotIn("WARNING", self.text()); self.assertNotIn("second run", self.text())
 
     def test_no_run_only_edits(self):
         self.assertEqual(self.sites().create(**self.create_args(no_run=True)), 0)
@@ -293,15 +288,15 @@ class Modify(Base):
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.site("wptest")["update_policy"], "notify")
         self.assertEqual(len([l for l in self.vars.read_text().splitlines() if l not in self.original.splitlines()]), 1)
-        self.assertEqual(self.kinds(), ["play", "play", "bash", "python3"]); self.assertIn("modify site wptest: update_policy=notify", self.text())
+        self.assertEqual(self.kinds(), ["play", "bash", "python3"]); self.assertIn("modify site wptest: update_policy=notify", self.text())
 
     def test_the_menu_flow_changes_several_fields(self):
-        self.answers = ["update_policy", "freeze", "upload_mb", "128", "", "y", "y"]
+        self.answers = ["update_policy", "freeze", "upload_mb", "128", "", "y"]
         rc = self.sites().modify("wptest")
         self.assertEqual(rc, 0, self.text())
         s = self.site("wptest")
         self.assertEqual((s["update_policy"], s["upload_mb"]), ("freeze", 128))
-        self.assertEqual(self.kinds()[0], "play-check")
+        self.assertEqual(self.kinds()[0], "play")
 
     def test_going_live_asks_its_own_question_and_yes_does_not_answer_it(self):
         self.sites().modify("wptest", sets=("state=hold",), yes=True)
@@ -362,7 +357,7 @@ class Help(Base):
         for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: rename."):
             self.assertIn(needle, top)
         self.assertIn("wp-site-update", top); self.assertIn("ssh -t dellwp sudo", top)
-        for cmd, needles in (("create", ("--name", "--state", "--policy", "--title", "--user", "--email", "--set", "--yes", "--yes-public", "--no-run", "example.com", "second run that must end changed=0")),
+        for cmd, needles in (("create", ("--name", "--state", "--policy", "--title", "--user", "--email", "--set", "--yes", "--yes-public", "--no-run", "example.com", "(one run)")),
                              ("modify", ("site", "--set", "--yes", "--yes-public", "--no-run", "Not editable here: name, port, quota_id, secret_rev")), ("list", ("state, stack",)), ("password", ("--user", "hidden prompt", "never sees it", "Edits no file"))):
             text = self.help_text(cmd)
             for n in needles:
@@ -461,23 +456,20 @@ class Lifecycle(Base):
         t = w.set_site_field(t, "s7", "state", "stopped")
         self.vars.write_text(t); self.commit("crowded")
 
-    def test_stop_takes_the_final_backup_after_every_answer_and_immediately_before_the_real_play(self):
-        self.answers = ["y", "y"]   # write the change, run the play for real
+    def test_stop_takes_the_final_backup_after_every_answer_and_immediately_before_the_play(self):
+        self.answers = ["y"]   # write the change and run the play
         rc = self.sites().stop("wptest")
         self.assertEqual(rc, 0, self.text())
-        self.assertEqual(self.kinds(), ["play-check", "ssh", "play", "play", "bash", "python3"], "the backup waits for the answers: a person must not decide how stale it is")
-        self.assertEqual(self.calls[1], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force --tag=final"], "forced (a frozen site too), and tagged final: it quiets the site and is what a delete archives")
+        self.assertEqual(self.kinds(), ["ssh", "play", "bash", "python3"], "the backup waits for the answer and comes right before the play: a person must not decide how stale it is")
+        self.assertEqual(self.calls[0], ["ssh", "dellwp", "sudo -n wp-site-backup wptest --force --tag=final"], "forced (a frozen site too), and tagged final: it quiets the site and is what a delete archives")
         self.assertEqual(self.site("wptest")["state"], "stopped")
         self.assertIn("'This site is paused.'", self.text()); self.assertIn("It is LIVE", self.text()); self.assertIn("wp_sites.py start wptest", self.text())
-        self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
+        self.assertEqual(self.calls[2], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
 
-    def test_declining_the_diff_or_the_real_run_takes_no_backup(self):
+    def test_declining_takes_no_backup_and_writes_nothing(self):
         self.answers = ["n"]
         self.assertEqual(self.sites().stop("wptest"), 1)
         self.assertEqual(self.calls, []); self.assertEqual(self.vars.read_text(), self.original)
-        self.answers = ["y", "n"]   # write, then decline the real run: the check ran, the backup did not
-        self.assertEqual(self.sites().stop("wptest"), 1)
-        self.assertEqual(self.kinds(), ["play-check"]); self.assertNotIn("final", " ".join(" ".join(c) for c in self.calls))
 
     def test_a_failed_final_backup_puts_the_file_back_and_the_play_never_runs(self):
         self.rc = {"ssh": 3}
@@ -489,9 +481,9 @@ class Lifecycle(Base):
     def git_status(self):
         return subprocess.run(["git", "-C", str(self.tmp), "status", "--short"], capture_output=True, text=True).stdout.strip()
 
-    def test_yes_skips_the_questions_and_the_check_run_but_not_the_backup(self):
+    def test_yes_skips_the_question_but_not_the_backup(self):
         self.assertEqual(self.sites().stop("wptest", yes=True), 0)
-        self.assertEqual(self.kinds(), ["ssh", "play", "play", "bash", "python3"])
+        self.assertEqual(self.kinds(), ["ssh", "play", "bash", "python3"])
 
     def test_no_run_edits_only_and_takes_no_backup(self):
         self.assertEqual(self.sites().stop("wptest", yes=True, no_run=True), 0)
@@ -513,11 +505,11 @@ class Lifecycle(Base):
 
     def test_start_brings_a_stopped_site_back_on_hold_and_says_how_to_go_live(self):
         self.stopped_repo()
-        self.answers = ["y", "y"]
+        self.answers = ["y"]
         rc = self.sites().start("wptest")
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.site("wptest")["state"], "hold", "always hold: going live is a separate, explicit step")
-        self.assertEqual(self.kinds(), ["play-check", "play", "play", "bash", "python3"], "no backup on a start")
+        self.assertEqual(self.kinds(), ["play", "bash", "python3"], "no backup on a start")
         self.assertIn("modify wptest --set state=live", self.text())
 
     def test_a_start_that_would_not_fit_in_the_vms_ram_is_refused_by_the_plays_own_rule(self):
@@ -540,7 +532,7 @@ class Lifecycle(Base):
             self.sites().modify("wptest", sets=("state=stopped",), yes=True)   # stopped is not a value modify takes
 
     def test_the_menu_stops_and_starts_and_says_when_there_is_nothing_to_choose(self):
-        self.answers = ["7", "6", "wptest", "y", "y", "4"]   # nothing is stopped; stop wptest; write; run
+        self.answers = ["7", "6", "wptest", "y", "4"]   # nothing is stopped; stop wptest; write and run
         self.assertEqual(self.sites().menu(), 0)
         self.assertIn("No site is stopped.", self.text()); self.assertEqual(self.site("wptest")["state"], "stopped")
         self.assertIn(["ssh", "dellwp", "sudo -n wp-site-backup wptest --force --tag=final"], self.calls)
@@ -591,9 +583,9 @@ class Committing(Base):
         self.assertEqual(self.git_out("status", "--short"), "?? untracked.txt", "an untracked file stays untracked: the script never stages anything but the declared-state file")
 
     def test_one_object_used_for_several_actions_judges_each_run_on_its_own(self):
-        # the menu keeps one Sites object for the whole session: a dirty second run in one action must not block the commit of a later, clean one
+        # the menu keeps one Sites object for the whole session: a failed verifier in one action must not block the commit of a later, clean one
         s = self.sites()
-        self.rc = {"changed": "2"}
+        self.rc = {"bash": 2}
         s.create(**self.create_args(name="alpha", commit=True)); before = self.commits()
         subprocess.run(["git", "-C", str(self.tmp), "checkout", "--", "host_vars/dellwp/vars.yml"], check=True)
         self.rc = {}
@@ -620,11 +612,11 @@ class Committing(Base):
         self.assertIn("--commit did not commit: the verifier reported failures", self.text()); self.assertIn("git add host_vars/dellwp/vars.yml", self.text())
         self.assertNotEqual(self.git_out("status", "--short", "host_vars"), "", "the edit is still there, uncommitted")
 
-    def test_a_second_run_that_changed_something_blocks_the_commit(self):
-        self.rc = {"changed": "2"}
+    def test_a_failed_play_blocks_the_commit(self):
+        self.rc = {"ansible-playbook": 4}
         before = self.commits()
-        self.assertEqual(self.sites().create(**self.create_args(commit=True)), 0)
-        self.assertEqual(self.commits(), before); self.assertIn("the play's second run was not changed=0", self.text())
+        self.assertEqual(self.sites().create(**self.create_args(commit=True)), 4)
+        self.assertEqual(self.commits(), before); self.assertNotIn("Committed", self.text()); self.assertEqual(self.kinds(), ["play"], "no installer and no verifier after a failed play")
 
     def test_commit_needs_the_run_and_is_refused_before_anything_is_written(self):
         with self.assertRaises(w.Refuse) as cm:
@@ -654,7 +646,7 @@ class Committing(Base):
             with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
                 w.main([cmd, "--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
             flat = " ".join(buf.getvalue().split())
-            self.assertIn("--commit", flat); self.assertIn("only that file", flat); self.assertIn("second run is changed=0", flat)
+            self.assertIn("--commit", flat); self.assertIn("only that file", flat); self.assertIn("the play succeeded and the verifier ends with 0 failed", flat)
 
     def test_it_commits_in_the_repo_the_script_is_run_against_not_somewhere_else(self):
         before = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
@@ -722,16 +714,16 @@ class Deleting(Base):
                 seen.append(self.vars.read_text())
             return orig(cmd, tee)
         s = self.sites(); s.run = spy
-        self.answers = ["y", "y", "y"]   # run the tool; write the change; run the play for real
+        self.answers = ["wptest", "y"]   # confirmation 1 of 2 (the name); write and run the play
         rc = s.delete("wptest")
         self.assertEqual(rc, 0, self.text())
-        self.assertEqual(self.kinds(), ["ssh", "play-check", "play", "play", "bash", "python3"])
+        self.assertEqual(self.kinds(), ["ssh", "play", "bash", "python3"])
         self.assertEqual(self.calls[0], ["ssh", "-t", "dellwp", "sudo wp-site-delete wptest"])
         self.assertIn("state: stopped", seen[0], "when the tool ran, vars.yml still said stopped: the repo never claims a deletion that has not happened")
         self.assertEqual(self.site("wptest")["state"], "closed")
         self.assertEqual({k: self.site("wptest")[k] for k in ("name", "port", "quota_id")}, {"name": "wptest", "port": 9101, "quota_id": 1001}, "the tombstone keeps the ids")
-        self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
-        for needle in ("FOR GOOD", "14 days", "tombstone", "Proxmox"):
+        self.assertEqual(self.calls[2], ["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"])
+        for needle in ("FOR GOOD", "14 days", "tombstone", "Proxmox", "Confirmation 1 of 2"):
             self.assertIn(needle, self.text())
 
     def test_only_a_stopped_site_can_be_deleted_and_the_refusal_says_how(self):
@@ -760,40 +752,52 @@ class Deleting(Base):
 
     def test_a_tool_that_fails_leaves_the_repo_alone_and_says_to_run_it_again(self):
         self.stopped_repo(); before = self.vars.read_text()
-        self.rc = {"ssh": 2}
+        self.rc = {"ssh": 2}; self.answers = ["wptest"]
         self.assertEqual(self.sites().delete("wptest", yes=True), 2)
         self.assertEqual(self.kinds(), ["ssh"]); self.assertEqual(self.vars.read_text(), before)
         self.assertIn("the repo was not changed", self.text()); self.assertIn("the tool resumes", self.text())
 
     def test_declining_after_the_tool_succeeded_says_to_run_delete_again_and_a_play_failure_says_to_run_the_play(self):
         self.stopped_repo()
-        self.answers = ["y", "n"]   # run the tool; decline writing the change
+        self.answers = ["wptest", "n"]   # type the name; run the tool; decline writing the change
         rc = self.sites().delete("wptest")
         self.assertEqual(rc, 1); self.assertEqual(self.site("wptest")["state"], "stopped")
         self.assertIn("already gone from the VM, but vars.yml still says stopped", self.text()); self.assertIn("delete wptest", self.text())
-        self.said.clear(); self.calls.clear(); self.rc = {"ansible-playbook": 4}
+        self.said.clear(); self.calls.clear(); self.rc = {"ansible-playbook": 4}; self.answers = ["wptest"]
         rc = self.sites().delete("wptest", yes=True)
         self.assertEqual(rc, 4); self.assertEqual(self.site("wptest")["state"], "closed")
         self.assertIn("vars.yml now says closed, but the play did not finish", self.text()); self.assertIn("ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml", self.text())
 
-    def test_yes_skips_this_scripts_questions_only(self):
+    def test_yes_skips_the_question_before_the_play_but_never_the_typed_name(self):
         self.stopped_repo()
+        self.answers = ["wptest"]
         self.assertEqual(self.sites().delete("wptest", yes=True), 0)
-        self.assertEqual(self.kinds(), ["ssh", "play", "play", "bash", "python3"], "no check run, as with every --yes")
-        self.assertEqual([s for s in self.said if s.startswith("PROMPT")], [])
-        self.assertEqual(self.calls[0][2:], ["dellwp", "sudo wp-site-delete wptest"], "the name is still typed on the VM: the tool asks it, the script cannot answer it")
+        self.assertEqual(self.kinds(), ["ssh", "play", "bash", "python3"])
+        self.assertEqual(len([x for x in self.said if x.startswith("PROMPT")]), 1); self.assertIn("Confirmation 1 of 2", [x for x in self.said if x.startswith("PROMPT")][0])
+        self.assertEqual(self.calls[0][2:], ["dellwp", "sudo wp-site-delete wptest"], "the second confirmation, the name typed on the VM, is the tool's own and cannot be skipped from here")
+
+    def test_a_wrong_or_missing_name_changes_nothing_even_with_yes(self):
+        self.stopped_repo(); before = self.vars.read_text()
+        for answer in ("", "WPTEST", "wptest2", "yes", "y", "helloworld"):
+            self.said.clear(); self.answers = [answer]
+            self.assertEqual(self.sites().delete("wptest", yes=True), 1, repr(answer)); self.assertIn("Not confirmed", self.text())
+        self.assertEqual(self.calls, []); self.assertEqual(self.vars.read_text(), before)
+        self.answers = []   # no terminal at all: --yes cannot answer for a person
+        with self.assertRaises(w.Refuse):
+            self.sites().delete("wptest", yes=True)
+        self.assertEqual(self.calls, [])
 
     def test_commit_makes_the_commit_when_the_verifier_ends_clean_and_not_otherwise(self):
-        self.stopped_repo()
+        self.stopped_repo(); self.answers = ["wptest"]
         self.assertEqual(self.sites().delete("wptest", yes=True, commit=True), 0)
         self.assertEqual(self.git_out("log", "-1", "--format=%s"), "ops(wp): delete site wptest"); self.assertEqual(self.git_out("status", "--short"), "")
         self.vars.write_text(self.original); self.commit("back"); self.stopped_repo(); before = self.git_out("rev-list", "--count", "HEAD")
-        self.rc = {"bash": 2}
+        self.rc = {"bash": 2}; self.answers = ["wptest"]
         self.assertEqual(self.sites().delete("wptest", yes=True, commit=True), 2)
         self.assertEqual(self.git_out("rev-list", "--count", "HEAD"), before); self.assertIn("--commit did not commit", self.text())
 
     def test_the_deleted_names_and_ids_stay_reserved(self):
-        self.stopped_repo(); self.sites().delete("wptest", yes=True); self.commit("closed")
+        self.stopped_repo(); self.answers = ["wptest"]; self.sites().delete("wptest", yes=True); self.commit("closed")
         with self.assertRaises(w.Refuse) as cm:
             self.sites().create(**self.create_args(name="wptest"))
         self.assertIn("name of a closed site", str(cm.exception))
@@ -805,21 +809,20 @@ class Deleting(Base):
         import io
         self.answers = ["8", "4"]
         self.sites().menu(); self.assertIn("No site is stopped; a site is deleted only after it is stopped.", self.text())
-        self.stopped_repo(); self.said.clear(); self.answers = ["8", "nosuch", "wptest", "y", "y", "y", "4"]
+        self.stopped_repo(); self.said.clear(); self.answers = ["8", "nosuch", "wptest", "wptest", "y", "4"]   # menu 8; a name that is not offered; the site; confirmation 1; write and run
         self.sites().menu()
         self.assertIn("one of the sites above", self.text()); self.assertEqual(self.site("wptest")["state"], "closed")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
             w.main(["delete", "--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=lambda *a: None)
         flat = " ".join(buf.getvalue().split())
-        for needle in ("FOR GOOD" if False else "for good", "TYPE the site's name", "tombstone", "never reused", "months", "stopped", "--commit", "--yes"):
+        for needle in ("for good", "TYPE the site's name", "TWICE", "tombstone", "never reused", "months", "stopped", "--commit", "--yes", "skips neither" if False else "does NOT skip the name"):
             self.assertIn(needle, flat)
         self.assertNotIn("--no-run", flat, "there is no half-way: a closed state with the data still there would be refused by the play")
         top = io.StringIO()
         with contextlib.redirect_stdout(top), self.assertRaises(SystemExit):
             w.main(["--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=lambda *a: None)
-        self.assertIn("wp-site-delete", top.getvalue()); self.assertIn("Not here yet: rename.", top.getvalue())
-
+        self.assertIn("wp-site-delete", top.getvalue()); self.assertIn("Not here yet: rename.", top.getvalue()); self.assertIn("A destructive change asks twice", " ".join(top.getvalue().split()))
 
 class Surface(Base):
     def test_list_runs_the_status_command(self):
