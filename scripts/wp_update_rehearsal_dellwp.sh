@@ -32,7 +32,8 @@ version() { wpc plugin get "$PLUGIN" --field=version 2>/dev/null; }
 check() { if [ "$2" = "$3" ]; then echo "ok: $1 ($3)"; else echo "FAIL: $1 (wanted '$3', got '$2')"; FAIL=$((FAIL+1)); fi; }
 clean() { [ ! -e "$DIR/maintenance.flag" ] && [ ! -e "$DIR/.recover-undo" ] && echo "ok: the maintenance flag and the undo directory are gone" || { echo "FAIL: flag or undo directory left behind"; ls -la "$DIR" | grep -E 'maintenance|recover'; FAIL=$((FAIL+1)); }; }
 lastkey() { sed -n "s/^$1=//p" "$DIR/.update-last" 2>/dev/null; }
-install_old() { "$BIN/wp-site-ext" "$SITE" plugin install "$PLUGIN" --version=$OLD --activate </dev/null; }
+# install refuses to change a plugin that is already installed ("already installed", seen 2026-10-24), so the old version goes in over a clean slate
+install_old() { "$BIN/wp-site-ext" "$SITE" plugin delete "$PLUGIN" </dev/null >/dev/null 2>&1; "$BIN/wp-site-ext" "$SITE" plugin install "$PLUGIN" --version=$OLD --activate </dev/null; }
 
 echo "== 1. something to update"
 install_old || { echo "FAIL: could not install $PLUGIN $OLD"; exit 1; }

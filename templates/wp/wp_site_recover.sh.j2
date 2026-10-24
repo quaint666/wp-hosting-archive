@@ -16,6 +16,7 @@
 set -eEu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
+readonly PROBE_PORT='{{ wp_nginx_probe_port }}'
 readonly IMG_PHP='{{ wp_image_php }}'
 {% raw %}
 usage() { echo "usage: wp-site-recover <site> [<stamp>|latest] [--yes] [--no-undo]" >&2; exit 2; }
@@ -104,6 +105,10 @@ finish() {
         if [ "$undo_core" = fail ]; then undone=no; echo "ROLLED BACK EXCEPT CORE: the database and wp-content are as they were, but core ($old_core) does not verify. $site stays in maintenance: check with  wp-site-cli $site --code core verify-checksums  and remove $flag when it passes" >&2
         else echo "rolled back: $site is as it was before this recover" >&2; fi
       else undone=no; echo "NOT ROLLED BACK: $site is in an unknown state and stays in maintenance (undo material, if any: $undo_dir)" >&2; fi
+    elif [ "$PHASE" = opening ] || [ "$PHASE" = reopened ]; then
+      # the snapshot is in place and WordPress boots, but the site does not answer as it should: the previous state is KEPT (it is not rolled back to a state that was being replaced for a reason)
+      echo "the snapshot is in place; the previous database and wp-content are kept in $undo_dir (remove it by hand when you have looked)" >&2
+      [ "$PHASE" = reopened ] || undone=no   # not proven: it stays closed
     else
       rm -rf -- "$undo_dir"   # nothing was replaced yet: only the dump of the current database can be in it
       if [ "$php_stopped" = yes ]; then reload_php || true; fi
@@ -165,16 +170,22 @@ need "WordPress does not boot on the restored database and files"
 need "the restored site has no users"
 [ "$("$WP_BIN/wp-site-cli" "$site" user list --format=count </dev/null)" -ge 1 ]
 PHASE=opening
-[ "$made_flag" = no ] || rm -f -- "$flag"
-need "the site does not answer over http after the restore"
+# The home page and the login form are asked on the probe port, which ignores the maintenance flag: the site is proven BEFORE it is opened, and the same check works when the
+# flag is someone else's (the update job keeps it up while it calls this tool and opens the site itself).
+need "the site does not answer over http on the probe port after the restore"
 ok=no
 for _ in 1 2 3; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/" </dev/null || true)
-  login=$(curl -s --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/wp-login.php" </dev/null || true)
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$PROBE_PORT/" </dev/null || true)
+  login=$(curl -s --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$PROBE_PORT/wp-login.php" </dev/null || true)
   if [ "$code" = 200 ] && printf '%s' "$login" | grep -q 'user_login'; then ok=yes; break; fi
   sleep 10
 done
 [ "$ok" = yes ]
+if [ "$made_flag" = yes ]; then   # our flag: open, then ask the visitor port once. (Someone else's flag stays: they open the site and check it.)
+  rm -f -- "$flag"; PHASE=reopened
+  need "the visitor port does not answer after the site was opened"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/" </dev/null || true)" = 200 ]
+fi
 PHASE=done; FAILED=""
 rm -rf -- "$undo_dir"
 command -v logger >/dev/null && logger -t wp-site-recover -- "site=$site snapshot=$stamp core=$snap_core result=ok" || true

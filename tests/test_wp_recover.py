@@ -58,8 +58,10 @@ exit 0
 '''
 SYSTEMCTL = '#!/bin/bash\necho "$*" >> "$SHIM/systemctl.calls"\necho "$1" >> "$SHIM/order"\n'
 CURL = r'''#!/bin/bash
+url=${@: -1}; port=${url#http://127.0.0.1:}; port=${port%%/*}
+echo "flag=$([ -e "$SITE/maintenance.flag" ] && echo up || echo down) port=$port" >> "$SHIM/curl.log"
 case " $* " in
-  *" -w "*) [ -f "$SHIM/http_fail" ] && echo 500 || echo 200 ;;
+  *" -w "*) if [ "$port" = 8081 ]; then [ -f "$SHIM/http_fail" ] && echo 500 || echo 200; else [ -f "$SHIM/public_fail" ] && echo 502 || echo 200; fi ;;
   *wp-login.php*) echo '<input id="user_login" name="log">' ;;
 esac
 '''
@@ -230,12 +232,36 @@ class Recover(Base):
         r = self.recover("--yes", "--no-undo")
         self.assertEqual(r.returncode, 1); self.assertIn("NOT ROLLED BACK", r.stderr); self.assertTrue(self.flag.exists())
 
-    def test_an_http_failure_after_the_site_is_open_is_reported_but_not_rolled_back(self):
-        # the snapshot is in place and WordPress booted: undoing would only bring back the state that was being replaced. The operator must hear about it.
+    def test_the_site_is_proven_on_the_probe_port_while_the_flag_is_still_up_and_opened_only_then(self):
+        r = self.recover("--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.log("curl.log").splitlines()
+        self.assertEqual(calls[:2], ["flag=up port=8081", "flag=up port=8081"], "home and login, asked while the site is still closed")
+        self.assertEqual(calls[2:], ["flag=down port=8080"], "then the flag comes down and the visitor port is asked once")
+
+    def test_an_http_failure_on_the_probe_port_keeps_the_site_closed_and_the_previous_state(self):
+        # the snapshot is in place and WordPress booted: it is not rolled back, but it is not opened either, and what it replaced is kept for the operator
         self.put("http_fail", "")
         r = self.recover("--yes")
-        self.assertEqual(r.returncode, 1); self.assertIn("does not answer over http", r.stderr); self.assertNotIn("rolled back", r.stderr)
-        self.assertIn("SNAPSHOT-DB", self.db()); self.assertFalse(self.flag.exists())
+        self.assertEqual(r.returncode, 1); self.assertIn("probe port", r.stderr); self.assertNotIn("rolled back", r.stderr)
+        self.assertIn("SNAPSHOT-DB", self.db()); self.assertTrue(self.flag.exists(), "not proven, so not opened")
+        self.assertTrue((self.undo / "db.sql.gz").exists() and (self.undo / "wp-content/uploads/live-only.jpg").exists(), "the previous state is kept")
+        self.assertIn(str(self.undo), r.stderr)
+        self.assertEqual(self.log("curl.log").count("port=8080"), 0, "the visitor port is not asked for a site that did not prove itself")
+
+    def test_a_visitor_port_failure_after_opening_is_reported_and_keeps_the_previous_state(self):
+        self.put("public_fail", "")
+        r = self.recover("--yes")
+        self.assertEqual(r.returncode, 1); self.assertIn("visitor port", r.stderr); self.assertNotIn("rolled back", r.stderr)
+        self.assertFalse(self.flag.exists(), "it proved itself on the probe port and was opened"); self.assertTrue(self.undo.exists())
+
+    def test_someone_elses_flag_is_left_alone_and_no_visitor_request_is_made(self):
+        self.flag.write_text("")   # the update job's flag
+        r = self.recover("--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.flag.exists())
+        self.assertEqual(set(self.log("curl.log").split()) - {"flag=up", "flag=down"}, {"port=8081"}, "the check works under someone else's flag because it uses the probe port")
+        self.assertFalse(self.undo.exists(), "a success clears the undo material")
 
     # --- the maintenance flag belongs to whoever raised it
     def test_a_flag_that_was_already_up_stays_up_on_success_and_on_failure(self):
