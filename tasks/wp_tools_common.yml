@@ -42,10 +42,15 @@
     - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
     - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
     - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
+    - { src: wp_site_recover.sh.j2, dest: wp-site-recover }
+    - { src: wp_site_update.sh.j2, dest: wp-site-update }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
   loop_control:
     label: "{{ item.dest }}"
+  vars:
+    wp_update_policies: >-
+      {% for s in wp_sites %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
 
 # The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
 # ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
@@ -62,6 +67,8 @@
     - { src: wp_job_failed.service.j2, dest: "wp-job-failed@.service" }
     - { src: wp_backup.service.j2, dest: "wp-backup@.service" }
     - { src: wp_backup.timer.j2, dest: "wp-backup@.timer" }
+    - { src: wp_update.service.j2, dest: "wp-update@.service" }
+    - { src: wp_update.timer.j2, dest: "wp-update@.timer" }
   loop_control:
     label: "{{ item.dest }}"
   notify: Reload systemd

@@ -1,0 +1,184 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_update.sh.j2). Update one site, and take it back if the update breaks it:   wp-site-update <site> [--check | --apply]
+# Run by wp-update@<site>.timer every night before the backup. What it does depends on the site's `update_policy:` (wp_sites; the default is notify):
+#   auto    apply what is available (below)            notify  tell ntfy what is available, once per set, and change nothing
+#   freeze  do nothing
+# --check lists what is available and changes nothing (any policy). --apply is the operator doing it by hand: it applies whatever the policy says and retries a set that failed before.
+# A freeze flag ({{ wp_freeze_file }} or the site's own freeze file) always wins: the site stays exactly as it is.
+# What is updated: WordPress core minor and security releases (a major is the operator's decision), and the plugins and themes that wordpress.org offers a newer version of. A plugin or
+# theme whose directory name is not a wordpress.org slug is listed as one the operator must handle, never passed on. Nothing is touched when nothing is available.
+# Applying, in this order, and the site is in maintenance (nginx answers 503, cron skips, so no write can arrive) from the snapshot until it has been proven:
+#   1. the maintenance flag goes up, then a snapshot tagged pre-update (wp-site-backup --tag=pre-update); if that fails nothing has changed and the flag comes down
+#   2. core (minor), then wp-site-cli's verify-checksums, which must exit 0 with no warning; plugins and themes by name through wp-site-ext (plugins are checked against wordpress.org's
+#      checksums one by one); the database upgrade; then php is recreated (systemctl reload: a cold OPcache, so the new code is what the probe sees)
+#   3. the probe, on the probe port that ignores the maintenance flag: the home page answers 200, the login page has its form, WordPress is installed, and php logged no fatal error since
+#      step 2 began; {{ wp_update_probe_tries }} tries, {{ wp_update_probe_wait_s }} s apart
+#   4. healthy: the flag comes down and the public path is asked once more (a failure there is reported, not rolled back: visitors may have written since). Unhealthy, or any step above
+#      failing, or the unit's time limit: wp-site-recover puts the snapshot back (database, wp-content, core), the flag comes down, and ntfy says so. If the recover fails too, the
+#      site STAYS in maintenance and ntfy says where the snapshot is. A rolled-back set is not retried by the timer until the set changes (--apply retries it): a night of downtime
+#      repeated every night would be worse than the update it was for.
+# Every outcome is also written to <site dir>/.update-last (what the status tool can show). It does not run WooCommerce's own database update (`wp wc update`: not yet verified).
+# WP_UPDATE_FAIL_PROBE=1 in the environment makes the probe fail, for the rehearsal (scripts/wp_update_rehearsal_dellwp.sh); nothing else reads it.
+set -eEu -o pipefail
+. {{ wp_tools_lib }}/common.sh
+readonly POLICIES='{{ wp_update_policies }}'
+readonly PROBE_PORT='{{ wp_nginx_probe_port }}'
+readonly PROBE_TRIES='{{ wp_update_probe_tries }}'
+readonly PROBE_WAIT='{{ wp_update_probe_wait_s }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST_NAME='{{ inventory_hostname }}'
+{% raw %}
+usage() { echo "usage: wp-site-update <site> [--check | --apply]" >&2; exit 2; }
+[ "$#" -ge 1 ] || usage
+require_site "$1"; shift
+mode=policy
+for a in "$@"; do case $a in --check) mode=check ;; --apply) mode=apply ;; *) usage ;; esac; done
+policy=""
+for p in $POLICIES; do [ "${p%%:*}" = "$site" ] && policy=${p#*:}; done
+case $policy in auto|notify|freeze) ;; *) die "no valid update policy for $site ('$policy'): run dellwp/wp_sites_dellwp.yml" ;; esac
+flag=$dir/maintenance.flag; last=$dir/.update-last; notified=$dir/.update-notified; failed_set=$dir/.update-failed
+php=wp_${site//-/_}_php; unit=wp-$site.service
+cli() { "$WP_BIN/wp-site-cli" "$site" "$@" </dev/null; }
+say() { echo "wp-site-update: $*"; }
+tell() { ntfy-notify "$TOPIC" "$HOST_NAME $*" || true; }
+record() { printf 'time=%s\nresult=%s\nset=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" "$1" "${2:-}" > "$last"; }
+
+for f in "$WP_FREEZE" "$dir/freeze"; do
+  if [ -e "$f" ]; then say "$site is frozen ($f exists); skipped"; exit 0; fi
+done
+if [ "$mode" = policy ] && [ "$policy" = freeze ]; then say "$site has update policy freeze; skipped"; exit 0; fi
+exec 9>"$dir/.update.lock"
+flock -n 9 || die "another update of $site is running"
+[ -f "$dir/wp-config.php" ] || die "the site is not set up under $dir"
+
+# --- what is available (read-only; core and the listings run without any plugin's code)
+# check-update prints the version, or nothing but a "Success: ... latest version" line: count only what looks like a version
+core_out=$(cli --code core check-update --minor --field=version)
+core_new=$(printf '%s\n' "$core_out" | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -n 1 || true)
+core_n=0; [ -z "$core_new" ] || core_n=1
+plugins=(); themes=(); manual=()
+list_updates() {   # kind -> "slug old new" lines
+  cli "$1" list --update=available --fields=name,version,update_version --format=csv --skip-plugins --skip-themes | tail -n +2 | tr ',' ' '
+}
+plugin_list=$(list_updates plugin)   # captured first: a failing listing must stop the job, not look like "nothing to update"
+theme_list=$(list_updates theme)
+while read -r name old new; do
+  [ -n "${name:-}" ] || continue
+  if [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then plugins+=("$name:$old>$new"); else manual+=("plugin:$name"); fi
+done <<< "$plugin_list"
+while read -r name old new; do
+  [ -n "${name:-}" ] || continue
+  if [[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]]; then themes+=("$name:$old>$new"); else manual+=("theme:$name"); fi
+done <<< "$theme_list"
+desc=""
+[ -z "$core_new" ] || desc+="core $core_new; "
+[ "${#plugins[@]}" = 0 ] || desc+="plugins ${plugins[*]}; "
+[ "${#themes[@]}" = 0 ] || desc+="themes ${themes[*]}; "
+[ "${#manual[@]}" = 0 ] || desc+="NOT by this job (the name is not a wordpress.org slug) ${manual[*]}; "
+desc=${desc%; }
+todo=$(( ${#plugins[@]} + ${#themes[@]} + (core_n > 0 ? 1 : 0) ))
+set_id=$(printf '%s' "$desc" | sha256sum | cut -c1-16)
+
+if [ "$todo" = 0 ] && [ "${#manual[@]}" = 0 ]; then say "nothing to update on $site"; record none; exit 0; fi
+if [ "$mode" = check ]; then say "available on $site: ${desc:-nothing}"; exit 0; fi
+
+if [ "$todo" = 0 ]; then   # only updates this job never applies (not wordpress.org slugs): tell the operator once
+  say "$site: only updates this job does not apply: $desc"; record manual-only "$set_id"
+  [ "$(cat "$notified" 2>/dev/null || true)" = "$set_id" ] || { tell "$site has updates the operator must do by hand: $desc"; echo "$set_id" > "$notified"; }
+  exit 0
+fi
+if [ "$mode" = policy ] && [ "$policy" = notify ]; then
+  if [ "$(cat "$notified" 2>/dev/null || true)" = "$set_id" ]; then say "$site: the same updates are still waiting (told already): $desc"; exit 0; fi
+  tell "updates are waiting on $site: $desc. Apply them: ssh -t $HOST_NAME sudo wp-site-update $site --apply"
+  echo "$set_id" > "$notified"; record notified "$set_id"; say "told ntfy: $desc"; exit 0
+fi
+if [ "$mode" = policy ] && [ "$(cat "$failed_set" 2>/dev/null || true)" = "$set_id" ]; then
+  say "$site: this set failed before and was rolled back; not retrying (wp-site-update $site --apply does): $desc"; exit 0; fi
+
+# --- apply
+STAGE=snapshot; FAILED=""; made_flag=no; stamp=""; started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+need() { FAILED=$1; }
+
+probe() {   # 0 = the site is healthy, asked on the probe port (the maintenance flag does not apply there)
+  [ -z "${WP_UPDATE_FAIL_PROBE:-}" ] || { echo "probe: forced to fail (WP_UPDATE_FAIL_PROBE is set)" >&2; return 1; }
+  local i code login fatals
+  for i in $(seq 1 "$PROBE_TRIES"); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$PROBE_PORT/" </dev/null || true)
+    login=$(curl -s --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$PROBE_PORT/wp-login.php" </dev/null || true)
+    fatals=$(docker logs --since "$started" "$php" 2>&1 </dev/null | grep -c 'PHP Fatal error' || true)
+    if [ "$code" = 200 ] && printf '%s' "$login" | grep -q 'user_login' && cli core is-installed >/dev/null 2>&1 && [ "$fatals" = 0 ]; then return 0; fi
+    echo "probe $i of $PROBE_TRIES: home $code, login form $(printf '%s' "$login" | grep -c 'user_login'), php fatal errors $fatals" >&2
+    [ "$i" = "$PROBE_TRIES" ] || sleep "$PROBE_WAIT"
+  done
+  return 1
+}
+
+rollback() {
+  say "rolling $site back to snapshot $stamp (${FAILED:-unexpected error})"
+  if "$WP_BIN/wp-site-recover" "$site" "$stamp" --yes </dev/null; then
+    rm -f -- "$flag"
+    echo "$set_id" > "$failed_set"; record rolled-back "$set_id"
+    tell "the update of $site failed (${FAILED:-unexpected error}) and was ROLLED BACK to $stamp; the site is as it was. Not applied: $desc. It will not be retried until the set changes; by hand: ssh -t $HOST_NAME sudo wp-site-update $site --apply"
+    say "rolled back"
+  else
+    record rollback-failed "$set_id"
+    tell "the update of $site failed (${FAILED:-unexpected error}) AND THE ROLLBACK FAILED: the site stays in maintenance. Snapshot: $stamp. Look: journalctl -u wp-update@$site -n 60; by hand: ssh -t $HOST_NAME sudo wp-site-recover $site $stamp"
+    say "ROLLBACK FAILED: $site stays in maintenance"
+  fi
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT ERR TERM INT
+  if [ "$rc" != 0 ]; then
+    case $STAGE in
+      snapshot)   # nothing has been changed
+        [ "$made_flag" = no ] || rm -f -- "$flag"
+        record aborted "$set_id"; tell "the update of $site was stopped before it changed anything (${FAILED:-unexpected error}); the site is as it was"
+        ;;
+      updating) rollback ;;
+      reopened) record reopened-unhealthy "$set_id"; tell "the update of $site was applied and the site reopened, but the public check failed (${FAILED:-unexpected error}). Visitors may have written since, so nothing was rolled back. Snapshot before the update: $stamp" ;;
+    esac
+    echo "wp-site-update: $site FAILED at stage $STAGE: ${FAILED:-unexpected error}" >&2
+  fi
+  exit "$rc"
+}
+trap 'FAILED="${FAILED:-unexpected error at line $LINENO}"' ERR
+trap finish EXIT
+trap 'FAILED="stopped by a signal (the time limit?)"; exit 143' TERM INT
+
+say "updating $site: $desc"
+need "could not raise the maintenance flag"
+touch -- "$flag"; made_flag=yes
+need "the snapshot before the update failed"
+out=$("$WP_BIN/wp-site-backup" "$site" --tag=pre-update 2>&1); echo "$out"
+stamp=$(printf '%s\n' "$out" | sed -n 's/^OK: snapshot \([0-9]\{8\}T[0-9]\{6\}Z\) of .*/\1/p' | tail -n 1)
+[[ $stamp =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || { FAILED="the backup did not report a snapshot"; false; }
+
+STAGE=updating
+if [ "$core_n" -gt 0 ]; then
+  need "core update to $core_new failed"
+  cli --code core update --minor
+  need "core does not verify after the update"
+  vout=$(cli --code core verify-checksums 2>&1) || { printf '%s\n' "$vout" >&2; false; }
+  ! printf '%s' "$vout" | grep -q '^Warning' || { printf '%s\n' "$vout" >&2; false; }
+fi
+if [ "${#plugins[@]}" -gt 0 ]; then need "plugin update failed"; "$WP_BIN/wp-site-ext" "$site" plugin update "${plugins[@]%%:*}" </dev/null; fi
+if [ "${#themes[@]}" -gt 0 ]; then need "theme update failed"; "$WP_BIN/wp-site-ext" "$site" theme update "${themes[@]%%:*}" </dev/null; fi
+if [ "$core_n" -gt 0 ]; then need "the database upgrade failed"; cli core update-db; fi
+need "php did not come back after the update"
+systemctl reload "$unit" </dev/null
+need "the site is not healthy after the update"
+probe
+
+# --- healthy: reopen
+rm -f -- "$flag"; STAGE=reopened
+need "the public path does not answer after reopening"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/" </dev/null || true)
+[ "$code" = 200 ] || { FAILED="the public path answered $code"; false; }
+STAGE=done; FAILED=""
+rm -f -- "$failed_set" "$notified"
+record updated "$set_id"
+tell "$site was updated and checked: $desc (snapshot before: $stamp)"
+say "done: $desc"
+{% endraw %}

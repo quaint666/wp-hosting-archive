@@ -1,0 +1,11 @@
+# Managed by Ansible (templates/wp/wp_update.timer.j2). Enabled for every site, on hold or live; the site's update_policy decides what the job does. Before the backup.
+[Unit]
+Description=Nightly update of WordPress site %i
+
+[Timer]
+OnCalendar={{ wp_update_calendar }}
+RandomizedDelaySec={{ wp_update_jitter_s }}
+Persistent=false
+
+[Install]
+WantedBy=timers.target

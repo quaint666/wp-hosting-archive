@@ -50,6 +50,7 @@
       - wp_sites_merged | map(attribute='port') | map('int') | select('gt', 1024) | list | length == wp_sites | length
       - wp_sites_merged | map(attribute='quota_id') | map('int') | select('ge', 1000) | list | length == wp_sites | length
       - wp_sites_merged | map(attribute='state') | difference(['hold', 'live']) | length == 0
+      - wp_sites_merged | map(attribute='update_policy') | difference(['auto', 'notify', 'freeze']) | length == 0
       - (wp_sites_merged | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
       - (wp_sites_merged | map(attribute='quota_mb') | map('int') | sum) + (wp_sites_merged | map(attribute='backup_quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
       - (wp_backup_quota_offset | int) > (wp_sites_merged | map(attribute='quota_id') | map('int') | max) - (wp_sites_merged | map(attribute='quota_id') | map('int') | min)

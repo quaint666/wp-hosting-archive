@@ -133,8 +133,13 @@ class Backup(Base):
         (self.site / "html/wp-content/uploads/a.jpg").write_text("a" * 5000)
         (self.site / "html/wp-content/plugins/p/p.php").write_text("<?php // plugin\n")
 
-    def backup(self, stamp, **env):
-        return self.run_script(self.script, "wptest", FAKE_STAMP=stamp, **env)
+    def backup(self, stamp, *args, **env):
+        return self.run_script(self.script, "wptest", *args, FAKE_STAMP=stamp, **env)
+
+    def tagged(self, *stamps):
+        for st in stamps:
+            d = self.backups / "wptest" / st
+            (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x"); (d / "MANIFEST").write_text("site=wptest\nstamp=%s\ntag=pre-update\n" % st)
 
     def test_a_first_backup_is_a_complete_checked_private_snapshot(self):
         (self.site / "html/wp-content/cache").mkdir(); (self.site / "html/wp-content/cache/c.html").write_text("x")
@@ -239,6 +244,34 @@ class Backup(Base):
         self.assertEqual(set(self.snapshots()), hand)
         for stray in ("notes", "20260101", "20260101T000000Z.keep", "important.txt"):
             self.assertTrue((self.backups / "wptest" / stray).exists(), stray + " is not a snapshot and must never be deleted")
+
+    def test_a_pre_update_snapshot_is_tagged_and_is_pruned_on_its_own(self):
+        r = self.backup("20261024T020000Z", "--tag=pre-update")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("tag=pre-update", (self.backups / "wptest" / "20261024T020000Z" / "MANIFEST").read_text())
+        self.assertIn("OK: snapshot 20261024T020000Z of wptest", r.stdout, "the update job reads the stamp from this line")
+        self.backup("20261025T031500Z")
+        self.assertNotIn("tag=", (self.backups / "wptest" / "20261025T031500Z" / "MANIFEST").read_text())
+        # the nightly ones are seven, the tagged are two, and neither pushes the other out
+        old = self.fabricate(12)
+        self.tagged("20261020T020000Z", "20261021T020000Z", "20261022T020000Z", "20261023T020000Z")
+        self.assertEqual(self.backup("20261026T031500Z").returncode, 0)
+        left = set(self.snapshots())
+        self.assertEqual({s for s in left if s.endswith("T020000Z")}, {"20261023T020000Z", "20261024T020000Z"}, "the newest two pre-update snapshots, whichever nights they are from")
+        plain = {s for s in left if not s.endswith("T020000Z")}
+        self.assertEqual(plain, self.expected_keep([s for s in old + ["20261025T031500Z", "20261026T031500Z"]], 7, 3), "tagged ones take no daily or weekly place")
+
+    def test_a_first_ever_snapshot_that_is_tagged_prunes_without_error(self):
+        r = self.backup("20261024T020000Z", "--tag=pre-update")
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertEqual(self.snapshots(), ["20261024T020000Z"])
+
+    def test_a_tagged_backup_under_a_freeze_prunes_nothing_and_other_tags_are_refused(self):
+        self.tagged("20261020T020000Z", "20261021T020000Z", "20261022T020000Z")
+        (self.tmp / "freeze").write_text("")
+        self.assertEqual(self.backup("20261024T020000Z", "--tag=pre-update", "--force").returncode, 0)
+        self.assertEqual(len([s for s in self.snapshots() if s.endswith("T020000Z")]), 4)
+        for bad in ("--tag=other", "--tag=", "--tag", "pre-update"):
+            self.assertEqual(self.backup("20261025T031500Z", bad).returncode, 2, bad)
 
     def test_retention_with_few_snapshots_deletes_nothing(self):
         old = self.fabricate(5)

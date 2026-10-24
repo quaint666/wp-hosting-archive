@@ -14,6 +14,7 @@ set -eu
 readonly WP_IMAGE='{{ wp_image_cli }}'
 readonly PHP_UID='{{ wp_php_uid }}'
 readonly CLI_MEM='{{ wp_cli_mem_mb }}'
+readonly CLI_TMP='{{ wp_cli_tmp_mb }}'
 readonly CLI_CPUS='{{ wp_cli_cpus }}'
 readonly CLI_PIDS='{{ wp_cli_pids }}'
 {% raw %}
@@ -25,6 +26,7 @@ code_allowed() {
   local cmd=${1:-} sub=${2:-} a
   case "$cmd $sub" in
     "core update"|"core check-update"|"core version"|"core verify-checksums") ;;
+    "core download") [[ "$*" =~ ^core\ download\ --version=[0-9]+\.[0-9]+(\.[0-9]+)?\ --force\ --skip-content$ ]] || die "core download is allowed only as: core download --version=X.Y.Z --force --skip-content (wp-site-recover puts core back with it)"; return 0 ;;
     "plugin install"|"plugin update"|"plugin delete"|"plugin list"|"plugin get"|"plugin status"|"plugin is-installed"|"plugin verify-checksums") ;;
     "theme install"|"theme update"|"theme delete"|"theme list"|"theme get"|"theme status"|"theme is-installed") ;;
     *) die "'$cmd $sub' is not allowed with --code (it runs as root). Run it without --code, as the web app's identity, or use wp-site-ext to install, update or remove plugins and themes." ;;
@@ -54,7 +56,7 @@ docker network inspect "wp-${site}_default" >/dev/null 2>&1 || die "the site's n
 
 args=(docker run --rm --name "wpcli_${site}_$$" --network "wp-${site}_default"
   --entrypoint wp --workdir /var/www/html
-  --read-only --tmpfs /tmp:size=128m,mode=1777
+  --read-only --tmpfs /tmp:size=${CLI_TMP}m,mode=1777
   --cap-drop ALL --security-opt no-new-privileges:true
   --memory "${CLI_MEM}m" --memory-swap "${CLI_MEM}m" --cpus "$CLI_CPUS" --pids-limit "$CLI_PIDS"
   -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache)

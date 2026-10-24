@@ -12,7 +12,7 @@ SITE=${1:-}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # name port quota_id quota_mb state (defaults merged), then the domain, uids, listen port and the data mount
-read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN MOUNT MEMP MEMD BQMB BOFF BDIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
+read -r PORT QID QMB STATE DOMAIN PHPUID DBUID LISTEN PROBE MOUNT MEMP MEMD BQMB BOFF BDIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
 import sys, yaml
 repo, site = sys.argv[1:3]
 h = yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))
@@ -21,12 +21,12 @@ s = next((x for x in h["wp_sites"] if x["name"] == site), None)
 if s is None:
     sys.exit("no site '%s' in wp_sites" % site)
 s = {**h["wp_site_defaults"], **s}
-print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"], s["backup_quota_mb"], h["wp_backup_quota_offset"], h["wp_data_mount"] + "/backups")
+print(s["port"], s["quota_id"], s["quota_mb"], s["state"], h["wp_domain"], w["wp_php_uid"], w["wp_db_uid"], h["wp_nginx_listen_port"], h["wp_nginx_probe_port"], h["wp_data_mount"], s["php_mem_mb"], s["db_mem_mb"], s["backup_quota_mb"], h["wp_backup_quota_offset"], h["wp_data_mount"] + "/backups")
 PY
 ) || exit 1
 [ -n "${MOUNT:-}" ] || exit 1
 
-ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD BQMB=$BQMB BOFF=$BOFF BDIR=$BDIR bash -s" <<'REMOTE'
+ssh dellwp "sudo -n env SITE=$SITE PORT=$PORT QID=$QID QMB=$QMB STATE=$STATE DOMAIN=$DOMAIN PHPUID=$PHPUID DBUID=$DBUID LISTEN=$LISTEN PROBE=$PROBE MOUNT=$MOUNT MEMP=$MEMP MEMD=$MEMD BQMB=$BQMB BOFF=$BOFF BDIR=$BDIR bash -s" <<'REMOTE'
 set -u
 FAILS=0; TOTAL=0
 ok()   { TOTAL=$((TOTAL+1)); echo "ok:   $*"; }
@@ -87,6 +87,7 @@ BQID=$((QID + BOFF)); BLINE=$(repquota -P -n "$MOUNT" </dev/null | grep "^#$BQID
 [ "$(echo "$BLINE" | awk '{print $5}')" = "$((BQMB*1024))" ] && ok "backup project $BQID hard limit $BQMB MB ($(echo "$BLINE" | awk '{printf "%d MB used", $3/1024}'))" || bad "backup project $BQID line '$BLINE', want hard $((BQMB*1024)) KiB"
 [ "$(stat -c %a "$BDIR/$SITE")" = 700 ] && ok "the backup directory is private (700)" || bad "backup directory mode $(stat -c %a "$BDIR/$SITE")"
 systemctl is-enabled --quiet "wp-backup@$SITE.timer" </dev/null && ok "wp-backup@$SITE.timer enabled (nightly, on hold or live)" || bad "wp-backup@$SITE.timer is not enabled"
+systemctl is-enabled --quiet "wp-update@$SITE.timer" </dev/null && ok "wp-update@$SITE.timer enabled (nightly; the site's update_policy decides what it does)" || bad "wp-update@$SITE.timer is not enabled"
 systemctl is-enabled --quiet wp-backup-check.timer </dev/null && ok "wp-backup-check.timer enabled (a missing backup is noticed)" || bad "wp-backup-check.timer is not enabled"
 LAST=$(cat "$BDIR/$SITE/.last-success" 2>/dev/null)
 if [ -n "$LAST" ]; then echo "   (info) newest good backup: $LAST ($(( ($(date +%s) - $(stat -c %Y "$BDIR/$SITE/.last-success")) / 3600 )) hours ago)"; else echo "   (info) no backup has run yet for $SITE"; fi
@@ -105,8 +106,10 @@ done
 for p in readme.html license.txt wp-config.php; do
   [ "$(code -H "Host: $HOST" "$BASE/$p")" = 404 ] && ok "404 for /$p" || bad "/$p answered $(code -H "Host: $HOST" "$BASE/$p"), want 404"
 done
-touch "$FLAG"; C=$(code -H "Host: $HOST" "$BASE/wp-admin/install.php"); rm -f "$FLAG"
+touch "$FLAG"; C=$(code -H "Host: $HOST" "$BASE/wp-admin/install.php"); CP=$(code -H "Host: $HOST" "http://127.0.0.1:$PROBE/wp-admin/install.php"); rm -f "$FLAG"
 [ "$C" = 503 ] && ok "the maintenance flag turns requests into 503, and removing it restores them" || bad "maintenance flag: got $C, want 503"
+[ "$CP" = 200 ] && ok "the probe port $PROBE answers 200 while the flag is up (the update job tests the site before reopening it)" || bad "probe port with the flag up: got $CP, want 200"
+[ "$(code -H "Host: no-such-site.$DOMAIN" "http://127.0.0.1:$PROBE/")" = 000 ] && ok "the probe port closes the connection for a host name no site claims" || bad "the probe port answered a host no site claims"
 [ "$(code -H "Host: $HOST" "$BASE/wp-admin/install.php")" = 200 ] || [ "$STATE" != hold ] && ok "site answers again after the flag is removed" || bad "site did not recover after the flag"
 # 10 requests a minute per visitor with a burst of 5: a rapid run from one made-up address must hit 429 on /wp-login.php, and other pages must not
 N=0; for i in $(seq 1 14); do [ "$(code -H "Host: $HOST" -H 'CF-Connecting-IP: 198.51.100.7' "$BASE/wp-login.php")" = 429 ] && N=$((N+1)); done

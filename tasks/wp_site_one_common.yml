@@ -266,3 +266,10 @@
     name: "wp-backup@{{ wp_s.name }}.timer"
     enabled: true
     state: started
+
+# Every site is considered for updates every night, hold or live; the site's `update_policy:` decides whether the job applies, only tells, or does nothing (templates/wp/wp_site_update.sh.j2).
+- name: Run the site's update job every night, whatever its state
+  ansible.builtin.systemd:
+    name: "wp-update@{{ wp_s.name }}.timer"
+    enabled: true
+    state: started
