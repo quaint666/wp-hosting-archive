@@ -112,6 +112,12 @@ class Render(unittest.TestCase):
         self.assertGreaterEqual(self.v["wp_db_uid"], 10000, "low uids belong to packages on the VM (999 is alloy)")
         self.assertNotEqual(self.v["wp_db_uid"], self.v["wp_php_uid"])
 
+    def test_the_images_config_template_is_removed_from_the_docroot(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
+        gone = [t for t in tasks if t.get("ansible.builtin.file", {}).get("path", "").endswith("/html/wp-config-docker.php")]
+        self.assertEqual(len(gone), 1)
+        self.assertEqual(gone[0]["ansible.builtin.file"]["state"], "absent")
+
     def test_images_are_pinned_and_anchored(self):
         text = (ROOT / "vars/wp.yml").read_text().splitlines()
         for i, line in enumerate(text):

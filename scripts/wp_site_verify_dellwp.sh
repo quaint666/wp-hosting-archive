@@ -60,6 +60,8 @@ echo "== $SITE: files and permissions"
 [ "$(stat -c %u "$DIR/html/index.php")" = 0 ] && ok "code is root-owned" || bad "html/index.php owner is $(stat -c %u "$DIR/html/index.php")"
 if docker exec "$PHP" sh -c 'touch /var/www/html/.verify' </dev/null >/dev/null 2>&1; then bad "php CAN write into the code directory"; docker exec "$PHP" rm -f /var/www/html/.verify </dev/null; else ok "php cannot write into the code directory"; fi
 check "php can write to uploads" docker exec "$PHP" sh -c 'touch /var/www/html/wp-content/uploads/.verify && rm /var/www/html/wp-content/uploads/.verify'
+CS=$(wp-site-cli "$SITE" core verify-checksums 2>&1 </dev/null); RC=$?
+[ "$RC" = 0 ] && ! echo "$CS" | grep -q "^Warning" && ok "WordPress core files match wordpress.org's checksums, nothing extra" || bad "core checksums: $(echo "$CS" | head -2 | tr '\n' ' ')"
 [ "$(stat -c %a "$DIR/wp-config.php")" = 640 ] && ok "wp-config.php mode 640" || bad "wp-config.php mode $(stat -c %a "$DIR/wp-config.php")"
 [ "$(stat -c %a "$DIR/.env")" = 600 ] && ok ".env mode 600" || bad ".env mode $(stat -c %a "$DIR/.env")"
 [ "$(stat -c %u "$DIR/db")" = "$DBUID" ] && ok "db/ owned by $DBUID" || bad "db/ owner $(stat -c %u "$DIR/db")"

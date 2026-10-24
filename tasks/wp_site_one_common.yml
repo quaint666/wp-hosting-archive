@@ -103,6 +103,13 @@
         chmod 0644 /var/www/html/wp-config.php
     creates: "{{ wp_site_dir }}/html/wp-includes/version.php"
 
+# The image's own config template, copied by the seed: unused (our wp-config.php is mounted over the placeholder), PHP in the docroot nobody asked for, and the one file
+# `wp core verify-checksums` warns about. A separate task so it also heals a site seeded before this existed (wptest, 2026-10-24).
+- name: Remove the image's wp-config-docker.php from the docroot
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/html/wp-config-docker.php"
+    state: absent
+
 - name: Deploy the database environment file
   ansible.builtin.template:
     src: "{{ wp_template_dir }}/site_env.j2"
