@@ -70,8 +70,8 @@ def assertions():
     raise AssertionError("no assert on the site list found in tasks/wp_sites_common.yml")
 
 
-def eval_that(that, v, sites):
-    """True if every expression in the play's assert holds for this site list."""
+def failing(that, v, sites):
+    """The expressions of the play's assert that do NOT hold for this site list (scripts/wp_sites.py uses this to say which rule a new site would break)."""
     e = jinja2.Environment(undefined=jinja2.StrictUndefined)
     e.tests["match"] = lambda value, pattern: __import__("re").match(pattern, value) is not None
     e.filters["difference"] = lambda a, b: [x for x in a if x not in b]
@@ -81,13 +81,20 @@ def eval_that(that, v, sites):
     ctx["wp_sites"] = sites
     ctx["wp_sites_merged"] = [{**v["wp_site_defaults"], **s} for s in sites]
     ctx["wp_vm"] = next(vm for vm in load("host_vars/delloptiplex3040/vars.yml")["proxmox_vms"] if vm["name"] == "dellwp")
+    bad = []
     for expr in that:
         try:
-            if not e.compile_expression(expr)(**ctx):
-                return False
+            ok = e.compile_expression(expr)(**ctx)
         except (KeyError, jinja2.UndefinedError, TypeError):
-            return False
-    return True
+            ok = False
+        if not ok:
+            bad.append(expr)
+    return bad
+
+
+def eval_that(that, v, sites):
+    """True if every expression in the play's assert holds for this site list."""
+    return not failing(that, v, sites)
 
 
 class Render(unittest.TestCase):

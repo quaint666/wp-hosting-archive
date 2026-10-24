@@ -29,7 +29,14 @@ case "$1" in network) exit 0 ;; esac
 case " $* " in *" is-installed "*) [ "${SHIM_INSTALLED:-0}" = 1 ] && exit 0 || exit 1 ;; esac
 case " $* " in *" verify-checksums "*) if [ "${SHIM_VERIFY_FAIL:-0}" = 1 ]; then echo "Error: checksums do not match"; exit 1; fi; echo "Success: Verified 1 of 1 plugins."; exit 0 ;; esac
 # like Docker: the container sees the caller's stdin only when -i is given
-case " $* " in *" -i "*) { echo "--- stdin"; cat; } >> "$SHIM_LOG/docker.stdin" 2>/dev/null ;; esac
+case " $* " in *" -i "*)
+  in=$(cat); { echo "--- stdin"; printf '%s\n' "$in"; } >> "$SHIM_LOG/docker.stdin" 2>/dev/null
+  # like WP-CLI's prompt mode (seen on dellwp 2026-10-24, twice in the output): the prompt line shows the typed value, and then it PRINTS the command it built, password included, shell-quoted
+  case " $* " in *" core install "*"--prompt=admin_password"*)
+    echo "2/3 [--admin_password=<password>]: $in"; echo "wp core install --skip-email --admin_password='${in//\'/\'\\\'\'}'"
+    # and a message that has the value in it but not the option name (a validation warning, say)
+    [ "${SHIM_ECHO_ELSEWHERE:-0}" = 1 ] && echo "Warning: the password $in is weak" ;; esac ;;
+esac
 exit 0
 '''
 CURL = r'''#!/bin/bash
@@ -62,7 +69,7 @@ class Tools(unittest.TestCase):
             f.write_text(body)
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
 
-    def run_tool(self, name, *args, stdin="", tty=None, installed=False, verify_fails=False, run_rc=None):
+    def run_tool(self, name, *args, stdin="", tty=None, installed=False, verify_fails=False, run_rc=None, env_extra=None):
         env = {"PATH": "%s:/usr/bin:/bin" % (self.tmp / "shim"), "SHIM_LOG": str(self.tmp / "log"), "HOME": str(self.tmp)}
         if installed:
             env["SHIM_INSTALLED"] = "1"
@@ -70,6 +77,7 @@ class Tools(unittest.TestCase):
             env["SHIM_VERIFY_FAIL"] = "1"
         if run_rc is not None:
             env["SHIM_RUN_RC"] = str(run_rc)
+        env.update(env_extra or {})
         if tty is not None:
             (self.tmp / "tty").write_text(tty)
             env["WP_SITE_TTY"] = str(self.tmp / "tty")
@@ -240,6 +248,29 @@ class Tools(unittest.TestCase):
         self.assertIn("--url=https://wptest.%s" % self.ctx["wp_domain"], a)
         self.assertIn("blog_public", a)
 
+    def test_install_does_not_print_the_password_even_when_wp_cli_echoes_the_command(self):
+        # WP-CLI's prompt mode prints the command it built with the password in it; the tool must not let that reach the terminal, scrollback or a pasted log
+        for pw in (GOOD, "it's a long 'quoted' pass$word"):
+            with self.subTest(pw):
+                (self.tmp / "log" / "docker.stdin").unlink(missing_ok=True)
+                r = self.run_tool("wp-site-install", "wptest", tty="T\nadminuser\nadmin@example.org\n%s\n%s\n" % (pw, pw))
+                shown = r.stdout + r.stderr
+                self.assertEqual(r.returncode, 0 if pw == GOOD else r.returncode)
+                self.assertNotIn(pw, shown)
+                for piece in (pw.split()[-1], "quoted", "pass$word", "correct-horse"):
+                    self.assertNotIn(piece, shown, "a piece of the password is on screen: " + piece)
+                self.assertIn("--admin_password=REDACTED", shown, "the echo reaches the screen with the value removed")
+                self.assertIn(pw, self.log("docker.stdin"), "the password still reaches WP-CLI on stdin")
+
+    def test_install_redacts_the_value_wherever_it_appears_not_only_after_the_option_name(self):
+        r = self.run_tool("wp-site-install", "wptest", tty=self.answers(), env_extra={"SHIM_ECHO_ELSEWHERE": "1"})
+        self.assertNotIn(GOOD, r.stdout + r.stderr); self.assertIn("Warning: the password REDACTED is weak", r.stderr)
+
+    def test_a_failing_core_install_stops_the_tool_before_the_login_check(self):
+        r = self.run_tool("wp-site-install", "wptest", tty=self.answers(), run_rc=3)
+        self.assertNotEqual(r.returncode, 0, "the pipe through the redaction must not hide the failure")
+        self.assertNotIn("blog_public", self.log("docker.argv")); self.assertEqual(self.log("curl.argv"), "", "no login check after a failed install")
+
     def test_install_refuses_a_mismatch_a_short_password_and_an_installed_site(self):
         r = self.run_tool("wp-site-install", "wptest", tty=self.answers(pw2="different-entry-xyz"))
         self.assertEqual(r.returncode, 2)
@@ -255,6 +286,39 @@ class Tools(unittest.TestCase):
         for answers in ("T\nbad user!\na@b.org\n%s\n%s\n" % (GOOD, GOOD), "T\nadminuser\nnot-an-email\n%s\n%s\n" % (GOOD, GOOD)):
             with self.subTest(answers.splitlines()[1:3]):
                 self.assertEqual(self.run_tool("wp-site-install", "wptest", tty=answers).returncode, 2)
+
+    def test_install_takes_title_user_and_email_as_options_and_still_asks_for_the_password(self):
+        r = self.run_tool("wp-site-install", "wptest", "--title=My Friend's Site", "--user=adminuser", "--email=admin@example.org", tty="%s\n%s\n" % (GOOD, GOOD))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        a = self.argv()
+        self.assertIn("--title=My Friend's Site", a, "a title with spaces stays one argument")
+        self.assertIn("--admin_user=adminuser", a); self.assertIn("--admin_email=admin@example.org", a)
+        self.assertNotIn("Site title:", r.stderr, "no prompt for what was given")
+        self.assertIn("Password", r.stderr); self.assertNotIn(GOOD, self.log("docker.argv"))
+
+    def test_install_asks_only_for_what_was_not_given(self):
+        r = self.run_tool("wp-site-install", "wptest", "--user=adminuser", tty="A title\nadmin@example.org\n%s\n%s\n" % (GOOD, GOOD))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Site title:", r.stderr); self.assertIn("Administrator email:", r.stderr); self.assertNotIn("Administrator user name:", r.stderr)
+        self.assertIn("--admin_user=adminuser", self.argv())
+
+    def test_install_options_are_checked_like_the_answers_and_there_is_no_password_option(self):
+        # every run gets valid values for whatever the case under test does not replace, and only the password is scripted: a failure can only come from the option under test, and a
+        # tool that ignored or accepted a bad option would install
+        base = {"--title": "--title=T", "--user": "--user=adminuser", "--email": "--email=admin@example.org"}
+        pw = "%s\n%s\n" % (GOOD, GOOD)
+        good = self.run_tool("wp-site-install", "wptest", *base.values(), tty=pw)
+        self.assertEqual(good.returncode, 0, "the valid options alone are a good run: " + good.stderr)
+        cases = [("--user", "--user=bad user!"), ("--email", "--email=not-an-email"), ("--title", "--title=" + "x" * 101), ("--title", "--title=line\nbreak"), ("--title", "--title=a\x07b"),
+                 ("--title", "--title=\x7f")]
+        extras = ["--password=" + GOOD, "--pw=" + GOOD, "--user", "--title", "extra", "--unknown=1"]
+        runs = [[v for k, v in base.items() if k != key] + [bad] for key, bad in cases] + [list(base.values()) + [e] for e in extras]
+        for opts in runs:
+            with self.subTest(opts[-1]):
+                (self.tmp / "log" / "docker.argv").unlink(missing_ok=True)
+                r = self.run_tool("wp-site-install", "wptest", *opts, tty=pw)
+                self.assertEqual(r.returncode, 2, (opts, r.stderr))
+                self.assertNotIn("install", [x for x in self.argv() if x == "install"], "nothing may be installed")
 
     def test_install_fails_loudly_when_the_login_does_not_work(self):
         (self.tmp / "shim" / "curl").write_text("#!/bin/bash\ncat >/dev/null\nprintf 'HTTP/1.1 200 OK\\r\\n\\r\\n'\n")

@@ -128,7 +128,8 @@ class HostTool(Base):
         t = {x["name"]: x for x in yaml.safe_load((ROOT / "tasks/wp_status_common.yml").read_text())}["Deploy the sites status tool"]
         self.assertEqual((t["ansible.builtin.template"]["owner"], t["ansible.builtin.template"]["mode"]), ("root", "0750"))
         import jinja2
-        merged = [{**self.v["wp_site_defaults"], **s} for s in self.v["wp_sites"]]
+        # a fixture, not the repo's list: the repo gains sites, and this test is about how the list is built
+        merged = [{**self.v["wp_site_defaults"], **s} for s in [{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "live"}]]
         got = jinja2.Environment().from_string(t["vars"]["wp_status_sites"]).render(wp_sites_merged=merged, wp_backup_quota_offset=self.v["wp_backup_quota_offset"]).strip()
         self.assertEqual(got, "wptest:live:1001:3072:2001:3072")
         sites = [x.get("name", "") for x in yaml.safe_load((ROOT / "tasks/wp_sites_common.yml").read_text())]
@@ -197,14 +198,16 @@ class Wrapper(unittest.TestCase):
     def test_main_prints_the_table_then_the_attention_list_and_returns_how_many(self):
         declared, stale, warn, bin_ = W.load_declaration(ROOT)
         site = list(declared)[0]
-        good = tsv(row(site=site, deployed=declared[site], actual=declared[site], cron_timer="active" if declared[site] == "live" else "inactive"))
+        # every declared site is reported (the repo may declare more than one); only the first is broken in the second half
+        ok_row = lambda x: row(site=x, deployed=declared[x], actual=declared[x], cron_timer="active" if declared[x] == "live" else "inactive")
+        good = tsv(*[ok_row(x) for x in declared])
         out = io.StringIO()
         old = sys.stdout; sys.stdout = out
         try:
             self.assertEqual(W.main(["--file", "-"], stdin=io.StringIO(good)), 0)
             self.assertIn("Nothing needs attention.", out.getvalue())
             out.truncate(0); out.seek(0)
-            bad = tsv(row(site=site, deployed=declared[site], actual="none", unit="failed", containers="0/2", cron_timer="inactive", backup_timer="inactive"))
+            bad = tsv(row(site=site, deployed=declared[site], actual="none", unit="failed", containers="0/2", cron_timer="inactive", backup_timer="inactive"), *[ok_row(x) for x in list(declared)[1:]])
             n = W.main(["--file", "-"], stdin=io.StringIO(bad))
         finally:
             sys.stdout = old
