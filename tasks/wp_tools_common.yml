@@ -37,6 +37,7 @@
   loop:
     - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
     - { src: wp_site_install.sh.j2, dest: wp-site-install }
+    - { src: wp_site_password.sh.j2, dest: wp-site-password }
     - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
     - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
     - { src: wp_site_cron.sh.j2, dest: wp-site-cron }

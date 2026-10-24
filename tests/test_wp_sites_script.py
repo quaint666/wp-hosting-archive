@@ -359,11 +359,11 @@ class Help(Base):
 
     def test_every_command_explains_itself(self):
         top = self.help_text()
-        for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: delete, rename, password reset"):
+        for needle in ("list", "create", "modify", "examples:", "wp_sites.py modify shop --set update_policy=auto", "hidden prompt", "Not here yet: delete, rename."):
             self.assertIn(needle, top)
         self.assertIn("wp-site-update", top); self.assertIn("ssh -t dellwp sudo", top)
         for cmd, needles in (("create", ("--name", "--state", "--policy", "--title", "--user", "--email", "--set", "--yes", "--yes-public", "--no-run", "example.com", "second run that must end changed=0")),
-                             ("modify", ("site", "--set", "--yes", "--yes-public", "--no-run", "Not editable here: name, port, quota_id, secret_rev")), ("list", ("state, stack",))):
+                             ("modify", ("site", "--set", "--yes", "--yes-public", "--no-run", "Not editable here: name, port, quota_id, secret_rev")), ("list", ("state, stack",)), ("password", ("--user", "hidden prompt", "never sees it", "Edits no file"))):
             text = self.help_text(cmd)
             for n in needles:
                 self.assertIn(n, text, "%s --help lacks %r" % (cmd, n))
@@ -392,12 +392,61 @@ class Help(Base):
     def test_the_tools_the_help_names_exist_and_print_a_usage_line(self):
         deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
         top = self.help_text()
-        for tool in ("wp-site-update", "wp-site-recover", "wp-site-backup", "wp-site-restore", "wp-site-install", "wp-site-ext", "wp-site-cli"):
+        for tool in ("wp-site-update", "wp-site-recover", "wp-site-backup", "wp-site-restore", "wp-site-install", "wp-site-password", "wp-site-ext", "wp-site-cli"):
             self.assertIn(tool, deployed, tool + " is not deployed"); self.assertIn(tool, top)
             src = (ROOT / "templates/wp" / ("wp_" + tool.replace("wp-", "", 1).replace("-", "_") + ".sh.j2")).read_text()
             self.assertIn("usage: " + tool, src, tool + " does not print a usage line")
         for script in ("wp_sites_status.py", "wp_site_state.py", "wp_site_verify_dellwp.sh"):
             self.assertTrue((ROOT / "scripts" / script).exists(), script)
+
+
+class Password(Base):
+    def test_it_asks_for_the_user_confirms_and_runs_the_tool_over_ssh_with_everything_quoted(self):
+        self.answers = ["adminuser", "y"]
+        rc = self.sites().password("wptest")
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.calls, [["ssh", "-t", "dellwp", "sudo wp-site-password wptest adminuser"]])
+        self.assertIn("never sees it", self.text()); self.assertIn("hidden prompt", self.text())
+        self.assertEqual(self.vars.read_text(), self.original, "no file is edited")
+
+    def test_it_needs_no_clean_file_and_asks_nothing_about_the_password(self):
+        self.vars.write_text(self.original + "# uncommitted\n")   # create and modify refuse this; password edits nothing
+        self.assertEqual(self.sites().password("wptest", user="adminuser", yes=True), 0)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([s for s in self.said if "assword" in s and s.startswith("PROMPT")], [], "this script never prompts for a password")
+
+    def test_declining_runs_nothing(self):
+        self.answers = ["n"]
+        self.assertEqual(self.sites().password("wptest", user="adminuser"), 1); self.assertEqual(self.calls, [])
+
+    def test_bad_input_is_refused_before_anything_runs(self):
+        for kw in (dict(site="nosuch", user="adminuser"), dict(site="wptest", user="bad user!"), dict(site="wptest", user="a;id"), dict(site="wptest", user="$(id)"),
+                   dict(site="wptest", user="x" * 61), dict(site="../x", user="adminuser")):
+            with self.subTest(kw):
+                with self.assertRaises(w.Refuse):
+                    self.sites().password(yes=True, **kw)
+                self.assertEqual(self.calls, [])
+        with self.assertRaises(w.Refuse):
+            self.sites().password("wptest")   # no user and no terminal
+
+    def test_the_user_is_one_quoted_argument_whatever_it_holds(self):
+        self.sites().password("wptest", user="admin@example.org", yes=True)
+        self.assertEqual(self.calls[0][3], "sudo wp-site-password wptest admin@example.org")
+
+    def test_a_failing_tool_is_reported_with_its_exit_code(self):
+        self.rc = {"ssh": 2}
+        rc = self.sites().password("wptest", user="adminuser", yes=True)
+        self.assertEqual(rc, 2); self.assertIn("exit 2", self.text())
+
+    def test_main_and_the_menu_reach_it_and_no_password_option_exists(self):
+        out = []
+        self.assertEqual(w.main(["password", "wptest", "--user", "adminuser", "--yes"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append), 0)
+        self.assertEqual(self.calls[-1][3], "sudo wp-site-password wptest adminuser")
+        with self.assertRaises(SystemExit):
+            w.main(["password", "wptest", "--password", "x"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
+        self.calls.clear(); self.answers = ["5", "wptest", "adminuser", "y", "4"]
+        self.assertEqual(self.sites().menu(), 0)
+        self.assertEqual(self.calls, [["ssh", "-t", "dellwp", "sudo wp-site-password wptest adminuser"]])
 
 
 class Surface(Base):

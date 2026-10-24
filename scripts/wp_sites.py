@@ -5,6 +5,7 @@
     python3 scripts/wp_sites.py list
     python3 scripts/wp_sites.py create [--name N] [--state hold|live] [--policy auto|notify|freeze] [--title T] [--user U] [--email E] [--set key=value ...] [--yes] [--no-run]
     python3 scripts/wp_sites.py modify <site> [--set key=value ...] [--yes] [--yes-public] [--no-run]
+    python3 scripts/wp_sites.py password <site> [--user U] [--yes]
 
 A site is declared in git (`wp_sites` in host_vars/dellwp/vars.yml) and built by the play, so every change here is an edit of that file followed by the play and the verifier. The script
 edits only the lines it means to, re-reads the YAML to prove nothing else changed, checks the new list against the rules of the play itself (the assert in tasks/wp_sites_common.yml),
@@ -16,8 +17,8 @@ value the file has ever held in git, because a quota id must never be reused for
 asks for it at a hidden prompt on the VM (this script runs it with ssh -t), so it never passes through this script, a command line, a file or the shell history.
 
 `create` ends with a site on `hold` unless you say otherwise: nginx answers only a request from the VM itself. Going live (public on the internet) asks one more question, whatever else
-was answered: --yes does not answer it, --yes-public does. This is what the script cannot do: delete a site (the play only adds; the stopped and closed states are not built), reset a
-password, rotate a site's secrets, or prove the public path. Run it from the repo root on the ThinkPad; it needs ssh access to dellwp and the vault password like any play.
+was answered: --yes does not answer it, --yes-public does. This is what the script cannot do: delete a site (the play only adds; the stopped and closed states are not built), rotate a site's
+secrets, or prove the public path. `password` changes an existing user's password through wp-site-password on the VM; it edits no file. Run it from the repo root on the ThinkPad; it needs ssh access to dellwp and the vault password like any play.
 """
 import argparse
 import copy
@@ -35,7 +36,8 @@ VARS = "host_vars/dellwp/vars.yml"
 HOST = "dellwp"
 PLAY = "dellwp/wp_sites_dellwp.yml"
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")   # a valid hostname label (the play's own rule also lets a trailing hyphen through)
-USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")
+USER_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                       # a new administrator (wp-site-install)
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                 # an existing user (wp-site-password, wp-site-login-check)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 STATES = ("hold", "live")
 POLICIES = ("auto", "notify", "freeze")
@@ -380,10 +382,31 @@ class Sites:
             return rc
         return self.finish(site, "modify site %s: %s" % (site, ", ".join("%s=%s" % (k, render(v)) for k, v in changes.items())))
 
+    # --- password
+    def password(self, site, user=None, yes=False):
+        """Change a user's password on a site: ssh -t into wp-site-password, which asks at a hidden prompt. This script never sees the password and edits no file."""
+        d = self.data(self.path.read_text())
+        if site not in [x["name"] for x in d["wp_sites"]]:
+            raise Refuse("no site '%s' in wp_sites" % site)
+        host = "%s.%s" % (site, d["wp_domain"])
+        user_check = lambda v: None if USER_NAME_RE.fullmatch(v) else "1 to 60 characters of letters, digits and . _ @ -"
+        user = user or self.ask("User name on %s" % host, check=user_check)
+        why = user_check(user)
+        if why:
+            raise Refuse("the user '%s': %s" % (user, why))
+        if not yes and not self.confirm("Change the password of '%s' on %s? (their other sessions are ended)" % (user, host)):
+            self.out("Nothing was changed.")
+            return 1
+        self.out("Type the new password twice at the hidden prompt on the VM (14 or more characters); this script never sees it.")
+        rc, _ = self.run(["ssh", "-t", HOST, "sudo wp-site-password " + " ".join(shlex.quote(x) for x in (site, user))])
+        if rc != 0:
+            self.out("wp-site-password reported a problem (exit %d); look at its output above. If the new password does not work, run this again." % rc)
+        return rc
+
     # --- menu
     def menu(self):
         while True:
-            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit   (python3 scripts/wp_sites.py --help lists every option)" % HOST)
+            self.out("\nWordPress sites on %s\n  1) list   2) create a site   3) change a site   4) quit   5) change a user's password   (python3 scripts/wp_sites.py --help lists every option)" % HOST)
             try:
                 choice = self._ask("> ").strip()
             except EOFError:
@@ -397,6 +420,10 @@ class Sites:
                     d = self.data(self.path.read_text())
                     names = [s["name"] for s in d["wp_sites"]]
                     self.modify(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
+                elif choice == "5":
+                    d = self.data(self.path.read_text())
+                    names = [x["name"] for x in d["wp_sites"]]
+                    self.password(self.ask("Site (%s)" % ", ".join(names), check=lambda v: None if v in names else "one of the sites above"))
                 elif choice in ("4", "q", ""):
                     return 0
             except Refuse as e:
@@ -421,6 +448,7 @@ On the VM (run as: ssh -t dellwp sudo <tool>; every tool prints its usage when r
   wp-site-backup <site> [--force]              back a site up now
   wp-site-restore <site> [stamp|latest]        prove a backup restores (a drill into scratch; never touches the site)
   wp-site-install <site> [--title --user --email]   install WordPress into a site that has none (asks the password, hidden)
+  wp-site-password <site> <user>               change a user's password (hidden prompt, other sessions ended)
   wp-site-ext <site> plugin|theme install|update|delete <slug>   plugins and themes, wordpress.org slugs only
   wp-site-cli <site> <wp arguments>            WP-CLI against a site as the web app
 Other scripts here: wp_sites_status.py (the table), wp_site_state.py <site> hold|live, wp_site_verify_dellwp.sh <site>, and the rehearsals wp_*_rehearsal_dellwp.sh."""
@@ -434,13 +462,14 @@ examples:
   python3 scripts/wp_sites.py modify shop --set update_policy=auto
   python3 scripts/wp_sites.py modify shop --set state=live --set upload_mb=128
   python3 scripts/wp_sites.py modify shop --no-run     edit the file and show the diff, run nothing
+  python3 scripts/wp_sites.py password shop --user owner   change a user's password (hidden prompt on the VM)
 
 notes:
   The administrator password is never an option and is not asked by this script: wp-site-install asks for it on the VM at a hidden prompt.
   Going live (public on the internet) always asks its own question; --yes does not answer it, --yes-public does.
   A new site gets no check run (check mode cannot handle a site that does not exist yet); a change to an existing site does.
   The file must be committed first, and the script leaves the commit to you: it prints the command.
-  Not here yet: delete, rename, password reset.
+  Not here yet: delete, rename.
 
 """ + TOOLS_HELP
 
@@ -468,6 +497,13 @@ def build_parser():
                                    "The new site list is checked against the play's own rules before anything is written; a change to an existing site gets a check run first.\n\n"
                                    "fields (--set KEY=VALUE):\n" + field_help() + "\n\nNot editable here: name, port, quota_id, secret_rev.")
     m.add_argument("site", help="the site's name, as in wp_sites")
+    pw = sub.add_parser("password", formatter_class=fmt, help="change a user's password on a site (asked at a hidden prompt on the VM)",
+                        description="Change an existing user's password on a site, through wp-site-password on the VM (ssh -t). The new password is typed twice at a hidden prompt there (14 or more "
+                                    "characters); this script never sees it, it is never an option, and WP-CLI's echo of it is redacted. The user's other sessions are ended and the new password is "
+                                    "proved to log in. Edits no file.")
+    pw.add_argument("site", help="the site's name, as in wp_sites")
+    pw.add_argument("--user", help="the user name on that site (asked if not given)")
+    pw.add_argument("--yes", action="store_true", help="do not ask for confirmation first")
     for p in (c, m):
         p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="set a field; can be repeated (the fields are listed above)")
         p.add_argument("--yes", action="store_true", help="do not ask before writing and running (it does not answer the question about going public)")
@@ -487,6 +523,8 @@ def main(argv=None, repo=REPO, ask=input, run=None, out=print):
             return s.create(a.name, a.state, a.policy, a.title, a.user, a.email, a.set, a.yes, a.yes_public, a.no_run)
         if a.cmd == "modify":
             return s.modify(a.site, a.set, a.yes, a.yes_public, a.no_run)
+        if a.cmd == "password":
+            return s.password(a.site, a.user, a.yes)
         return s.menu()
     except Refuse as e:
         out("wp_sites: %s" % e)

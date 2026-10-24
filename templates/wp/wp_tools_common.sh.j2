@@ -24,4 +24,19 @@ require_site() {
 open_tty() { exec 3<"${WP_SITE_TTY:-/dev/tty}" || die "no terminal to read from (use ssh -t)"; }
 ask() { printf '%s' "$1" >&2; IFS= read -r -u 3 "$2" || die "no answer"; }
 ask_secret() { printf '%s' "$1" >&2; IFS= read -rs -u 3 "$2" || die "no answer"; echo >&2; }
+
+# WP-CLI's prompt mode keeps a password out of the process list, but then PRINTS it: the typed value on the prompt line, and the command it built with the value in it (seen on dellwp
+# 2026-10-24, in a scrollback that was pasted into a chat). A tool that sends a password to WP-CLI pipes everything WP-CLI prints through redact, with the password in $pw: the exact
+# value is replaced wherever it appears, and whatever follows --admin_password= or --user_pass= is dropped, which also covers the shell-quoted form (a quote in a password is printed
+# as '\'' and would not match the exact value).
+redact() {
+  local l k
+  while IFS= read -r l; do
+    l=${l//"$pw"/REDACTED}
+    for k in --admin_password= --user_pass=; do
+      case $l in *"$k"*) l="${l%%"$k"*}${k}REDACTED" ;; esac
+    done
+    printf '%s\n' "$l"
+  done
+}
 {% endraw %}

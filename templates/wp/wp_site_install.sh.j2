@@ -34,17 +34,7 @@ ask_secret "Password again: " pw2
 unset pw2
 echo "password: ${#pw} characters, the two entries match" >&2
 
-# WP-CLI's prompt mode keeps the password out of the process list, but then PRINTS the command it built, password included (seen on dellwp 2026-10-24, in a scrollback that was pasted
-# into a chat). Everything it prints goes through redact: the exact password is replaced wherever it appears, and whatever follows --admin_password= is dropped, which also covers
-# the shell-quoted form (a quote in a password is printed as '\'' and would not match the exact value).
-redact() {
-  local l
-  while IFS= read -r l; do
-    l=${l//"$pw"/REDACTED}
-    case $l in *--admin_password=*) l="${l%%--admin_password=*}--admin_password=REDACTED" ;; esac
-    printf '%s\n' "$l"
-  done
-}
+# What WP-CLI prints goes through redact (tools library): it would otherwise print the password (seen on dellwp 2026-10-24).
 set -o pipefail
 printf '%s\n' "$pw" | "$WP_BIN/wp-site-cli" "$site" --stdin core install "--url=https://$host" "--title=$title" "--admin_user=$user" "--admin_email=$email" --prompt=admin_password --skip-email 2>&1 | redact >&2
 set +o pipefail
