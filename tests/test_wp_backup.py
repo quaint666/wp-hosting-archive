@@ -245,20 +245,37 @@ class Backup(Base):
         self.assertEqual(self.backup("20261024T201500Z").returncode, 0)
         self.assertEqual(set(self.snapshots()), set(old + ["20261024T201500Z"]))
 
-    def test_a_freeze_still_backs_up_but_prunes_nothing(self):
+    def test_a_frozen_site_is_skipped_as_a_success_and_nothing_is_touched(self):
+        old = self.fabricate(45)
+        for flag in (self.tmp / "freeze", self.site / "freeze"):
+            flag.write_text("")
+            r = self.backup("20261024T201500Z")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("is frozen", r.stdout)
+            self.assertEqual(set(self.snapshots()), set(old), "no new snapshot, nothing pruned")
+            self.assertEqual(self.log("docker.calls"), "", "the database must not even be touched")
+            flag.unlink()
+        self.assertEqual(self.backup("20261024T201500Z").returncode, 0)
+        self.assertIn("20261024T201500Z", self.snapshots(), "unfrozen, the backup runs")
+
+    def test_force_backs_up_a_frozen_site_but_still_prunes_nothing(self):
         old = self.fabricate(45)
         (self.tmp / "freeze").write_text("")
-        r = self.backup("20261024T201500Z")
-        self.assertEqual(r.returncode, 0)
+        r = self.run_script(self.script, "wptest", "--force", FAKE_STAMP="20261024T201500Z")
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("nothing is pruned", r.stdout)
         self.assertEqual(set(self.snapshots()), set(old + ["20261024T201500Z"]))
         (self.tmp / "freeze").unlink()
         (self.site / "freeze").write_text("")
-        self.assertEqual(self.backup("20261024T201600Z").returncode, 0)
-        self.assertEqual(len(self.snapshots()), 47, "the site's own freeze flag pauses pruning too")
-        (self.site / "freeze").unlink()
-        self.assertEqual(self.backup("20261024T201700Z").returncode, 0)
-        self.assertLess(len(self.snapshots()), 47, "unfrozen, the old ones go")
+        r = self.run_script(self.script, "wptest", "--force", FAKE_STAMP="20261024T201600Z")
+        self.assertEqual(len(self.snapshots()), 47, "the site's own flag pauses pruning too")
+
+    def test_force_on_an_unfrozen_site_prunes_as_usual_and_other_arguments_are_refused(self):
+        self.fabricate(45)
+        self.assertEqual(self.run_script(self.script, "wptest", "--force", FAKE_STAMP="20261024T201500Z").returncode, 0)
+        self.assertEqual(len(self.snapshots()), 10)
+        for bad in ("--forcefully", "now", "-f"):
+            self.assertEqual(self.run_script(self.script, "wptest", bad, FAKE_STAMP="20261024T201700Z").returncode, 2, bad)
 
     def test_bad_names_never_reach_docker(self):
         for bad in ("nosuch", "../x", "a;id", "", "wptest extra"):
@@ -329,6 +346,18 @@ class BackupCheck(Base):
         self.run_script(self.script)
         self.assertEqual(len(self.said()), 1)
         self.assertIn("last good: never", self.said()[0])
+
+    def test_a_frozen_site_is_not_called_stale_and_is_judged_again_when_unfrozen(self):
+        self.mark(40)
+        (self.tmp / "freeze").write_text("")
+        self.run_script(self.script); self.run_script(self.script)
+        self.assertEqual(self.said(), [], "a paused backup is not a missing one")
+        (self.tmp / "freeze").unlink(); (self.site / "freeze").write_text("")
+        self.run_script(self.script)
+        self.assertEqual(self.said(), [], "the site's own flag exempts it too")
+        (self.site / "freeze").unlink()
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "once unfrozen it is judged on its age")
 
     def test_the_environment_can_make_every_site_stale_at_once_for_the_rehearsal(self):
         self.mark(1)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Managed by Ansible (templates/wp/wp_site_backup.sh.j2). The nightly backup of one site:   wp-site-backup <site>
+# Managed by Ansible (templates/wp/wp_site_backup.sh.j2). The nightly backup of one site:   wp-site-backup <site> [--force]
 # Run by wp-backup@<site>.timer every night for every site, on hold or live. One snapshot is a directory named by its UTC time, holding
 #   db.sql.gz  a consistent dump (mariadb-dump --single-transaction, as the site's own database user, compressed, checked before it counts)
 #   files/     wp-content (plugins, themes, uploads, mu-plugins, languages) as a hard-link snapshot of the previous one: unchanged files cost nothing, so a night is only what changed
@@ -7,9 +7,10 @@
 # It is built in a hidden .partial-* directory and renamed into place only when everything checked out, so a half-made snapshot never looks like a backup. Core is not
 # saved: it comes from the image (the restore seeds it), and wp-config.php and .env are rendered from the repo and the vault. Snapshots live in their own quota project, so
 # the first one is a real copy (a hard link across projects is refused) and the later ones link inside it.
-# Retention: the newest {{ wp_backup_keep_daily }} snapshots, plus the newest of each of the {{ wp_backup_keep_weekly }} calendar weeks (ISO) before the oldest of those. While a freeze flag exists
-# (/srv/wp/freeze or the site's own) the backup still runs but NOTHING IS PRUNED: a frozen site is probably an incident, and old good snapshots must not be deleted while a
-# possibly compromised one is added. A failure exits non-zero, which fails the unit, whose OnFailure= tells ntfy. ".last-success" holds the stamp of the last good run;
+# Retention: the newest {{ wp_backup_keep_daily }} snapshots, plus the newest of each of the {{ wp_backup_keep_weekly }} calendar weeks (ISO) before the oldest of those. FREEZE: like every per-site
+# job, a backup is skipped (as a success) while a freeze flag exists ({{ wp_freeze_file }} or the site's own freeze file): a frozen site and its backup set stay exactly as they are.
+# The Proxmox job still backs the whole VM up every night. --force backs up anyway (by hand, e.g. before a manual patch during a freeze); even then NOTHING IS PRUNED while frozen.
+# A failure exits non-zero, which fails the unit, whose OnFailure= tells ntfy. ".last-success" holds the stamp of the last good run;
 # wp-backup-check alerts when it is older than {{ wp_backup_stale_hours }} hours.
 set -eu -o pipefail
 . {{ wp_tools_lib }}/common.sh
@@ -17,8 +18,14 @@ readonly BACKUPS='{{ wp_backup_dir }}'
 readonly KEEP_DAILY='{{ wp_backup_keep_daily }}'
 readonly KEEP_WEEKLY='{{ wp_backup_keep_weekly }}'
 {% raw %}
-[ "$#" -eq 1 ] || { echo "usage: wp-site-backup <site>" >&2; exit 2; }
-require_site "$1"
+usage() { echo "usage: wp-site-backup <site> [--force]" >&2; exit 2; }
+[ "$#" -ge 1 ] || usage
+require_site "$1"; shift
+force=no
+for a in "$@"; do case $a in --force) force=yes ;; *) usage ;; esac; done
+frozen=""
+for flag in "$WP_FREEZE" "$dir/freeze"; do [ -e "$flag" ] && frozen=$flag; done
+if [ -n "$frozen" ] && [ "$force" = no ]; then echo "wp-site-backup: $site is frozen ($frozen exists); skipped (--force backs up anyway)"; exit 0; fi
 dest=$BACKUPS/$site
 [ -d "$dest" ] || die "$dest does not exist (run dellwp/wp_sites_dellwp.yml)"
 [ -f "$dir/wp-config.php" ] && [ -d "$dir/html/wp-content" ] || die "the site is not set up under $dir"
@@ -63,9 +70,7 @@ echo "$stamp" > "$dest/.last-success"
 echo "OK: snapshot $stamp of $site ($(grep '^kbytes=' "$dest/$stamp/MANIFEST" | cut -d= -f2) KiB on disk, core $core)"
 
 # 5. retention, unless the site or the host is frozen
-for flag in "$WP_FREEZE" "$dir/freeze"; do
-  if [ -e "$flag" ]; then echo "frozen ($flag exists): the backup ran, nothing is pruned"; exit 0; fi
-done
+if [ -n "$frozen" ]; then echo "frozen ($frozen exists): backed up because of --force; nothing is pruned"; exit 0; fi
 week() { local d=${1:0:8}; date -u -d "${d:0:4}-${d:4:2}-${d:6:2}" +%G-%V; }
 mapfile -t all < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort -r)
 keep=" "; n=0; seen=" "
