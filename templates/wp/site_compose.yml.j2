@@ -6,6 +6,7 @@ services:
     container_name: wp_{{ wp_s.name | replace('-', '_') }}_db
     image: {{ wp_image_db }}
     restart: always
+    stop_grace_period: {{ wp_db_stop_grace_s }}s
     user: "{{ wp_db_uid }}:{{ wp_db_uid }}"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

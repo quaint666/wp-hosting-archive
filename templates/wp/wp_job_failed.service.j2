@@ -1,7 +1,8 @@
-# Managed by Ansible (templates/wp/wp_job_failed.service.j2). Started by the OnFailure= of the WordPress jobs; %I is the unit that failed. ntfy-notify always exits 0.
+# Managed by Ansible (templates/wp/wp_job_failed.service.j2). Started by the OnFailure= of the WordPress jobs, which pass their own name without the suffix (%N), so %i is the
+# unit that failed, e.g. wp-cron@wptest. Not %I: that unescapes the instance and turns the - of wp-cron into / (seen in the journal on dellwp, 2026-10-24). ntfy-notify always exits 0.
 [Unit]
-Description=Tell ntfy that %I failed
+Description=Tell ntfy that %i failed
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ntfy-notify {{ wp_ntfy_topic }} "{{ inventory_hostname }}: %I failed. Look with: journalctl -u %I -n 30"
+ExecStart=/usr/local/bin/ntfy-notify {{ wp_ntfy_topic }} "{{ inventory_hostname }}: %i failed. Look with: journalctl -u %i -n 30"

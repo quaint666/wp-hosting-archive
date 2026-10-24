@@ -60,3 +60,18 @@ wp_ntfy_topic: homeserver
 wp_cron_calendar: "*:0/5"
 wp_cron_jitter_s: 20
 wp_cron_timeout_s: 300
+
+# The site stacks' systemd units (templates/compose_stack.service.j2): how long `systemctl start/restart` may take to get every service healthy, and `stop` to take it down.
+# The stop timeout must exceed the database's stop grace period (compose sends SIGTERM and waits that long before SIGKILL; a killed InnoDB recovers at the next start).
+wp_stack_start_timeout_s: 240
+wp_stack_stop_timeout_s: 120
+wp_db_stop_grace_s: 60
+
+# Disk alerts (tasks/wp_disk_check_common.yml, templates/wp/wp_disk_check.sh.j2): a site's project quota warns at 80% and is critical at 95%, the data disk warns at 75% and
+# is critical at 90%. The check runs every ten minutes; state (the last level told) is kept in wp_disk_state_dir.
+wp_disk_warn_pct: 80
+wp_disk_crit_pct: 95
+wp_data_warn_pct: 75
+wp_data_crit_pct: 90
+wp_disk_state_dir: /var/lib/wp-disk-check
+wp_disk_calendar: "*:0/10"

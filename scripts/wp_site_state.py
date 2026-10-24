@@ -5,12 +5,13 @@
 
 hold = nginx answers only a local request; live = public through the tunnel. The state is declared in git, so this edits the file (and only that site's `state:` line, keeping
 every comment), re-reads the YAML to prove nothing else changed, and leaves the commit to you: it prints the command. It refuses if the file has uncommitted changes, so the diff
-you are asked to approve is the flip and nothing else. Without a flag it asks once before running `ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml` and then
+you are asked to approve is the flip and nothing else; the one exception is a file whose only uncommitted differences are other `state:` values (earlier flips that are waiting for their commit), so a site can go live and back on hold without a commit between. Without a flag it asks once before running `ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml` and then
 scripts/wp_site_verify_dellwp.sh; --yes skips the question, --no-run only edits. For an urgent take-down that cannot wait for a play, touch
 /srv/wp/sites/<site>/maintenance.flag on the VM instead (nginx answers 503 at once); remove it to restore.
 """
 import argparse
 import copy
+import difflib
 import re
 import subprocess
 import sys
@@ -58,6 +59,14 @@ def set_state(text, site, state):
     return new
 
 
+def only_states_differ(old_text, new_text):
+    """True if the two files are the same text once every site's `state:` line is left out: the only change is flips that have not been committed yet.
+    Text, not parsed data: a changed comment is a change too. The defaults block's `state:` sits at two spaces and is not a site's."""
+    def bare(text):
+        return "\n".join(l for l in text.split("\n") if not re.match(r"^    state:\s*\S", l))
+    return bare(old_text) == bare(new_text)
+
+
 def current_state(text, site):
     data = yaml.safe_load(text)
     s = next((x for x in data["wp_sites"] if x["name"] == site), None)
@@ -76,20 +85,26 @@ def main(argv=None, repo=REPO):
     a = ap.parse_args(argv)
     path = Path(repo) / VARS
     git = lambda *x: subprocess.run(["git", "-C", str(repo), *x], capture_output=True, text=True)
-    if git("diff", "--quiet", "HEAD", "--", VARS).returncode != 0:
-        print("%s has uncommitted changes; commit or revert them first, so the diff below is only the flip." % VARS, file=sys.stderr)
-        return 2
     text = path.read_text()
+    if git("diff", "--quiet", "HEAD", "--", VARS).returncode != 0:
+        head = git("show", "HEAD:" + VARS)
+        if head.returncode != 0 or not only_states_differ(head.stdout, text):
+            print("%s has uncommitted changes other than site states; commit or revert them first, so the diff below is only the flip. They are:" % VARS, file=sys.stderr)
+            print(git("diff", "HEAD", "--", VARS).stdout, file=sys.stderr)
+            print("(`git checkout -- %s` throws them away.)" % VARS, file=sys.stderr)
+            return 2
+        print("note: the file already has uncommitted state changes (earlier flips); only the edit below is new.")
     try:
         now = current_state(text, a.site)
         if now == a.state:
             print("%s is already %s; nothing to do." % (a.site, a.state))
             return 0
-        path.write_text(set_state(text, a.site, a.state))
+        new = set_state(text, a.site, a.state)
+        path.write_text(new)
     except ValueError as e:
         print("wp_site_state: %s" % e, file=sys.stderr)
         return 2
-    print(git("diff", "--", VARS).stdout)
+    print("".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), "a/" + VARS, "b/" + VARS)))
     if a.no_run:
         print("Edited only (--no-run). Run dellwp/wp_sites_dellwp.yml, then scripts/wp_site_verify_dellwp.sh %s." % a.site)
     else:
@@ -103,7 +118,10 @@ def main(argv=None, repo=REPO):
             if rc != 0:
                 print("`%s` failed (exit %d). The file stays edited; the live state may not match it." % (" ".join(cmd[:3]), rc), file=sys.stderr)
                 return rc
-    print("\nWhen you are satisfied, commit it:\n  git add %s && git commit -m \"ops(wp): %s %s\"" % (VARS, a.site, a.state))
+    if git("diff", "--quiet", "HEAD", "--", VARS).returncode == 0:
+        print("\nThe file is back to what is committed; there is nothing to commit.")
+    else:
+        print("\nWhen you are satisfied, commit it:\n  git add %s && git commit -m \"ops(wp): %s %s\"" % (VARS, a.site, a.state))
     return 0
 
 

@@ -51,6 +51,7 @@ def base_vars():
 def site_vars(v, site):
     s = {**v["wp_site_defaults"], **site}
     out = dict(v)
+    out.update(wp_disk_sites=" ".join("%s:%s:%s" % (x["name"], x["quota_id"], x["quota_mb"]) for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
     out.update(inventory_hostname="dellwp", wp_s=s, wp_host="%s.%s" % (s["name"], v["wp_domain"]), wp_site_dir="%s/sites/%s" % (v["wp_data_mount"], s["name"]))
     out["wp_secret_base"] = "%s|%s|%s" % (v["wp_master_secret"], s["name"], s["secret_rev"])
     out["wp_db_password"] = hashlib.sha256((out["wp_secret_base"] + "|db").encode()).hexdigest()
@@ -151,7 +152,7 @@ class Render(unittest.TestCase):
         self.assertNotEqual(a.split("DB_PASSWORD")[1][:80], env().get_template("wp/site_wp-config.php.j2").render(**third).split("DB_PASSWORD")[1][:80])
 
     def test_no_secret_in_the_files_that_are_world_readable(self):
-        for name in ("site_compose.yml.j2", "site_php.ini.j2", "site_fpm_pool.conf.j2", "site_nginx.conf.j2", "site_unit.service.j2"):
+        for name in ("site_compose.yml.j2", "site_php.ini.j2", "site_fpm_pool.conf.j2", "site_nginx.conf.j2"):
             self.assertNotIn(self.ctx["wp_db_password"], self.render(name), name)
 
     def disabled(self):
@@ -203,10 +204,12 @@ class Wiring(unittest.TestCase):
         text = (ROOT / "tasks/wp_site_one_common.yml").read_text()
         names = set(__import__("re").findall(r"wp_template_dir \}\}/(site_[\w.-]+)", text))
         names |= set(__import__("re").findall(r"src: (site_[\w.-]+)", text))
-        self.assertGreaterEqual(len(names), 7)
+        self.assertGreaterEqual(len(names), 6)
         for name in names:
             self.assertTrue((ROOT / "templates/wp" / name).is_file(), name)
         self.assertNotIn("src: wp/", text)
+        for shared in __import__("re").findall(r"shared_template_dir \}\}/([\w.-]+)", text):
+            self.assertTrue((ROOT / "templates" / shared).is_file(), shared)
         self.assertIn("wp_template_dir", (ROOT / "dellwp/wp_sites_dellwp.yml").read_text())
 
 

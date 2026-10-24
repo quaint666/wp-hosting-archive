@@ -155,13 +155,20 @@
     - "{{ wp_image_php }}"
     - "{{ wp_image_db }}"
 
+# The shared unit for a Compose stack (templates/compose_stack.service.j2): systemd, not Ansible, owns the stack from here on.
 - name: Deploy the site's systemd unit
   ansible.builtin.template:
-    src: "{{ wp_template_dir }}/site_unit.service.j2"
+    src: "{{ shared_template_dir }}/compose_stack.service.j2"
     dest: /etc/systemd/system/wp-{{ wp_s.name }}.service
     owner: root
     group: root
     mode: "0644"
+  vars:
+    compose_stack_description: "WordPress site {{ wp_s.name }}"
+    compose_stack_dir: "{{ wp_site_dir }}"
+    compose_stack_start_timeout_s: "{{ wp_stack_start_timeout_s }}"
+    compose_stack_stop_timeout_s: "{{ wp_stack_stop_timeout_s }}"
+    compose_stack_reload_service: php
 
 - name: Enable the site's unit
   ansible.builtin.systemd:
@@ -169,24 +176,30 @@
     daemon_reload: true
     enabled: true
 
-# A changed .env, wp-config.php, php.ini or pool is mounted into the container, which only reads it at start: recreate on any change. compose.yml is on the
-# project directory because the unit and `docker compose` read it there by name.
-- name: Bring the site up (recreate when a mounted file changed)
-  community.docker.docker_compose_v2:
-    project_src: "{{ wp_site_dir }}"
-    files: [compose.yml]
-    state: present
-    recreate: "{{ 'always' if (wp_site_env.changed or wp_site_wpconfig.changed or wp_site_files.changed) else 'auto' }}"
-    wait: true
-    wait_timeout: 180
+# What changed decides what the unit does. A change to compose.yml (images, limits, ports) or to .env (the database's settings) restarts the whole stack: the database
+# container is recreated too. A change only to wp-config.php, php.ini or the pool touches the php container alone: `systemctl reload` recreates just that one (a mounted file
+# is read when its container starts). Nothing changed: start, which is a no-op on a running stack. Check mode shows none of this.
+- name: Work out whether the stack needs a restart or only a php reload
+  ansible.builtin.set_fact:
+    wp_site_restart: >-
+      {{ wp_site_env.changed
+         or (wp_site_files.results | selectattr('item.dest', 'eq', 'compose.yml') | selectattr('changed') | list | length) > 0 }}
+    wp_site_php_changed: >-
+      {{ wp_site_wpconfig.changed
+         or (wp_site_files.results | rejectattr('item.dest', 'eq', 'compose.yml') | selectattr('changed') | list | length) > 0 }}
 
-# The containers above came up through the compose module, not through the unit, so the unit would stay inactive while they run: `systemctl stop` would stop nothing and
-# `systemctl restart` would restart nothing (seen on dellwp 2026-10-24, when a cron failure rehearsal found the containers still up). Starting it now runs
-# `docker compose up -d`, a no-op on a running stack, and leaves the unit active (RemainAfterExit) so stop, restart and `is-active` mean what they say.
-- name: Mark the site's unit active now that its containers are up
+- name: Start the site, or restart it when its compose file or database settings changed
   ansible.builtin.systemd:
     name: wp-{{ wp_s.name }}
-    state: started
+    state: "{{ 'restarted' if wp_site_restart | bool else 'started' }}"
+
+- name: Recreate only the php container when only its mounted files changed
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    state: reloaded
+  when:
+    - wp_site_php_changed | bool
+    - not (wp_site_restart | bool)
 
 - name: Deploy and validate the site's nginx vhost
   block:

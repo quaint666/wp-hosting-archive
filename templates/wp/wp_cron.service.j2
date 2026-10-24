@@ -2,7 +2,7 @@
 [Unit]
 Description=WordPress cron events for %i
 After=docker.service wp-%i.service
-OnFailure=wp-job-failed@%n.service
+OnFailure=wp-job-failed@%N.service
 
 [Service]
 Type=oneshot

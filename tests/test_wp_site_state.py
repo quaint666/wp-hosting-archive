@@ -121,6 +121,7 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(c[1], "verify scripts/wp_site_verify_dellwp.sh beta")
         self.assertIn("git add host_vars/dellwp/vars.yml && git commit", r.stdout)
         self.assertIn("+    state: live", r.stdout)
+        self.assertNotIn("\n+++ \n", r.stdout)
         self.assertEqual(S.current_state((self.repo / S.VARS).read_text(), "beta"), "live")
 
     def test_no_run_edits_only(self):
@@ -141,11 +142,40 @@ class Orchestration(unittest.TestCase):
         self.assertNotIn("verify", self.called())
         self.assertIn("live state may not match", r.stderr)
 
+    def test_a_site_can_go_live_and_back_without_a_commit_between(self):
+        self.assertEqual(self.run_in_repo("alpha", "hold", "--yes").returncode, 0)
+        r = self.run_in_repo("alpha", "live", "--yes")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("earlier flips", r.stdout)
+        self.assertIn("+    state: live", r.stdout, "the diff shown is this edit")
+        self.assertIn("nothing to commit", r.stdout, "flipping back leaves the file as committed")
+        self.assertEqual(len(self.called().splitlines()), 4, "the play and the verifier ran for both flips")
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "diff", "--quiet", "HEAD"]).returncode, 0)
+
+    def test_other_uncommitted_changes_still_block_a_flip_even_next_to_a_state_flip(self):
+        self.assertEqual(self.run_in_repo("beta", "live", "--no-run").returncode, 0)
+        p = self.repo / S.VARS
+        p.write_text(p.read_text().replace("upload_mb: 64", "upload_mb: 128"))
+        r = self.run_in_repo("alpha", "hold", "--yes")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("other than site states", r.stderr)
+        self.assertEqual(self.called(), "")
+
+    def test_changing_the_default_state_is_not_a_flip_and_is_refused(self):
+        # wp_site_defaults.state decides what every site WITHOUT a state line does: opening it would put sites live
+        p = self.repo / S.VARS
+        p.write_text(p.read_text().replace("wp_site_defaults:\n  state: hold", "wp_site_defaults:\n  state: live"))
+        r = self.run_in_repo("alpha", "hold", "--yes")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("other than site states", r.stderr)
+        self.assertEqual(self.called(), "")
+
     def test_dirty_file_unknown_site_and_no_change_are_refused_or_noops(self):
         (self.repo / S.VARS).write_text(SAMPLE + "# a stray edit\n")
         r = self.run_in_repo("alpha", "hold", "--yes")
         self.assertEqual(r.returncode, 2)
         self.assertIn("uncommitted", r.stderr)
+        self.assertIn("+# a stray edit", r.stderr, "the refusal must show what is dirty")
         self.assertEqual(self.called(), "")
         subprocess.run(["git", "-C", str(self.repo), "checkout", "--", S.VARS], check=True)
         self.assertEqual(self.run_in_repo("nosuch", "live", "--yes").returncode, 2)

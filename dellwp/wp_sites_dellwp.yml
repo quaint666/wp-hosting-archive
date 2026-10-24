@@ -14,8 +14,9 @@
 
   vars:
     wp_master_secret: "{{ dellwp_wp_master_secret }}"
-    # templates/wp/ at the repo root: template looks only next to the task file and the playbook, so the path is explicit (the dellvms/ plays do the same).
-    wp_template_dir: "{{ playbook_dir }}/../templates/wp"
+    # templates/ at the repo root: template looks only next to the task file and the playbook, so the paths are explicit (the dellvms/ plays do the same).
+    shared_template_dir: "{{ playbook_dir }}/../templates"
+    wp_template_dir: "{{ shared_template_dir }}/wp"
 
   tasks:
     - name: Install the operator's tools (tasks/wp_tools_common.yml)
