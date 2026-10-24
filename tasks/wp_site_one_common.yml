@@ -180,6 +180,14 @@
     wait: true
     wait_timeout: 180
 
+# The containers above came up through the compose module, not through the unit, so the unit would stay inactive while they run: `systemctl stop` would stop nothing and
+# `systemctl restart` would restart nothing (seen on dellwp 2026-10-24, when a cron failure rehearsal found the containers still up). Starting it now runs
+# `docker compose up -d`, a no-op on a running stack, and leaves the unit active (RemainAfterExit) so stop, restart and `is-active` mean what they say.
+- name: Mark the site's unit active now that its containers are up
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    state: started
+
 - name: Deploy and validate the site's nginx vhost
   block:
     - name: Deploy the vhost
@@ -235,3 +243,11 @@
   delay: 5
   until: wp_site_probe.status is defined and wp_site_probe.status == 200
   when: not ansible_check_mode
+
+# WordPress's own per-visit cron is off (wp-config.php), so this timer is what runs scheduled posts, updates checks and WooCommerce's scheduler. It starts at go-live and
+# stops when the site goes back on hold. The unit runs the same script by hand any time: systemctl start wp-cron@<site>.service.
+- name: Run the site's cron every few minutes while it is live, not while it is on hold
+  ansible.builtin.systemd:
+    name: "wp-cron@{{ wp_s.name }}.timer"
+    enabled: "{{ wp_s.state == 'live' }}"
+    state: "{{ 'started' if wp_s.state == 'live' else 'stopped' }}"

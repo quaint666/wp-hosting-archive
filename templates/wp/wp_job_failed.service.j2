@@ -1,0 +1,7 @@
+# Managed by Ansible (templates/wp/wp_job_failed.service.j2). Started by the OnFailure= of the WordPress jobs; %I is the unit that failed. ntfy-notify always exits 0.
+[Unit]
+Description=Tell ntfy that %I failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ntfy-notify {{ wp_ntfy_topic }} "{{ inventory_hostname }}: %I failed. Look with: journalctl -u %I -n 30"

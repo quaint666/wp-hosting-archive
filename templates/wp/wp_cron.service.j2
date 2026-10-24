@@ -1,0 +1,10 @@
+# Managed by Ansible (templates/wp/wp_cron.service.j2). One instance per site: wp-cron@<site>.service, started by wp-cron@<site>.timer.
+[Unit]
+Description=WordPress cron events for %i
+After=docker.service wp-%i.service
+OnFailure=wp-job-failed@%n.service
+
+[Service]
+Type=oneshot
+ExecStart={{ wp_tools_bin }}/wp-site-cron %i
+TimeoutStartSec={{ wp_cron_timeout_s }}

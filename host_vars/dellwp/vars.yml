@@ -52,3 +52,11 @@ wp_tools_lib: /usr/local/lib/wp-tools
 wp_cli_mem_mb: 384
 wp_cli_cpus: 1.0
 wp_cli_pids: 128
+
+# Timers (tasks/wp_tools_common.yml, templates/wp/wp_cron*.j2). A site's cron runs every five minutes while it is live. While wp_freeze_file exists, or a site's own
+# <site dir>/freeze, every WordPress timer skips its run (and counts it as a success). A failed job tells this ntfy topic through ntfy-notify.
+wp_freeze_file: /srv/wp/freeze
+wp_ntfy_topic: homeserver
+wp_cron_calendar: "*:0/5"
+wp_cron_jitter_s: 20
+wp_cron_timeout_s: 300

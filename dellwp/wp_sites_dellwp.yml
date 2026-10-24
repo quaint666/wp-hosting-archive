@@ -24,6 +24,9 @@
       ansible.builtin.import_tasks: ../tasks/wp_sites_common.yml
 
   handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
     - name: Reload nginx
       ansible.builtin.systemd:
         name: nginx

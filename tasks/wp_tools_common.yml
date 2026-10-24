@@ -39,5 +39,27 @@
     - { src: wp_site_install.sh.j2, dest: wp-site-install }
     - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
     - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
+    - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
   loop_control:
     label: "{{ item.dest }}"
+
+# The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
+# ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
+- name: Deploy the WordPress job units
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: wp_cron.service.j2, dest: "wp-cron@.service" }
+    - { src: wp_cron.timer.j2, dest: "wp-cron@.timer" }
+    - { src: wp_job_failed.service.j2, dest: "wp-job-failed@.service" }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+# The site tasks enable timers next, and systemd must know the units first.
+- name: Reload systemd now if a unit changed
+  ansible.builtin.meta: flush_handlers

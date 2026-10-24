@@ -5,6 +5,7 @@ readonly WP_DATA='{{ wp_data_mount }}/sites'
 readonly WP_DOMAIN='{{ wp_domain }}'
 readonly WP_LISTEN='{{ wp_nginx_listen_port }}'
 readonly WP_BIN='{{ wp_tools_bin }}'
+readonly WP_FREEZE='{{ wp_freeze_file }}'
 {% raw %}
 die() { echo "$(basename "$0"): $*" >&2; exit 2; }
 

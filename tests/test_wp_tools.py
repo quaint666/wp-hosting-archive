@@ -25,6 +25,7 @@ DOCKER = r'''#!/bin/bash
 echo "--- docker" >> "$SHIM_LOG/docker.argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$SHIM_LOG/docker.argv"; done
 case "$1" in network) exit 0 ;; esac
+[ -n "${SHIM_RUN_RC:-}" ] && exit "$SHIM_RUN_RC"
 case " $* " in *" is-installed "*) [ "${SHIM_INSTALLED:-0}" = 1 ] && exit 0 || exit 1 ;; esac
 case " $* " in *" verify-checksums "*) if [ "${SHIM_VERIFY_FAIL:-0}" = 1 ]; then echo "Error: checksums do not match"; exit 1; fi; echo "Success: Verified 1 of 1 plugins."; exit 0 ;; esac
 # like Docker: the container sees the caller's stdin only when -i is given
@@ -44,14 +45,15 @@ class Tools(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wptools-"))
         self.v = base_vars()
-        v = dict(self.v, wp_tools_bin=str(self.tmp / "bin"), wp_tools_lib=str(self.tmp / "lib"), wp_data_mount=str(self.tmp / "data"))
+        v = dict(self.v, wp_tools_bin=str(self.tmp / "bin"), wp_tools_lib=str(self.tmp / "lib"), wp_data_mount=str(self.tmp / "data"), wp_freeze_file=str(self.tmp / "freeze"),
+                 inventory_hostname="dellwp")
         self.ctx = v
         for d in ("bin", "lib", "shim", "log", "data/sites/wptest"):
             (self.tmp / d).mkdir(parents=True)
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
         for src, dest in (("wp_tools_common.sh.j2", "lib/common.sh"), ("wp_site_cli.sh.j2", "bin/wp-site-cli"), ("wp_site_install.sh.j2", "bin/wp-site-install"),
-                          ("wp_site_login_check.sh.j2", "bin/wp-site-login-check"), ("wp_site_ext.sh.j2", "bin/wp-site-ext")):
+                          ("wp_site_login_check.sh.j2", "bin/wp-site-login-check"), ("wp_site_ext.sh.j2", "bin/wp-site-ext"), ("wp_site_cron.sh.j2", "bin/wp-site-cron")):
             (self.tmp / dest).write_text(env.get_template(src).render(**v))
             if dest.startswith("bin/"):
                 (self.tmp / dest).chmod(0o755)  # production: mode 0750 root:root from the play
@@ -60,12 +62,14 @@ class Tools(unittest.TestCase):
             f.write_text(body)
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
 
-    def run_tool(self, name, *args, stdin="", tty=None, installed=False, verify_fails=False):
+    def run_tool(self, name, *args, stdin="", tty=None, installed=False, verify_fails=False, run_rc=None):
         env = {"PATH": "%s:/usr/bin:/bin" % (self.tmp / "shim"), "SHIM_LOG": str(self.tmp / "log"), "HOME": str(self.tmp)}
         if installed:
             env["SHIM_INSTALLED"] = "1"
         if verify_fails:
             env["SHIM_VERIFY_FAIL"] = "1"
+        if run_rc is not None:
+            env["SHIM_RUN_RC"] = str(run_rc)
         if tty is not None:
             (self.tmp / "tty").write_text(tty)
             env["WP_SITE_TTY"] = str(self.tmp / "tty")
@@ -321,6 +325,80 @@ class Tools(unittest.TestCase):
         (self.tmp / "log" / "docker.argv").unlink()
         self.assertEqual(self.run_tool("wp-site-ext", "wptest", "plugin", "delete", "woocommerce").returncode, 0)
         self.assertEqual(self.wp_calls(), [(False, ["plugin", "deactivate", "woocommerce"]), (True, ["plugin", "delete", "woocommerce"])])
+
+    # --- the cron timer: the script, the units, and which sites get a running timer
+    def test_cron_runs_the_due_events_as_the_web_app(self):
+        r = self.run_tool("wp-site-cron", "wptest")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # one call, not root: cron runs plugin code (WooCommerce's scheduler), which must never be root's
+        self.assertEqual(self.wp_calls(), [(False, ["cron", "event", "run", "--due-now"])])
+        self.assertNotIn("--allow-root", self.argv())
+
+    def test_cron_skips_a_frozen_site_and_counts_it_as_success(self):
+        (self.tmp / "freeze").write_text("")
+        r = self.run_tool("wp-site-cron", "wptest")
+        self.assertEqual((r.returncode, self.log("docker.argv")), (0, ""))
+        self.assertIn("frozen", r.stdout)
+        (self.tmp / "freeze").unlink()
+        (self.tmp / "data/sites/wptest/freeze").write_text("")
+        r = self.run_tool("wp-site-cron", "wptest")
+        self.assertEqual((r.returncode, self.log("docker.argv")), (0, ""))
+        (self.tmp / "data/sites/wptest/freeze").unlink()
+        self.assertEqual(self.run_tool("wp-site-cron", "wptest").returncode, 0)
+        self.assertNotEqual(self.log("docker.argv"), "", "with no freeze flag cron must run")
+
+    def test_cron_fails_when_the_job_fails_so_the_unit_can_alert(self):
+        self.assertEqual(self.run_tool("wp-site-cron", "wptest", run_rc=3).returncode, 3)
+        (self.tmp / "shim" / "docker").write_text("#!/bin/bash\n[ \"$1\" = network ] && exit 1\nexit 0\n")
+        self.assertEqual(self.run_tool("wp-site-cron", "wptest").returncode, 2, "a missing site network must fail loudly, not skip")
+
+    def test_cron_refuses_bad_names(self):
+        for bad in ("nosuch", "../etc", "a;id", "", "wptest extra"):
+            self.assertEqual(self.run_tool("wp-site-cron", *( [bad] if bad else [] )).returncode, 2, bad)
+        self.assertEqual(self.log("docker.argv"), "")
+
+    def test_the_units_run_the_script_per_site_and_alert_on_failure(self):
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
+        svc = env.get_template("wp_cron.service.j2").render(**self.ctx)
+        self.assertIn("ExecStart=%s/wp-site-cron %%i" % self.ctx["wp_tools_bin"], svc)
+        self.assertIn("OnFailure=wp-job-failed@%n.service", svc)
+        self.assertIn("Type=oneshot", svc)
+        self.assertIn("TimeoutStartSec=%s" % self.ctx["wp_cron_timeout_s"], svc)
+        tim = env.get_template("wp_cron.timer.j2").render(**self.ctx)
+        self.assertIn("OnCalendar=%s" % self.ctx["wp_cron_calendar"], tim)
+        self.assertIn("RandomizedDelaySec=%s" % self.ctx["wp_cron_jitter_s"], tim)
+        self.assertIn("WantedBy=timers.target", tim)
+        fail = env.get_template("wp_job_failed.service.j2").render(**self.ctx)
+        self.assertIn("/usr/local/bin/ntfy-notify %s " % self.ctx["wp_ntfy_topic"], fail)
+        self.assertIn("%I", fail)
+        for unit in (svc, tim, fail):
+            self.assertNotIn(self.ctx["wp_master_secret"], unit)
+
+    def test_the_sites_unit_is_started_after_its_containers_so_stop_and_restart_work(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
+        compose = [i for i, t in enumerate(tasks) if "community.docker.docker_compose_v2" in t]
+        self.assertEqual(len(compose), 1)
+        started = [i for i, t in enumerate(tasks)
+                   if str(t.get("ansible.builtin.systemd", {}).get("name", "")).startswith("wp-{{ wp_s.name }}") and "timer" not in str(t["ansible.builtin.systemd"]["name"])
+                   and t["ansible.builtin.systemd"].get("state") == "started"]
+        self.assertEqual(len(started), 1, "the site's unit must be started (enabled alone leaves it inactive over running containers)")
+        self.assertGreater(started[0], compose[0], "start the unit after the compose module, or the stack is recreated twice")
+        self.assertIn("is-active", (ROOT / "scripts/wp_site_verify_dellwp.sh").read_text())
+
+    def test_only_live_sites_get_a_running_timer_and_systemd_is_reloaded_first(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
+        t = [x for x in tasks if "wp-cron@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]
+        e = jinja2.Environment()
+        for state, want in (("live", ("True", "started")), ("hold", ("False", "stopped"))):
+            got = (e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state}))
+            self.assertEqual(got, want, state)
+        tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
+        units = [x for x in tools if x.get("name") == "Deploy the WordPress job units"][0]
+        self.assertEqual(units["notify"], "Reload systemd")
+        names = [x.get("name") for x in tools]
+        self.assertEqual(names[-1], "Reload systemd now if a unit changed", "the reload must come before any site enables a timer")
+        wrapper = yaml.safe_load((ROOT / "dellwp/wp_sites_dellwp.yml").read_text())[0]
+        self.assertIn("Reload systemd", [h["name"] for h in wrapper["handlers"]])
 
     # --- how they are installed
     def test_the_image_tag_is_built_from_the_two_pins(self):

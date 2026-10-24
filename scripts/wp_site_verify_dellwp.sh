@@ -107,6 +107,7 @@ N=0; for i in $(seq 1 14); do [ "$(code -H "Host: $HOST" -H 'CF-Connecting-IP: 1
 [ -z "$(grep -c '\[emerg\]' /var/log/nginx/error.log </dev/null | grep -v '^0$')" ] && ok "nginx error.log has no [emerg]" || echo "   (info) error.log has $(grep -c '\[emerg\]' /var/log/nginx/error.log) old [emerg] line(s); newest: $(grep '\[emerg\]' /var/log/nginx/error.log | tail -1 | cut -c1-19)"
 systemctl is-active --quiet nginx </dev/null && ok "nginx active" || bad "nginx not active"
 systemctl is-enabled --quiet "wp-$SITE" </dev/null && ok "wp-$SITE.service enabled (starts at boot)" || bad "wp-$SITE.service not enabled"
+systemctl is-active --quiet "wp-$SITE" </dev/null && ok "wp-$SITE.service active (so systemctl stop and restart act on the containers)" || bad "wp-$SITE.service is not active: systemctl stop/restart would do nothing to the containers"
 
 echo "$TOTAL checks, $FAILS failed"
 exit "$FAILS"

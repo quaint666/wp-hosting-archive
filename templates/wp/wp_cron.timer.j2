@@ -1,0 +1,11 @@
+# Managed by Ansible (templates/wp/wp_cron.timer.j2). Enabled by the site engine for a site that is live, stopped for one on hold.
+[Unit]
+Description=WordPress cron for %i every few minutes
+
+[Timer]
+OnCalendar={{ wp_cron_calendar }}
+RandomizedDelaySec={{ wp_cron_jitter_s }}
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
