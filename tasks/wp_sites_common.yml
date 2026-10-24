@@ -64,3 +64,6 @@
   loop_control:
     loop_var: wp_s
     label: "{{ wp_s.name }} ({{ wp_s.state }})"
+
+- name: Watch the data disk and every site's quota (tasks/wp_disk_check_common.yml)
+  ansible.builtin.include_tasks: wp_disk_check_common.yml

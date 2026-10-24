@@ -1,0 +1,63 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_disk_check.sh.j2). Every few minutes on dellwp: how full is each site's quota and the data disk? Alerts through ntfy-notify when a level
+# is reached (warning, then critical), once per change, a reminder every six hours while critical, and a note when it drops back. The older disk check (disk-check.timer) watches
+# `/` only; nothing watched {{ wp_data_mount }}, where every site's files and database live, until this. A site that fills its quota stops being able to write, which for a
+# WordPress site is an outage of logins, uploads and the database, so the warning has to come before that.
+#   site quota   warning at {{ wp_disk_warn_pct }}%, critical at {{ wp_disk_crit_pct }}% of quota_mb (the project quota, read with repquota)
+#   data disk    warning at {{ wp_data_warn_pct }}%, critical at {{ wp_data_crit_pct }}% of {{ wp_data_mount }}
+set -u
+readonly MOUNT='{{ wp_data_mount }}'
+readonly STATE_DIR='{{ wp_disk_state_dir }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST='{{ inventory_hostname }}'
+readonly SITE_WARN='{{ wp_disk_warn_pct }}' SITE_CRIT='{{ wp_disk_crit_pct }}' DATA_WARN='{{ wp_data_warn_pct }}' DATA_CRIT='{{ wp_data_crit_pct }}'
+# name:project id:quota in MB for each site. WP_DISK_SITES in the environment replaces it (the alert rehearsal uses that to watch a throwaway project).
+readonly SITES="${WP_DISK_SITES:-{{ wp_disk_sites }}}"
+{% raw %}
+notify() { ntfy-notify "$TOPIC" "$HOST $1"; }
+mkdir -p "$STATE_DIR"
+rank() { case $1 in ok) echo 0 ;; warn) echo 1 ;; crit) echo 2 ;; esac; }
+
+# level <percent> <warn> <crit>
+level() { if [ "$1" -ge "$3" ]; then echo crit; elif [ "$1" -ge "$2" ]; then echo warn; else echo ok; fi; }
+
+# judge <key> <what> <percent> <warn> <crit>
+judge() {
+  local key=$1 what=$2 pct=$3 warn=$4 crit=$5 new old f="$STATE_DIR/$1.level"
+  new=$(level "$pct" "$warn" "$crit")
+  old=ok; [ -f "$f" ] && old=$(cat "$f")
+  if [ "$(rank "$new")" -gt "$(rank "$old")" ]; then
+    notify "$what is at ${pct}% ($new: warning at ${warn}%, critical at ${crit}%)"; echo "$new" > "$f"
+  elif [ "$(rank "$new")" -lt "$(rank "$old")" ]; then
+    notify "$what is back to ${pct}%"; if [ "$new" = ok ]; then rm -f "$f"; else echo "$new" > "$f"; fi
+  elif [ "$new" = crit ] && [ -n "$(find "$f" -mmin +360 2>/dev/null)" ]; then
+    notify "$what is still at ${pct}% (critical)"; touch "$f"
+  fi
+}
+
+# flag <key> <1 if it is a problem, else 0> <what is wrong> <what is fine again>: a plain yes/no condition, told once when it starts and once when it ends
+flag() {
+  local f="$STATE_DIR/$1.flag"
+  if [ "$2" = 1 ]; then [ -f "$f" ] || { notify "$3"; touch "$f"; }
+  elif [ -f "$f" ]; then notify "$4"; rm -f "$f"; fi
+}
+
+# the data disk
+used=$(df --output=pcent "$MOUNT" 2>/dev/null | tail -n 1 | tr -dc '0-9')
+if [ -n "$used" ]; then flag data-unreadable 0 "" "df reads $MOUNT again"; judge data "data disk $MOUNT" "$used" "$DATA_WARN" "$DATA_CRIT"
+else flag data-unreadable 1 "df cannot read $MOUNT: the data disk is not being watched" ""; fi
+
+# the sites' project quotas
+if report=$(repquota -P -n "$MOUNT" 2>/dev/null); then
+  flag repquota-unreadable 0 "" "repquota reads the quotas again"
+  for entry in $SITES; do
+    IFS=: read -r name qid mb <<< "$entry"
+    [[ $name =~ ^[a-z][a-z0-9-]*$ && $qid =~ ^[0-9]+$ && $mb =~ ^[0-9]+$ && $mb -gt 0 ]] || continue
+    kb=$(printf '%s\n' "$report" | awk -v id="#$qid" '$1 == id {print $3}')
+    judge "site-$name" "site $name has used $(( ${kb:-0} / 1024 )) MB of its $mb MB quota; it" "$(( ${kb:-0} * 100 / (mb * 1024) ))" "$SITE_WARN" "$SITE_CRIT"
+  done
+else
+  flag repquota-unreadable 1 "repquota failed: no site's quota is being watched" ""
+fi
+exit 0
+{% endraw %}

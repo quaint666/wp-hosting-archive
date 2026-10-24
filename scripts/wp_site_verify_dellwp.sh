@@ -106,6 +106,8 @@ N=0; for i in $(seq 1 14); do [ "$(code -H "Host: $HOST" -H 'CF-Connecting-IP: 1
 [ "$N" = 0 ] && ok "other pages are not rate-limited by the login zone" || bad "login zone limited a page that is not /wp-login.php ($N 429s)"
 [ -z "$(grep -c '\[emerg\]' /var/log/nginx/error.log </dev/null | grep -v '^0$')" ] && ok "nginx error.log has no [emerg]" || echo "   (info) error.log has $(grep -c '\[emerg\]' /var/log/nginx/error.log) old [emerg] line(s); newest: $(grep '\[emerg\]' /var/log/nginx/error.log | tail -1 | cut -c1-19)"
 systemctl is-active --quiet nginx </dev/null && ok "nginx active" || bad "nginx not active"
+systemctl is-enabled --quiet wp-disk-check.timer </dev/null && ok "wp-disk-check.timer enabled (the data disk and every quota are watched)" || bad "wp-disk-check.timer is not enabled: nothing watches the disk"
+systemctl start wp-disk-check.service </dev/null >/dev/null 2>&1 && ok "the disk check runs" || bad "the disk check failed (journalctl -u wp-disk-check)"
 systemctl is-enabled --quiet "wp-$SITE" </dev/null && ok "wp-$SITE.service enabled (starts at boot)" || bad "wp-$SITE.service not enabled"
 systemctl is-active --quiet "wp-$SITE" </dev/null && ok "wp-$SITE.service active (so systemctl stop and restart act on the containers)" || bad "wp-$SITE.service is not active: systemctl stop/restart would do nothing to the containers"
 
