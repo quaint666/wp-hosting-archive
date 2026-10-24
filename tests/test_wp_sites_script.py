@@ -27,7 +27,12 @@ class Base(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wpsites-"))
         (self.tmp / "host_vars/dellwp").mkdir(parents=True)
         self.vars = self.tmp / "host_vars/dellwp/vars.yml"
-        shutil.copy(ROOT / "host_vars/dellwp/vars.yml", self.vars)
+        # the committed file, not the working copy: an uncommitted edit (a site this script just added, say) must not change what the tests start from
+        head = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:host_vars/dellwp/vars.yml"], capture_output=True, text=True)
+        if head.returncode == 0:
+            self.vars.write_text(head.stdout)
+        else:
+            shutil.copy(ROOT / "host_vars/dellwp/vars.yml", self.vars)
         for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
             subprocess.run(["git", "-C", str(self.tmp), *cmd], check=True, capture_output=True)
         self.original = self.vars.read_text()
@@ -138,12 +143,13 @@ class Create(Base):
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.names(), ["wptest", "alpha"])
         self.assertEqual(self.site("alpha"), {"name": "alpha", "port": 9102, "quota_id": 1002, "state": "hold", "update_policy": "notify"})
-        self.assertEqual(self.kinds(), ["play-check", "play", "play", "ssh", "bash", "python3"])
-        play, ssh = self.calls[1], self.calls[3]
+        self.assertEqual(self.kinds(), ["play", "play", "ssh", "bash", "python3"], "no check run for a new site: check mode cannot get past a directory that does not exist yet")
+        self.assertIn("No check run", self.text())
+        play, ssh = self.calls[0], self.calls[2]
         self.assertEqual(play, ["ansible-playbook", "-i", "inventory.yml", "dellwp/wp_sites_dellwp.yml"])
         self.assertEqual(ssh[:3], ["ssh", "-t", "dellwp"])
         self.assertEqual(shlex.split(ssh[3]), ["sudo", "wp-site-install", "alpha", "--title=Alpha's site", "--user=alphaadmin", "--email=alpha@example.org"], "one string, quoted for the remote shell")
-        self.assertEqual(self.calls[4], ["bash", "scripts/wp_site_verify_dellwp.sh", "alpha"])
+        self.assertEqual(self.calls[3], ["bash", "scripts/wp_site_verify_dellwp.sh", "alpha"])
         self.assertIn("hostname: alpha.example.com", self.text())
         self.assertIn("hidden prompt", self.text()); self.assertIn("git add host_vars/dellwp/vars.yml", self.text())
         self.assertIn("on hold", self.text())
@@ -221,14 +227,20 @@ class Create(Base):
     def test_declining_the_real_run_leaves_the_edit_and_says_how_to_undo_it(self):
         self.answers = ["y", "n"]
         rc = self.sites().create(**self.create_args(yes=False, sets=("quota_mb=2048",)))
-        self.assertEqual(rc, 1); self.assertEqual(self.kinds(), ["play-check"]); self.assertIn("alpha", self.names())
-        self.assertIn("git checkout -- host_vars/dellwp/vars.yml", self.text())
+        self.assertEqual(rc, 1); self.assertEqual(self.kinds(), [], "nothing ran"); self.assertIn("alpha", self.names())
+        self.assertIn("git checkout -- host_vars/dellwp/vars.yml", self.text()); self.assertIn("it builds the new site", "\n".join(self.said))
 
-    def test_a_failing_check_run_stops_before_the_real_one(self):
+    def test_a_failing_check_run_of_a_change_stops_before_the_real_one(self):
+        # modify keeps the check run (its directories exist); create has none
         self.rc = {"ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml --check": 2}
         self.answers = ["y"]
-        rc = self.sites().create(**self.create_args(yes=False, sets=("quota_mb=2048",)))
+        rc = self.sites().modify("wptest", sets=("update_policy=notify",), yes=False)
         self.assertEqual(rc, 2); self.assertEqual(self.kinds(), ["play-check"]); self.assertIn("Nothing on the host changed", self.text())
+
+    def test_a_good_check_run_of_a_change_asks_before_the_real_one(self):
+        self.answers = ["y", "y"]
+        rc = self.sites().modify("wptest", sets=("update_policy=notify",), yes=False)
+        self.assertEqual(rc, 0, self.text()); self.assertEqual(self.kinds()[:3], ["play-check", "play", "play"]); self.assertNotIn("No check run", self.text())
 
     def test_a_failing_play_stops_before_the_install(self):
         self.rc = {"ansible-playbook": 4}

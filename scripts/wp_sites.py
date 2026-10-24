@@ -8,7 +8,7 @@
 
 A site is declared in git (`wp_sites` in host_vars/dellwp/vars.yml) and built by the play, so every change here is an edit of that file followed by the play and the verifier. The script
 edits only the lines it means to, re-reads the YAML to prove nothing else changed, checks the new list against the rules of the play itself (the assert in tasks/wp_sites_common.yml),
-shows the diff and asks. It refuses to start if the file has uncommitted changes, so the diff is only this change, and it leaves the commit to you: it prints the command.
+shows the diff and asks. (A new site gets no check run: the play creates its directory and the next task reads it, which check mode cannot do.) It refuses to start if the file has uncommitted changes, so the diff is only this change, and it leaves the commit to you: it prints the command.
 
 A site's hostname is <name>.<wp_domain> and nothing else: no friend-owned domains (the recorded decision), so there is no Terraform step; the wildcard record already covers every name.
 The name is the site's identity (directories, containers, quota project), so it cannot be changed; make a new site and import into it. Port and quota project id are chosen above every
@@ -217,8 +217,8 @@ class Sites:
         if bad:
             raise Refuse("the play would refuse this site list. Rule(s) broken:\n  " + "\n  ".join(bad))
 
-    def apply_and_run(self, old, new, site, no_run, yes):
-        """Show the diff, ask, write, then the play (check, real, second run) and the verifier."""
+    def apply_and_run(self, old, new, site, no_run, yes, check=True):
+        """Show the diff, ask, write, then the play (check run, real run, second run; no check run for a new site, which check mode cannot handle) and the verifier."""
         diff = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), "a/" + VARS, "b/" + VARS))
         self.out(diff)
         if not yes and not self.confirm("Write this change to %s?" % VARS):
@@ -229,12 +229,16 @@ class Sites:
             self.out("Edited only (--no-run). Run %s, then scripts/wp_site_verify_dellwp.sh %s." % (PLAY, site))
             return 0
         play = ["ansible-playbook", "-i", "inventory.yml", PLAY]
-        if not yes:
+        if not check:
+            self.out("No check run: check mode cannot get past a site that does not exist yet (the play creates its directory, and the next task reads it; seen on dellwp 2026-10-24),"
+                     "\nso the diff above and the rules of the play, checked offline, are the preview, and the first run is the real one.")
+        if not yes and check:
             rc, _ = self.run(play + ["--check", "--diff"])
             if rc != 0:
                 self.out("The check run failed (exit %d). The file stays edited; `git checkout -- %s` undoes it. Nothing on the host changed." % (rc, VARS))
                 return rc
-            if not self.confirm("Run the play for real now? (check mode cannot show whether the new site starts)"):
+        if not yes:
+            if not self.confirm("Run the play for real now?%s" % ("" if check else " (it builds the new site)")):
                 self.out("Not run. The file is edited; `git checkout -- %s` undoes it." % VARS)
                 return 1
         rc, _ = self.run(play)
@@ -313,7 +317,7 @@ class Sites:
         self.check_rules(new)
         self.out("\nNew site: %s -> %s, state %s, update policy %s, port %d, quota project %d. Administrator %s <%s>, title '%s'." % (name, host, state, policy, entry["port"], entry["quota_id"], user, email, title))
         self.out("The password is asked later, on the VM, at a hidden prompt (14 or more characters).\n")
-        rc = self.apply_and_run(text, new, name, no_run, yes)
+        rc = self.apply_and_run(text, new, name, no_run, yes, check=False)
         if rc != 0 or no_run:
             return rc
         remote = "sudo wp-site-install " + " ".join(shlex.quote(x) for x in (name, "--title=" + title, "--user=" + user, "--email=" + email))
