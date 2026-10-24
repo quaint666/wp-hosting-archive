@@ -28,6 +28,7 @@ wp_php_disable_functions: [exec, passthru, shell_exec, system, proc_open, popen,
 # timers skip; live = public. secret_rev: bump it to rotate that site's database password and salts (they derive from dellwp_wp_master_secret).
 wp_site_defaults:
   state: hold
+  update_policy: notify
   secret_rev: 1
   php_mem_mb: 512
   db_mem_mb: 256
@@ -48,6 +49,7 @@ wp_sites:
     port: 9101
     quota_id: 1001
     state: live
+    update_policy: auto
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.
@@ -92,6 +94,9 @@ wp_backup_jitter_s: 300
 wp_backup_timeout_s: 3600
 wp_backup_keep_daily: 7
 wp_backup_keep_weekly: 3
+# The snapshot the update job takes before it changes anything is tagged (tag=pre-update in its MANIFEST) and pruned on its own: the newest wp_backup_keep_preupdate are kept, and they
+# do not count towards the daily and weekly ones, so a night with an update does not push a nightly snapshot out.
+wp_backup_keep_preupdate: 2
 wp_backup_quota_offset: 1000
 wp_backup_stale_hours: 30
 wp_backup_check_calendar: hourly
@@ -103,3 +108,13 @@ wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.
 wp_drill_calendar: "*-*-01 05:30:00"
 wp_drill_timeout_s: 1800
+
+# The update job (templates/wp/wp_site_update.sh.j2, run by wp-update@<site>.timer). A site's `update_policy:` is auto (the job applies what is available), notify (it tells ntfy what is
+# available, once per set, and changes nothing; `wp-site-update <site> --apply` does it by hand) or freeze (it does nothing). The default is notify. It runs once a night before the
+# backup (03:15) and has a hard time limit of 50 minutes, so it can never run into it. Persistent=false: a night missed because the VM was off is skipped, not run at a random hour.
+# The probe asks the site's probe port (wp_nginx_probe_port) for the home page and the login form, tries wp_update_probe_tries times, wp_update_probe_wait_s apart.
+wp_update_calendar: "*-*-* 02:00:00"
+wp_update_jitter_s: 300
+wp_update_timeout_s: 3000
+wp_update_probe_tries: 3
+wp_update_probe_wait_s: 10

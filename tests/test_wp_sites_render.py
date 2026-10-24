@@ -54,6 +54,7 @@ def site_vars(v, site):
     out.update(wp_status_sites=" ".join("%s:%s:%s:%s:%s:%s" % (x["name"], x["state"], x["quota_id"], x["quota_mb"], x["quota_id"] + v["wp_backup_quota_offset"], x["backup_quota_mb"])
                                         for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
     out.update(wp_disk_sites=" ".join("%s:%s:%s" % (x["name"], x["quota_id"], x["quota_mb"]) for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
+    out.update(wp_update_policies=" ".join("%s:%s" % (x["name"], x["update_policy"]) for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
     out.update(inventory_hostname="dellwp", wp_s=s, wp_host="%s.%s" % (s["name"], v["wp_domain"]), wp_site_dir="%s/sites/%s" % (v["wp_data_mount"], s["name"]))
     out["wp_secret_base"] = "%s|%s|%s" % (v["wp_master_secret"], s["name"], s["secret_rev"])
     out["wp_db_password"] = hashlib.sha256((out["wp_secret_base"] + "|db").encode()).hexdigest()
@@ -261,6 +262,8 @@ class Assertions(unittest.TestCase):
             "privileged port": [{**site, "port": 80}],
             "project id below 1000": [{**site, "quota_id": 5}],
             "unknown state": [{**site, "state": "paused"}],
+            "unknown update policy": [{**site, "update_policy": "sometimes"}],
+            "an empty update policy": [{**site, "update_policy": ""}],
             "RAM does not fit": [{**site, "php_mem_mb": 9000}],
             "quota does not fit": [{**site, "quota_mb": 100000}],
             "backup quota does not fit": [{**site, "backup_quota_mb": 100000}],

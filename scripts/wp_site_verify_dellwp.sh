@@ -87,6 +87,7 @@ BQID=$((QID + BOFF)); BLINE=$(repquota -P -n "$MOUNT" </dev/null | grep "^#$BQID
 [ "$(echo "$BLINE" | awk '{print $5}')" = "$((BQMB*1024))" ] && ok "backup project $BQID hard limit $BQMB MB ($(echo "$BLINE" | awk '{printf "%d MB used", $3/1024}'))" || bad "backup project $BQID line '$BLINE', want hard $((BQMB*1024)) KiB"
 [ "$(stat -c %a "$BDIR/$SITE")" = 700 ] && ok "the backup directory is private (700)" || bad "backup directory mode $(stat -c %a "$BDIR/$SITE")"
 systemctl is-enabled --quiet "wp-backup@$SITE.timer" </dev/null && ok "wp-backup@$SITE.timer enabled (nightly, on hold or live)" || bad "wp-backup@$SITE.timer is not enabled"
+systemctl is-enabled --quiet "wp-update@$SITE.timer" </dev/null && ok "wp-update@$SITE.timer enabled (nightly; the site's update_policy decides what it does)" || bad "wp-update@$SITE.timer is not enabled"
 systemctl is-enabled --quiet wp-backup-check.timer </dev/null && ok "wp-backup-check.timer enabled (a missing backup is noticed)" || bad "wp-backup-check.timer is not enabled"
 LAST=$(cat "$BDIR/$SITE/.last-success" 2>/dev/null)
 if [ -n "$LAST" ]; then echo "   (info) newest good backup: $LAST ($(( ($(date +%s) - $(stat -c %Y "$BDIR/$SITE/.last-success")) / 3600 )) hours ago)"; else echo "   (info) no backup has run yet for $SITE"; fi
