@@ -42,6 +42,7 @@
     - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
     - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
     - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
+    - { src: wp_site_recover.sh.j2, dest: wp-site-recover }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
   loop_control:

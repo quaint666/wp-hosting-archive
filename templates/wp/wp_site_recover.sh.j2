@@ -1,0 +1,166 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_recover.sh.j2). Put a site back to one of its snapshots, IN PLACE:   wp-site-recover <site> [<stamp>|latest] [--yes] [--no-undo]
+# The dangerous sibling of wp-site-restore (a drill that never touches the site). It REPLACES the site's database and wp-content with the snapshot's, and puts core back to the
+# version the snapshot recorded (core is not in the snapshot: it came from the image once and has changed only through WP-CLI since). Used by hand, and by the update job to roll back.
+# Everything between "the site was as it was" and "the site is as the snapshot was" is one transaction:
+#   1. the snapshot is checked (complete, the dump passes gzip -t and has its completion marker and a wp_options table), the site's database is healthy, one recover at a time
+#   2. at a terminal you type the site's name to go on; --yes skips that (the update job). The maintenance flag goes up (nginx answers 503; wp-site-cron skips while it exists)
+#   3. php stops, a dump of the CURRENT database is taken and wp-content is moved aside, both into {{ wp_data_mount }}/sites/<site>/.recover-undo (the site's own quota project)
+#   4. the tables are dropped and the snapshot's dump loaded as the site's own database user; wp-content is copied from the snapshot; core is brought back if its version differs
+#   5. php is recreated (systemctl reload: a fresh php-fpm and a cold OPcache), WP-CLI proves WordPress boots and has users, the flag comes down, and the home page and login form answer
+# If anything fails from step 3 on, the undo material is put back (wp-content, the database, core) and the site is as it was before; if THAT fails too, the maintenance flag stays up
+# and the message says where the material is. --no-undo skips the dump and the move-aside (for a database too broken to dump); then a failure cannot be undone.
+# What it does not do: it does not take a backup first (take one with wp-site-backup --force if the current state matters), it does not touch wp-config.php or .env (they are
+# rendered from the repo and the vault), and it leaves a frozen site's freeze flag alone (a recover is the operator's decision, not a scheduled job).
+set -eEu -o pipefail
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+{% raw %}
+usage() { echo "usage: wp-site-recover <site> [<stamp>|latest] [--yes] [--no-undo]" >&2; exit 2; }
+[ "$#" -ge 1 ] || usage
+require_site "$1"; shift
+stamp=latest; yes=no; undo=yes
+for a in "$@"; do
+  case $a in
+    --yes) yes=yes ;;
+    --no-undo) undo=no ;;
+    latest) stamp=latest ;;
+    *) [[ $a =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || usage; stamp=$a ;;
+  esac
+done
+if [ "$stamp" = latest ]; then
+  stamp=$(find "$BACKUPS/$site" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tail -n 1)
+  [ -n "$stamp" ] || die "there is no snapshot of $site under $BACKUPS/$site"
+fi
+src=$BACKUPS/$site/$stamp
+db=wp_${site//-/_}_db; php=wp_${site//-/_}_php
+flag=$dir/maintenance.flag; undo_dir=$dir/.recover-undo
+unit=wp-$site.service
+PHASE=checking; FAILED=""; made_flag=no; php_stopped=no; core_changed=no; old_core=""
+
+# --- 1. checks (nothing has been touched yet)
+[ -f "$src/db.sql.gz" ] && [ -f "$src/MANIFEST" ] && [ -d "$src/files" ] || die "$src is not a complete snapshot"
+gzip -t "$src/db.sql.gz" || die "the snapshot's dump fails gzip's integrity check"
+case "$(gzip -dc "$src/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the snapshot's dump has no completion marker (truncated?)" ;; esac
+[ "$(gzip -dc "$src/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the snapshot's dump has no wp_options table"
+snap_core=$(sed -n 's/^core=//p' "$src/MANIFEST" | head -n 1)
+[[ $snap_core =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || die "the snapshot's MANIFEST has no usable core version ('$snap_core')"
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$db" </dev/null 2>/dev/null)" = healthy ] || die "the database container $db is not healthy; start the site first (systemctl start $unit)"
+[ ! -e "$undo_dir" ] || die "$undo_dir exists: an earlier recover died. It holds that site's previous state; look at it, then remove it by hand"
+exec 9>"$dir/.recover.lock"
+flock -n 9 || die "another recover of $site is running"
+
+live_core() { sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/version.php" | head -n 1; }
+dbq() { docker exec -i "$db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" "$MARIADB_DATABASE" --batch --skip-column-names "$@"' sh "$@"; }
+wipe_tables() {
+  local t sql="SET FOREIGN_KEY_CHECKS=0;"
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    case $t in *'`'*) echo "refusing a table name with a backtick: $t" >&2; return 1 ;; esac
+    sql+=" DROP TABLE IF EXISTS \`$t\`;"
+  done < <(echo "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'" | dbq)
+  echo "$sql" | dbq
+}
+core_to() {   # exactly this core version from wordpress.org (checksums are verified by wp-site-cli afterwards); --force is what allows an older one
+  "$WP_BIN/wp-site-cli" "$site" --code core download "--version=$1" --force --skip-content </dev/null || return 1
+  rm -f -- "$dir/html/wp-config-sample.php"   # the download brings it back; the site engine removes it on purpose
+  "$WP_BIN/wp-site-cli" "$site" --code core verify-checksums </dev/null
+}
+reload_php() { systemctl reload "$unit" </dev/null; php_stopped=no; }
+
+# put back what step 3 set aside; a function that returns non-zero if any part failed, so the caller can say so
+undo_all() {
+  local rc=0
+  echo "UNDOING: putting back the database and wp-content that were there before" >&2
+  docker stop -t 15 "$php" </dev/null >/dev/null 2>&1 || true
+  if [ -d "$undo_dir/wp-content" ]; then rm -rf -- "$dir/html/wp-content" && mv -- "$undo_dir/wp-content" "$dir/html/wp-content" || rc=1; fi
+  if [ -f "$undo_dir/db.sql.gz" ]; then wipe_tables && gzip -dc "$undo_dir/db.sql.gz" | dbq || rc=1; fi
+  if [ "$core_changed" = yes ]; then core_to "$old_core" || rc=1; fi
+  reload_php || rc=1
+  return "$rc"
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT ERR
+  if [ "$rc" != 0 ]; then
+    local undone=yes
+    if [ "$PHASE" = swapping ]; then
+      if [ "$undo" = yes ] && undo_all; then rm -rf -- "$undo_dir"; echo "rolled back: $site is as it was before this recover" >&2
+      else undone=no; echo "NOT ROLLED BACK: $site is in an unknown state and stays in maintenance (undo material, if any: $undo_dir)" >&2; fi
+    else
+      rm -rf -- "$undo_dir"   # nothing was replaced yet: only the dump of the current database can be in it
+      if [ "$php_stopped" = yes ]; then reload_php || true; fi
+    fi
+    if [ "$undone" = yes ] && [ "$made_flag" = yes ]; then rm -f -- "$flag"; fi
+    echo "wp-site-recover: $site from $stamp FAILED: ${FAILED:-unexpected error}" >&2
+    command -v logger >/dev/null && logger -t wp-site-recover -- "site=$site snapshot=$stamp result=FAILED undone=$undone" || true
+  fi
+  exit "$rc"
+}
+trap 'FAILED="${FAILED:-unexpected error at line $LINENO}"' ERR
+trap finish EXIT
+need() { FAILED=$1; }
+
+# --- 2. consent and the maintenance flag
+if [ "$yes" = no ]; then
+  open_tty
+  echo "This REPLACES the database and wp-content of $site with snapshot $stamp ($(sed -n 's/^core=/core /p' "$src/MANIFEST" | head -n 1)); the site is offline while it runs." >&2
+  ask "Type the site name to go on: " answer
+  [ "$answer" = "$site" ] || die "not confirmed; nothing was changed"
+fi
+if [ ! -e "$flag" ]; then touch -- "$flag"; made_flag=yes; fi
+echo "recovering $site from $stamp (core $snap_core)"
+
+# --- 3. stop php, keep what is there
+need "php would not stop"
+docker stop -t 15 "$php" </dev/null >/dev/null; php_stopped=yes
+if [ "$undo" = yes ]; then
+  need "could not keep the current state to undo with (use --no-undo only if the database cannot be dumped)"
+  mkdir -- "$undo_dir"; chmod 700 "$undo_dir"
+  docker exec "$db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MARIADB_USER" --single-transaction --quick --routines --events --triggers --default-character-set=utf8mb4 "$MARIADB_DATABASE"' </dev/null | gzip > "$undo_dir/db.sql.gz"
+  gzip -t "$undo_dir/db.sql.gz"
+  PHASE=swapping
+  mv -- "$dir/html/wp-content" "$undo_dir/wp-content"
+else
+  PHASE=swapping
+  need "could not clear wp-content"
+  rm -rf -- "$dir/html/wp-content"
+fi
+
+# --- 4. replace
+old_core=$(live_core)
+need "the snapshot's dump did not load"
+wipe_tables
+gzip -dc "$src/db.sql.gz" | dbq
+need "could not copy the snapshot's wp-content (out of quota?)"
+cp -a -- "$src/files" "$dir/html/wp-content"
+if [ "$old_core" != "$snap_core" ]; then
+  need "could not put core back to $snap_core (live was ${old_core:-unknown})"
+  core_changed=yes
+  core_to "$snap_core"
+fi
+
+# --- 5. start, prove, open
+need "php did not come back healthy"
+reload_php
+need "WordPress does not boot on the restored database and files"
+"$WP_BIN/wp-site-cli" "$site" core is-installed </dev/null
+need "the restored site has no users"
+[ "$("$WP_BIN/wp-site-cli" "$site" user list --format=count </dev/null)" -ge 1 ]
+PHASE=opening
+[ "$made_flag" = no ] || rm -f -- "$flag"
+need "the site does not answer over http after the restore"
+ok=no
+for _ in 1 2 3; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/" </dev/null || true)
+  login=$(curl -s --max-time 20 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$WP_LISTEN/wp-login.php" </dev/null || true)
+  if [ "$code" = 200 ] && printf '%s' "$login" | grep -q 'user_login'; then ok=yes; break; fi
+  sleep 10
+done
+[ "$ok" = yes ]
+PHASE=done; FAILED=""
+rm -rf -- "$undo_dir"
+command -v logger >/dev/null && logger -t wp-site-recover -- "site=$site snapshot=$stamp core=$snap_core result=ok" || true
+echo "OK: $site is back to snapshot $stamp (core $snap_core)"
+{% endraw %}
