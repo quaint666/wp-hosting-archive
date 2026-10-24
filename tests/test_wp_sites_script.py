@@ -557,6 +557,104 @@ class Lifecycle(Base):
                 self.assertIn(n, buf.getvalue(), "%s --help lacks %r" % (cmd, n))
 
 
+class Committing(Base):
+    def git_out(self, *a):
+        return subprocess.run(["git", "-C", str(self.tmp), *a], capture_output=True, text=True).stdout.strip()
+
+    def head(self):
+        return self.git_out("log", "-1", "--format=%s")
+
+    def commits(self):
+        return int(self.git_out("rev-list", "--count", "HEAD"))
+
+    def test_create_commits_only_vars_yml_with_the_message_it_prints(self):
+        (self.tmp / "other.txt").write_text("unrelated"); subprocess.run(["git", "-C", str(self.tmp), "add", "other.txt"], check=True)   # something else is staged
+        before = self.commits()
+        rc = self.sites().create(**self.create_args(commit=True))
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.commits(), before + 1); self.assertEqual(self.head(), "ops(wp): create site alpha")
+        self.assertEqual(self.git_out("show", "--name-only", "--format=", "HEAD"), "host_vars/dellwp/vars.yml", "only the declared-state file is in the commit")
+        self.assertEqual(self.git_out("diff", "--cached", "--name-only"), "other.txt", "what else was staged stays staged")
+        self.assertEqual(self.git_out("status", "--short", "host_vars"), ""); self.assertIn("Committed", self.text())
+        self.assertNotIn("When you are satisfied, commit it", self.text())
+
+    def test_it_stages_nothing_but_vars_yml(self):
+        (self.tmp / "untracked.txt").write_text("not mine")
+        self.sites().create(**self.create_args(commit=True))
+        self.assertEqual(self.git_out("status", "--short"), "?? untracked.txt", "an untracked file stays untracked: the script never stages anything but the declared-state file")
+
+    def test_one_object_used_for_several_actions_judges_each_run_on_its_own(self):
+        # the menu keeps one Sites object for the whole session: a dirty second run in one action must not block the commit of a later, clean one
+        s = self.sites()
+        self.rc = {"changed": "2"}
+        s.create(**self.create_args(name="alpha", commit=True)); before = self.commits()
+        subprocess.run(["git", "-C", str(self.tmp), "checkout", "--", "host_vars/dellwp/vars.yml"], check=True)
+        self.rc = {}
+        s.create(**self.create_args(name="beta", commit=True))
+        self.assertEqual(self.commits(), before + 1); self.assertEqual(self.head(), "ops(wp): create site beta")
+
+    def test_without_commit_nothing_is_committed(self):
+        before = self.commits()
+        self.sites().create(**self.create_args())
+        self.assertEqual(self.commits(), before); self.assertIn("When you are satisfied, commit it", self.text()); self.assertNotEqual(self.git_out("status", "--short", "host_vars"), "")
+
+    def test_modify_stop_and_start_commit_with_their_own_messages(self):
+        self.assertEqual(self.sites().modify("wptest", sets=("update_policy=notify",), yes=True, commit=True), 0)
+        self.assertEqual(self.head(), "ops(wp): modify site wptest: update_policy=notify")
+        self.assertEqual(self.sites().stop("wptest", yes=True, commit=True), 0); self.assertEqual(self.head(), "ops(wp): stop site wptest")
+        self.assertEqual(self.sites().start("wptest", yes=True, commit=True), 0); self.assertEqual(self.head(), "ops(wp): start site wptest")
+        self.assertEqual(self.git_out("status", "--short"), "")
+
+    def test_a_verifier_that_reports_failures_blocks_the_commit_and_says_so(self):
+        self.rc = {"bash": 2}
+        before = self.commits()
+        rc = self.sites().create(**self.create_args(commit=True))
+        self.assertEqual(rc, 2); self.assertEqual(self.commits(), before)
+        self.assertIn("--commit did not commit: the verifier reported failures", self.text()); self.assertIn("git add host_vars/dellwp/vars.yml", self.text())
+        self.assertNotEqual(self.git_out("status", "--short", "host_vars"), "", "the edit is still there, uncommitted")
+
+    def test_a_second_run_that_changed_something_blocks_the_commit(self):
+        self.rc = {"changed": "2"}
+        before = self.commits()
+        self.assertEqual(self.sites().create(**self.create_args(commit=True)), 0)
+        self.assertEqual(self.commits(), before); self.assertIn("the play's second run was not changed=0", self.text())
+
+    def test_commit_needs_the_run_and_is_refused_before_anything_is_written(self):
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().create(**self.create_args(commit=True, no_run=True))
+        self.assertIn("--commit needs the run", str(cm.exception))
+        for call in (self.sites().modify, self.sites().stop, self.sites().start):
+            with self.assertRaises(w.Refuse):
+                call("wptest", yes=True, no_run=True, commit=True)
+        self.assertEqual(self.vars.read_text(), self.original); self.assertEqual(self.calls, [])
+
+    def test_declining_or_a_failed_play_leaves_nothing_committed(self):
+        before = self.commits()
+        self.answers = ["n"]
+        self.assertEqual(self.sites().modify("wptest", sets=("update_policy=notify",), commit=True), 1)
+        self.rc = {"ansible-playbook": 4}
+        self.vars.write_text(self.original); self.assertEqual(self.sites().modify("wptest", sets=("update_policy=notify",), yes=True, commit=True), 4)
+        self.assertEqual(self.commits(), before)
+
+    def test_main_accepts_the_flag_and_the_help_explains_it(self):
+        import contextlib
+        import io
+        out = []
+        self.assertEqual(w.main(["modify", "wptest", "--set", "update_policy=notify", "--yes", "--commit"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append), 0)
+        self.assertEqual(self.head(), "ops(wp): modify site wptest: update_policy=notify")
+        for cmd in ("create", "modify", "stop", "start"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+                w.main([cmd, "--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
+            flat = " ".join(buf.getvalue().split())
+            self.assertIn("--commit", flat); self.assertIn("only that file", flat); self.assertIn("second run is changed=0", flat)
+
+    def test_it_commits_in_the_repo_the_script_is_run_against_not_somewhere_else(self):
+        before = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+        self.sites().modify("wptest", sets=("update_policy=notify",), yes=True, commit=True)
+        self.assertEqual(subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout, before, "the real repo was not touched by a test")
+
+
 class Surface(Base):
     def test_list_runs_the_status_command(self):
         self.assertEqual(self.sites().list(), 0); self.assertEqual(self.calls, [["python3", "scripts/wp_sites_status.py"]])
