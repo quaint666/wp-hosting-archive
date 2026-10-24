@@ -5,3 +5,8 @@ wp_nginx_listen_port: 8080
 # A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
 # tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
 wp_health_host: wp-healthz.internal
+# The data disk (declared as data_disk in host_vars/delloptiplex3040/vars.yml, formatted and mounted by tasks/wp_data_disk_common.yml). The device path is the one the
+# hypervisor gives scsi1 (stable across reboots, unlike /dev/sdb); the label names the filesystem; the mount point holds everything the sites own.
+wp_data_device: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
+wp_data_label: wpdata
+wp_data_mount: /srv/wp
