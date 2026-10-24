@@ -1,0 +1,64 @@
+---
+# tasks/wp_disk_check_common.yml
+# The WordPress disk alerts on dellwp: a script, a oneshot service (with the same OnFailure alert as the other WordPress jobs) and a ten-minute timer. No hosts:/become:;
+# included at the end of tasks/wp_sites_common.yml because it needs wp_sites_merged (each site's project id and quota). Vars: host_vars/dellwp/vars.yml (wp_disk_*, wp_data_*).
+# The older disk-check.timer watches `/` only; this watches the data mount and every site's project quota. Rehearse it by causing the condition:
+# scripts/wp_disk_alert_rehearsal_dellwp.sh. tests/test_monitoring_checks.py runs the rendered script against stand-ins for repquota, df and ntfy-notify.
+
+- name: Make the disk check state directory
+  ansible.builtin.file:
+    path: "{{ wp_disk_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy the WordPress disk check
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_disk_check.sh.j2"
+    dest: "{{ wp_tools_bin }}/wp-disk-check"
+    owner: root
+    group: root
+    mode: "0750"
+  vars:
+    wp_disk_sites: >-
+      {% for s in wp_sites_merged %}{{ s.name }}:{{ s.quota_id }}:{{ s.quota_mb }} backup-{{ s.name }}:{{ (s.quota_id | int) + (wp_backup_quota_offset | int) }}:{{ s.backup_quota_mb }}{{ ' ' if not loop.last }}{% endfor %}
+
+- name: Deploy the WordPress disk check service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-disk-check.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check the WordPress data disk and the sites' quotas
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-disk-check
+
+- name: Deploy the WordPress disk check timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-disk-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Run the WordPress disk check regularly
+
+      [Timer]
+      OnCalendar={{ wp_disk_calendar }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Reload systemd and enable the WordPress disk check timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-disk-check.timer
+    enabled: true
+    state: started

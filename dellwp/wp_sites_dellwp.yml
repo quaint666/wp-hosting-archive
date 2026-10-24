@@ -1,0 +1,34 @@
+---
+# dellwp/wp_sites_dellwp.yml
+# The WordPress sites on dellwp: for each entry of wp_sites (host_vars/dellwp/vars.yml) a directory with a project quota, a MariaDB and a php-fpm container under a
+# systemd unit, and an nginx vhost. The tasks and the reasons are in tasks/wp_sites_common.yml and tasks/wp_site_one_common.yml; the pins are vars/wp.yml. Run
+# dellwp/wp_data_disk_dellwp.yml and dellwp/nginx_base_dellwp.yml first. A new site starts on hold (only a local curl reaches it); state: live opens it.
+# Secrets: the database password and the salts of every site derive from dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml) and the site's secret_rev.
+
+- name: Deploy the WordPress sites on dellwp
+  hosts: dellwp
+  become: true
+
+  vars_files:
+    - ../vars/wp.yml
+
+  vars:
+    wp_master_secret: "{{ dellwp_wp_master_secret }}"
+    # templates/ at the repo root: template looks only next to the task file and the playbook, so the paths are explicit (the dellvms/ plays do the same).
+    shared_template_dir: "{{ playbook_dir }}/../templates"
+    wp_template_dir: "{{ shared_template_dir }}/wp"
+
+  tasks:
+    - name: Install the operator's tools (tasks/wp_tools_common.yml)
+      ansible.builtin.import_tasks: ../tasks/wp_tools_common.yml
+    - name: Apply the site engine (tasks/wp_sites_common.yml)
+      ansible.builtin.import_tasks: ../tasks/wp_sites_common.yml
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

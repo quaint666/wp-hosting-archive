@@ -1,0 +1,15 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_cron.sh.j2). Run one site's due WordPress cron events:   wp-site-cron <site>
+# Called every five minutes by wp-cron@<site>.timer (only while the site is live), because WordPress's own per-visit cron is switched off in wp-config.php. It runs through
+# wp-site-cli in user mode: plugin code (WooCommerce's scheduler, for one) runs as the web app, never as root. A frozen site is skipped and counts as success: freeze is a
+# decision, not a failure. A failure (no network, a crash, a timeout) fails the unit, and the unit's OnFailure= tells ntfy.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+{% raw %}
+[ "$#" -eq 1 ] || { echo "usage: wp-site-cron <site>" >&2; exit 2; }
+require_site "$1"
+for flag in "$WP_FREEZE" "$dir/freeze"; do
+  if [ -e "$flag" ]; then echo "wp-site-cron: $site is frozen ($flag exists); skipped"; exit 0; fi
+done
+exec "$WP_BIN/wp-site-cli" "$site" cron event run --due-now
+{% endraw %}

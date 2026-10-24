@@ -1,0 +1,34 @@
+---
+# tasks/wp_project_quota_common.yml
+# Put a directory in an ext4 project and give the project a hard block limit. No hosts:/become:; included with the vars it takes:
+#   wp_pq_path  the directory (it must exist and be empty or already in the project: files made below it inherit the id from the +P flag)
+#   wp_pq_id    the project id        wp_pq_mb   the hard limit in MB
+# Used for a site's directory and for its backup directory (tasks/wp_site_one_common.yml). Idempotent: it changes nothing when the id and the limit already match.
+# repquota prints "#<id> -- <used> <soft> <hard> <files> <soft> <hard>" in 1 KiB blocks, which is also setquota's unit.
+- name: Read the project id of {{ wp_pq_path }}
+  ansible.builtin.command:
+    cmd: lsattr -dp {{ wp_pq_path }}
+  register: wp_pq_lsattr
+  changed_when: false
+  check_mode: false
+
+- name: Put the directory in its project (inherited by everything made below it) {{ wp_pq_path }}
+  ansible.builtin.command:
+    cmd: chattr -R +P -p {{ wp_pq_id }} {{ wp_pq_path }}
+  when: (wp_pq_lsattr.stdout.split() | first | int) != (wp_pq_id | int)
+  changed_when: true
+
+- name: Read the project quotas
+  ansible.builtin.command:
+    cmd: repquota -P -n {{ wp_data_mount }}
+  register: wp_pq_repquota
+  changed_when: false
+  check_mode: false
+
+- name: Set the hard block limit of project {{ wp_pq_id }}
+  ansible.builtin.command:
+    cmd: setquota -P {{ wp_pq_id }} 0 {{ (wp_pq_mb | int) * 1024 }} 0 0 {{ wp_data_mount }}
+  when: >-
+    (wp_pq_repquota.stdout_lines | select('match', '^#' ~ wp_pq_id ~ '\s') | list | first | default('') | regex_findall('\S+'))[4] | default('-1') | int
+    != (wp_pq_mb | int) * 1024
+  changed_when: true

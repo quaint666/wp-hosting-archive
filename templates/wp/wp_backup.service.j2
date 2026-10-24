@@ -1,0 +1,12 @@
+# Managed by Ansible (templates/wp/wp_backup.service.j2). One instance per site: wp-backup@<site>.service, started by wp-backup@<site>.timer.
+[Unit]
+Description=Nightly backup of WordPress site %i
+After=docker.service wp-%i.service
+OnFailure=wp-job-failed@%N.service
+
+[Service]
+Type=oneshot
+ExecStart={{ wp_tools_bin }}/wp-site-backup %i
+TimeoutStartSec={{ wp_backup_timeout_s }}
+Nice=10
+IOSchedulingClass=idle

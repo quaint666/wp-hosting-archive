@@ -1,0 +1,79 @@
+---
+# tasks/wp_data_disk_common.yml
+# The data disk of the WordPress VM: an ext4 filesystem with project quotas, mounted at wp_data_mount. No hosts:/become: here; imported via import_tasks into the thin
+# wrapper (dellwp/wp_data_disk_dellwp.yml). Vars (host_vars/dellwp/vars.yml): wp_data_device, wp_data_label, wp_data_mount. The disk itself is declared on the Proxmox
+# side (data_disk in host_vars/delloptiplex3040/vars.yml, tasks/proxmox_vms_common.yml).
+#
+# Project quotas are how a site is capped (docs/handoff_wp_hosting_temp.md section 10): every site's directory gets a project id and a hard block limit, so a runaway
+# site fills its own quota, not the disk. The filesystem is made with the `project` and `quota` features and `quotatype=prjquota`; the mount option `prjquota` turns
+# enforcement on. Directories below the mount point are plain here; the site engine gives each one its project id and limit.
+#
+# Safe to re-run: the filesystem module never reformats a device that already holds the declared type, and resizefs grows it when the disk was grown on the Proxmox
+# side (online; ext4 only grows). The play stops, before touching anything, if the device is not there: a wrong path must not format some other disk.
+# Check mode cannot show the format, the mount or the quota state: the device and the tools may not exist yet.
+
+- name: Look for the data disk
+  ansible.builtin.stat:
+    path: "{{ wp_data_device }}"
+  register: wp_data_dev
+
+- name: Stop if the data disk is not there
+  ansible.builtin.assert:
+    that: wp_data_dev.stat.exists
+    fail_msg: >-
+      {{ wp_data_device }} does not exist. Run delloptiplex3040/proxmox_vms_delloptiplex3040.yml first (it adds scsi1), then look at the names under
+      /dev/disk/by-id on the VM and fix wp_data_device in host_vars/dellwp/vars.yml. Nothing was formatted.
+    quiet: true
+
+- name: Install the quota tools
+  ansible.builtin.apt:
+    name: quota
+    state: present
+
+# -E quotatype=prjquota creates the project quota inode at mkfs time, so no quotacheck pass or quota file is ever needed.
+- name: Make the filesystem (only when the disk is empty) and grow it to the disk
+  community.general.filesystem:
+    dev: "{{ wp_data_device }}"
+    fstype: ext4
+    opts: "-L {{ wp_data_label }} -O quota,project -E quotatype=prjquota"
+    resizefs: true
+
+- name: Mount the data disk with project quotas on
+  ansible.posix.mount:
+    path: "{{ wp_data_mount }}"
+    src: "LABEL={{ wp_data_label }}"
+    fstype: ext4
+    opts: defaults,nofail,prjquota
+    state: mounted
+
+- name: Read the mount options in effect
+  ansible.builtin.command:
+    cmd: findmnt --noheadings --output OPTIONS --target {{ wp_data_mount }}
+  register: wp_data_mount_opts
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Stop if project quotas are not on
+  ansible.builtin.assert:
+    that: "'prjquota' in wp_data_mount_opts.stdout"
+    fail_msg: >-
+      {{ wp_data_mount }} is mounted without prjquota (options: {{ wp_data_mount_opts.stdout }}). A site's quota would not be enforced. Unmount it and run again,
+      or remount with `mount -o remount,prjquota {{ wp_data_mount }}`.
+    quiet: true
+  when: not ansible_check_mode
+
+# Root-only at the top: the sites' own directories are made by the site engine with the owners their containers need.
+- name: Make the top-level directories
+  ansible.builtin.file:
+    path: "{{ wp_data_mount }}/{{ item.name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: sites, mode: "0755" }
+    - { name: backups, mode: "0700" }
+    - { name: intake, mode: "0700" }
+    - { name: scratch, mode: "0700" }
+  loop_control:
+    label: "{{ item.name }}"

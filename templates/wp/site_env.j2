@@ -1,0 +1,7 @@
+# Managed by Ansible (templates/wp/site_env.j2). Read by compose for the db container only; mode 0600.
+MARIADB_DATABASE=wordpress
+MARIADB_USER=wp
+MARIADB_PASSWORD={{ wp_db_password }}
+MARIADB_RANDOM_ROOT_PASSWORD=1
+# The image logs the generated root password; root may connect from localhost only, so the logged value is useless from the php container.
+MARIADB_ROOT_HOST=localhost

@@ -1,0 +1,77 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_cli.sh.j2). Run WP-CLI against one site in a throwaway container:
+#   wp-site-cli <site> [--code] [--stdin] <wp arguments...>        e.g.  wp-site-cli wptest core version
+# Default: the container runs as the php uid (the web app's own power): the code is mounted read-only, only uploads and the database are writable.
+# --code: the container runs as root with NO capabilities and the code writable, for the commands that change code. That is a policy as well as a privilege: only core
+#   updates and plugin and theme install, update, delete and read-only listings are allowed, and every argument must be a wordpress.org slug or one of a few flags. A URL, a
+#   zip file, --activate, --force, --require, eval, shell or db is refused, so nothing but wordpress.org code reaches the site this way and no PHP of anyone's runs as root.
+#   It adds --skip-plugins --skip-themes because wp loads every active plugin on every command. wp-site-ext is the normal way to use this; run it yourself only to read.
+# Standard input is NOT forwarded unless you pass --stdin (or it is a terminal): a script or a timer that calls this tool must not have its own input swallowed by the
+# container (an `ssh host 'bash -s' <<EOF` script lost every line after the first call, 2026-10-24). wp-site-install passes --stdin to hand over a password.
+# Either way: only this site's network (not another site's database), no Docker socket, read-only root, memory equal to swap, pids and CPU limits.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+readonly WP_IMAGE='{{ wp_image_cli }}'
+readonly PHP_UID='{{ wp_php_uid }}'
+readonly CLI_MEM='{{ wp_cli_mem_mb }}'
+readonly CLI_CPUS='{{ wp_cli_cpus }}'
+readonly CLI_PIDS='{{ wp_cli_pids }}'
+{% raw %}
+[ "$#" -ge 2 ] || { echo "usage: wp-site-cli <site> [--code] [--stdin] <wp arguments...>" >&2; exit 2; }
+
+# The --code allowlist. "$@" is the wp command line. Slugs are what wordpress.org uses (lower case letters, digits, hyphens): no dots, so no file name, and no slash or
+# colon, so no path and no URL. Flags are a closed list; a value may hold digits, letters and . , + _ - only.
+code_allowed() {
+  local cmd=${1:-} sub=${2:-} a
+  case "$cmd $sub" in
+    "core update"|"core check-update"|"core version"|"core verify-checksums") ;;
+    "plugin install"|"plugin update"|"plugin delete"|"plugin list"|"plugin get"|"plugin status"|"plugin is-installed"|"plugin verify-checksums") ;;
+    "theme install"|"theme update"|"theme delete"|"theme list"|"theme get"|"theme status"|"theme is-installed") ;;
+    *) die "'$cmd $sub' is not allowed with --code (it runs as root). Run it without --code, as the web app's identity, or use wp-site-ext to install, update or remove plugins and themes." ;;
+  esac
+  for a in "${@:3}"; do
+    case $a in
+      --version=*|--format=*|--field=*|--fields=*|--status=*) [[ ${a#*=} =~ ^[A-Za-z0-9._,+-]+$ ]] || die "the value in '$a' has characters that are not allowed with --code" ;;
+      --minor|--patch|--all|--dry-run) ;;
+      -*) die "'$a' is not allowed with --code" ;;
+      *) [[ $a =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$a' is not a wordpress.org slug; --code installs and updates from wordpress.org by slug only" ;;
+    esac
+  done
+}
+require_site "$1"; shift
+mode=user; stdin=no
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --code) mode=code; shift ;;
+    --stdin) stdin=yes; shift ;;
+    *) break ;;
+  esac
+done
+[ "$#" -ge 1 ] || die "nothing to run"
+[ "$mode" != code ] || code_allowed "$@"
+[ -f "$dir/wp-config.php" ] || die "$dir/wp-config.php is missing (run dellwp/wp_sites_dellwp.yml)"
+docker network inspect "wp-${site}_default" >/dev/null 2>&1 || die "the site's network wp-${site}_default does not exist (is wp-$site.service running?)"
+
+args=(docker run --rm --name "wpcli_${site}_$$" --network "wp-${site}_default"
+  --entrypoint wp --workdir /var/www/html
+  --read-only --tmpfs /tmp:size=128m,mode=1777
+  --cap-drop ALL --security-opt no-new-privileges:true
+  --memory "${CLI_MEM}m" --memory-swap "${CLI_MEM}m" --cpus "$CLI_CPUS" --pids-limit "$CLI_PIDS"
+  -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache)
+[ "$stdin" = yes ] || [ -t 0 ] && args+=(-i)
+[ -t 0 ] && [ -t 1 ] && args+=(-t)
+extra=()
+if [ "$mode" = code ]; then
+  args+=(--user 0:0 -v "$dir/html:/var/www/html")
+  extra+=(--allow-root)
+  extra+=(--skip-plugins --skip-themes)
+else
+  args+=(--user "$PHP_UID:$PHP_UID" -v "$dir/html:/var/www/html:ro" -v "$dir/html/wp-content/uploads:/var/www/html/wp-content/uploads")
+fi
+args+=(-v "$dir/wp-config.php:/var/www/html/wp-config.php:ro" "$WP_IMAGE")
+
+# One line in the journal per call. --code lines carry the whole command (every word was checked above, none can be a secret); the others only the first two words.
+if [ "$mode" = code ]; then said="$*"; else said="$1${2:+ $2}"; fi
+command -v logger >/dev/null && logger -t wp-site-cli -- "site=$site mode=$mode cmd=$said" || true
+exec "${args[@]}" "$@" "${extra[@]}"
+{% endraw %}

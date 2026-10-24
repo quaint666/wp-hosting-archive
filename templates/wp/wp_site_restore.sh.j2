@@ -1,0 +1,107 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_restore.sh.j2). Prove that a backup restores:   wp-site-restore <site> [<stamp>|latest] [--notify]
+# A restore DRILL, not a restore: it never touches the site. It restores the snapshot into a scratch copy under {{ wp_data_mount }}/scratch (own quota project {{ wp_scratch_quota_id }}, {{ wp_scratch_quota_mb }} MB,
+# one drill at a time) with a throwaway MariaDB: the dump is loaded, wp-content is copied over a fresh WordPress core from the image, and WP-CLI (as the web app, never root)
+# boots WordPress against them, then reports the site URL and the numbers of users, posts and active plugins next to the live site's. Everything it made is removed on every
+# exit path. A backup that has only ever been written is not a backup; this is what makes it one. With --notify the result goes to ntfy. An in-place restore of a real site is a
+# different and more dangerous script and is not this one.
+set -eEu -o pipefail
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+readonly MOUNT='{{ wp_data_mount }}'
+readonly SCRATCH_BASE='{{ wp_data_mount }}/scratch'
+readonly SCRATCH_ID='{{ wp_scratch_quota_id }}'
+readonly SCRATCH_MB='{{ wp_scratch_quota_mb }}'
+readonly IMG_DB='{{ wp_image_db }}'
+readonly IMG_PHP='{{ wp_image_php }}'
+readonly IMG_CLI='{{ wp_image_cli }}'
+readonly PHP_UID='{{ wp_php_uid }}'
+readonly DB_UID='{{ wp_db_uid }}'
+readonly DB_MEM='{{ wp_restore_db_mem_mb }}'
+readonly BUFFER='{{ wp_restore_db_buffer_pool_mb }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST='{{ inventory_hostname }}'
+{% raw %}
+usage() { echo "usage: wp-site-restore <site> [<stamp>|latest] [--notify]" >&2; exit 2; }
+[ "$#" -ge 1 ] || usage
+require_site "$1"; shift
+stamp=latest; notify=no
+for a in "$@"; do
+  case $a in
+    --notify) notify=yes ;;
+    latest) stamp=latest ;;
+    *) [[ $a =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || usage; stamp=$a ;;
+  esac
+done
+if [ "$stamp" = latest ]; then
+  stamp=$(find "$BACKUPS/$site" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' 2>/dev/null | LC_ALL=C sort | tail -n 1)
+  [ -n "$stamp" ] || die "there is no snapshot of $site under $BACKUPS/$site"
+fi
+src=$BACKUPS/$site/$stamp
+[ -f "$src/db.sql.gz" ] && [ -d "$src/files" ] || die "$src is not a complete snapshot"
+scratch=$SCRATCH_BASE/restore-$site
+case "$scratch" in "$SCRATCH_BASE"/restore-*) ;; *) die "refusing the scratch path $scratch" ;; esac
+[ ! -e "$scratch" ] || die "$scratch exists: another drill is running, or one died. Look at it, then remove it by hand"
+net=wprestore_${site//-/_}; sdb=${net}_db
+started=$(date +%s); FAILED=""; summary=""
+
+finish() {
+  local rc=$?
+  docker rm -f "$sdb" >/dev/null 2>&1 </dev/null || true
+  docker network rm "$net" >/dev/null 2>&1 </dev/null || true
+  setquota -P "$SCRATCH_ID" 0 0 0 0 "$MOUNT" 2>/dev/null || true
+  rm -rf -- "$scratch"
+  secs=$(( $(date +%s) - started ))
+  if [ "$rc" = 0 ]; then msg="restore drill of $site from $stamp: OK ($summary) in ${secs}s"; else msg="restore drill of $site from $stamp FAILED: ${FAILED:-unexpected error} (after ${secs}s)"; fi
+  echo "$msg"
+  [ "$notify" = yes ] && ntfy-notify "$TOPIC" "$HOST $msg"
+  exit "$rc"
+}
+trap 'FAILED="${FAILED:-unexpected error at line $LINENO}"' ERR
+trap finish EXIT
+need() { FAILED=$1; }
+
+need "could not make the scratch directory and its quota"
+mkdir -p "$scratch/db" "$scratch/html"
+chattr +P -p "$SCRATCH_ID" "$scratch"
+setquota -P "$SCRATCH_ID" 0 $((SCRATCH_MB * 1024)) 0 0 "$MOUNT"
+chown "$DB_UID:$DB_UID" "$scratch/db"; chmod 700 "$scratch/db"
+docker network create "$net" >/dev/null
+
+need "could not seed WordPress core from the image"
+docker run --rm --memory 256m --memory-swap 256m --entrypoint sh -v "$scratch/html:/var/www/html" "$IMG_PHP" -c 'cp -a /usr/src/wordpress/. /var/www/html/ && rm -rf /var/www/html/wp-content && touch /var/www/html/wp-config.php' </dev/null
+need "could not copy the snapshot's wp-content"
+cp -a "$src/files" "$scratch/html/wp-content"
+
+need "the scratch database did not start"
+docker run -d --name "$sdb" --network "$net" --network-alias db --user "$DB_UID:$DB_UID" --cap-drop ALL --security-opt no-new-privileges:true \
+  --memory "${DB_MEM}m" --memory-swap "${DB_MEM}m" --env-file "$dir/.env" -v "$scratch/db:/var/lib/mysql" "$IMG_DB" \
+  --performance-schema=OFF "--innodb-buffer-pool-size=${BUFFER}M" --local-infile=0 --skip-name-resolve --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci </dev/null >/dev/null
+up=no
+for _ in $(seq 1 45); do
+  if docker exec "$sdb" healthcheck.sh --connect --innodb_initialized </dev/null >/dev/null 2>&1; then up=yes; break; fi
+  sleep 2
+done
+[ "$up" = yes ] || die "the scratch database never became healthy"
+
+need "the dump did not load"
+gzip -dc "$src/db.sql.gz" | docker exec -i "$sdb" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" "$MARIADB_DATABASE"'
+
+# WP-CLI as the web app against the restored files and database; read-only code, no capabilities, only the scratch network
+wpq() {
+  docker run --rm --network "$net" --user "$PHP_UID:$PHP_UID" --read-only --tmpfs /tmp:size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+    --memory 384m --memory-swap 384m -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache --workdir /var/www/html --entrypoint wp \
+    -v "$scratch/html:/var/www/html:ro" -v "$dir/wp-config.php:/var/www/html/wp-config.php:ro" "$IMG_CLI" "$@" </dev/null
+}
+need "WordPress does not boot on the restored database and files"
+wpq core is-installed
+need "WP-CLI could not read the restored site"
+url=$(wpq option get siteurl); users=$(wpq user list --format=count); posts=$(wpq post list --post_type=any --post_status=any --format=count); plugins=$(wpq plugin list --status=active --format=count)
+live_users=$("$WP_BIN/wp-site-cli" "$site" user list --format=count 2>/dev/null || echo "?")
+live_posts=$("$WP_BIN/wp-site-cli" "$site" post list --post_type=any --post_status=any --format=count 2>/dev/null || echo "?")
+live_plugins=$("$WP_BIN/wp-site-cli" "$site" plugin list --status=active --format=count 2>/dev/null || echo "?")
+need "the restored site has no users: the dump is empty of content"
+[ "$users" -ge 1 ]
+summary="$url; users $users (live $live_users), posts $posts (live $live_posts), active plugins $plugins (live $live_plugins)"
+FAILED=""
+{% endraw %}

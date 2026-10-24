@@ -14,8 +14,13 @@
     - name: Deploy the nginx base (tasks/wp_nginx_base_common.yml)
       ansible.builtin.import_tasks: ../tasks/wp_nginx_base_common.yml
 
+  # "Reload nginx" is notified by tasks/nginx_setup_common.yml; the base notifies "Restart nginx" (why: tasks/wp_nginx_base_common.yml). Both are needed.
   handlers:
     - name: Reload nginx
       ansible.builtin.systemd:
         name: nginx
         state: reloaded
+    - name: Restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted

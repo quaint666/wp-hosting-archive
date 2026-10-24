@@ -1,0 +1,156 @@
+---
+# tasks/wp_tools_common.yml
+# The operator's tools on dellwp: wp-site-cli (WP-CLI in a throwaway container), wp-site-ext (plugins and themes, wordpress.org only), wp-site-install and wp-site-login-check, with the library they share. No hosts:/become: and no
+# handlers; imported via import_tasks into dellwp/wp_sites_dellwp.yml, which sets wp_template_dir. The scripts are rendered from templates/wp/ so the image pin, the site list,
+# the paths and the limits come from the variables and exist in one place. Root-only (0750 root:root): no sudoers entry, no setuid. The site names are the allowlist, so
+# adding a site means running this play again before the tools accept it. tests/test_wp_tools.py runs the rendered scripts against stand-ins for docker and curl.
+# Check mode cannot show: the image pull, or whether a tool works once installed.
+
+- name: Pull the WP-CLI image
+  community.docker.docker_image_pull:
+    name: "{{ wp_image_cli }}"
+    pull: not_present
+
+- name: Make the tools library directory
+  ansible.builtin.file:
+    path: "{{ wp_tools_lib }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy the tools library
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_tools_common.sh.j2"
+    dest: "{{ wp_tools_lib }}/common.sh"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy the tools
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "{{ wp_tools_bin }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
+    - { src: wp_site_install.sh.j2, dest: wp-site-install }
+    - { src: wp_site_ext.sh.j2, dest: wp-site-ext }
+    - { src: wp_site_login_check.sh.j2, dest: wp-site-login-check }
+    - { src: wp_site_cron.sh.j2, dest: wp-site-cron }
+    - { src: wp_site_backup.sh.j2, dest: wp-site-backup }
+    - { src: wp_site_restore.sh.j2, dest: wp-site-restore }
+    - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
+    - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
+  loop_control:
+    label: "{{ item.dest }}"
+
+# The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
+# ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
+- name: Deploy the WordPress job units
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: wp_cron.service.j2, dest: "wp-cron@.service" }
+    - { src: wp_cron.timer.j2, dest: "wp-cron@.timer" }
+    - { src: wp_job_failed.service.j2, dest: "wp-job-failed@.service" }
+    - { src: wp_backup.service.j2, dest: "wp-backup@.service" }
+    - { src: wp_backup.timer.j2, dest: "wp-backup@.timer" }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Reload systemd
+
+# The site tasks enable timers next, and systemd must know the units first.
+- name: Reload systemd now if a unit changed
+  ansible.builtin.meta: flush_handlers
+
+# One check for all sites, not an instance per site: is every site still being backed up? (templates/wp/wp_backup_check.sh.j2)
+- name: Deploy the backup freshness check service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-backup-check.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check that every WordPress site has a recent backup
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-backup-check
+
+- name: Deploy the backup freshness check timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-backup-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Check the WordPress backups are recent
+
+      [Timer]
+      OnCalendar={{ wp_backup_check_calendar }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the backup freshness check timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-backup-check.timer
+    enabled: true
+    state: started
+
+# The monthly restore drill: one random site with a good backup, restored into scratch and booted, the result sent to ntfy (templates/wp/wp_restore_drill.sh.j2).
+- name: Deploy the monthly restore drill service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-restore-drill.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Monthly WordPress restore drill (one random site, restored into scratch)
+      After=docker.service
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-restore-drill
+      TimeoutStartSec={{ wp_drill_timeout_s }}
+      Nice=10
+      IOSchedulingClass=idle
+
+- name: Deploy the monthly restore drill timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-restore-drill.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Monthly WordPress restore drill
+
+      [Timer]
+      OnCalendar={{ wp_drill_calendar }}
+      RandomizedDelaySec={{ wp_backup_jitter_s }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the monthly restore drill timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-restore-drill.timer
+    enabled: true
+    state: started

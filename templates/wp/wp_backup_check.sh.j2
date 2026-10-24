@@ -1,0 +1,37 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_backup_check.sh.j2). Every hour: is every site still being backed up? A backup job that fails tells ntfy through OnFailure=, but a timer
+# that silently stops firing tells nobody, and the first sign would be the day a restore is needed. A site is stale when its newest good backup (.last-success) is
+# {{ wp_backup_stale_hours }} hours old or more; a site that has never been backed up is stale once it is that old itself. Told once when it starts and once when it ends.
+# A FROZEN site (the global freeze file or its own) is skipped: its backups are paused on purpose, so "stale" would be noise. It is judged again once unfrozen, which can raise one alert
+# before the next night's backup after a long freeze. WP_BACKUP_STALE_HOURS in the environment replaces the limit (the rehearsal uses 0 to make every site stale at once).
+set -u
+. {{ wp_tools_lib }}/common.sh
+readonly BACKUPS='{{ wp_backup_dir }}'
+readonly STATE_DIR='{{ wp_disk_state_dir }}'
+readonly TOPIC='{{ wp_ntfy_topic }}'
+readonly HOST='{{ inventory_hostname }}'
+readonly STALE_HOURS="${WP_BACKUP_STALE_HOURS:-{{ wp_backup_stale_hours }}}"
+{% raw %}
+notify() { ntfy-notify "$TOPIC" "$HOST $1"; }
+mkdir -p "$STATE_DIR"
+now=$(date +%s)
+for site in $WP_SITES; do
+  [[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || continue
+  if [ -e "$WP_FREEZE" ] || [ -e "$WP_DATA/$site/freeze" ]; then continue; fi
+  f="$STATE_DIR/backup-stale-$site.flag"
+  ok="$BACKUPS/$site/.last-success"
+  if [ -f "$ok" ]; then
+    age=$(( (now - $(stat -c %Y "$ok")) / 3600 )); last=$(cat "$ok")
+  elif [ -d "$WP_DATA/$site" ]; then
+    age=$(( (now - $(stat -c %Y "$WP_DATA/$site")) / 3600 )); last=never
+  else
+    continue
+  fi
+  if [ "$age" -ge "$STALE_HOURS" ]; then
+    [ -f "$f" ] || { notify "site $site has no backup newer than ${STALE_HOURS} hours (last good: $last, ${age} hours ago): the nightly job is not producing backups"; touch "$f"; }
+  elif [ -f "$f" ]; then
+    notify "site $site has a fresh backup again ($last)"; rm -f "$f"
+  fi
+done
+exit 0
+{% endraw %}

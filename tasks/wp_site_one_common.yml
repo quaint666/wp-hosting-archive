@@ -1,0 +1,268 @@
+---
+# tasks/wp_site_one_common.yml
+# One WordPress site on dellwp; included by tasks/wp_sites_common.yml with wp_s = the site merged over wp_site_defaults. No hosts:/become:. The layout under
+# {{ wp_data_mount }}/sites/<name>/:
+#   html/            WordPress core, plugins, themes (root-owned, read-only to PHP); html/wp-content/uploads is the one directory PHP may write
+#   db/              the MariaDB data directory (owned by the image's mysql uid)
+#   wp-config.php    rendered here, mounted read-only into the php container; .env (database password, 0600); compose.yml, php.ini, fpm-pool.conf
+# The whole directory is one ext4 project (wp_s.quota_id) with a hard limit of quota_mb, so a runaway site fills its own quota. Core comes from the image once
+# (the seed); after that it changes only through WP-CLI. The configs are rendered from templates/wp/; the secrets derive from the master secret.
+
+- name: Note the names and paths of this site
+  ansible.builtin.set_fact:
+    wp_host: "{{ wp_s.name }}.{{ wp_domain }}"
+    wp_site_dir: "{{ wp_data_mount }}/sites/{{ wp_s.name }}"
+    wp_secret_base: "{{ wp_master_secret ~ '|' ~ wp_s.name ~ '|' ~ wp_s.secret_rev }}"
+  no_log: true
+
+- name: Derive this site's database password
+  ansible.builtin.set_fact:
+    wp_db_password: "{{ (wp_secret_base ~ '|db') | hash('sha256') }}"
+  no_log: true
+
+- name: Make the site directory
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Before anything is written below it: files and directories made later inherit the project id from the +P flag.
+- name: Put the site in its quota project (tasks/wp_project_quota_common.yml)
+  ansible.builtin.include_tasks: wp_project_quota_common.yml
+  vars:
+    wp_pq_path: "{{ wp_site_dir }}"
+    wp_pq_id: "{{ wp_s.quota_id }}"
+    wp_pq_mb: "{{ wp_s.quota_mb }}"
+
+# The backups have a project and a limit of their own, so a site that fills its quota cannot starve its backups and a runaway backup cannot starve the site. Hard links
+# between snapshots stay inside this project; the first snapshot is a real copy because a hard link across projects is refused (the verifier proves that).
+- name: Make the site's backup directory
+  ansible.builtin.file:
+    path: "{{ wp_backup_dir }}/{{ wp_s.name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Put the backups in their own quota project (tasks/wp_project_quota_common.yml)
+  ansible.builtin.include_tasks: wp_project_quota_common.yml
+  vars:
+    wp_pq_path: "{{ wp_backup_dir }}/{{ wp_s.name }}"
+    wp_pq_id: "{{ (wp_s.quota_id | int) + (wp_backup_quota_offset | int) }}"
+    wp_pq_mb: "{{ wp_s.backup_quota_mb }}"
+
+- name: Make the database directory
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/db"
+    state: directory
+    owner: "{{ wp_db_uid }}"
+    group: "{{ wp_db_uid }}"
+    mode: "0700"
+
+# Ownership only, no mode: with `recurse` the module would apply a mode to every data file too (mariadbd keeps its own at 0660). A change of wp_db_uid must reach the
+# files already in the directory, or mariadbd starts as the new uid and gets "Permission denied" on its own data (seen 2026-10-24).
+- name: Give the files in the database directory to the db uid
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/db"
+    state: directory
+    owner: "{{ wp_db_uid }}"
+    group: "{{ wp_db_uid }}"
+    recurse: true
+
+# One-shot, as root, only while core is missing. Copies core from the image, makes the code root-owned, the uploads directory the php uid's, and an empty
+# wp-config.php to be the mount point of the real one (Docker cannot create a mount point inside a read-only mount).
+- name: Seed WordPress core from the image (once)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --memory
+      - 256m
+      - --memory-swap
+      - 256m
+      - --entrypoint
+      - sh
+      - -v
+      - "{{ wp_site_dir }}/html:/var/www/html"
+      - "{{ wp_image_php }}"
+      - -c
+      - >-
+        cp -a /usr/src/wordpress/. /var/www/html/ &&
+        chown -R 0:0 /var/www/html &&
+        mkdir -p /var/www/html/wp-content/uploads &&
+        chown {{ wp_php_uid }}:{{ wp_php_uid }} /var/www/html/wp-content/uploads &&
+        touch /var/www/html/wp-config.php &&
+        chmod 0644 /var/www/html/wp-config.php
+    creates: "{{ wp_site_dir }}/html/wp-includes/version.php"
+
+# The image's own config template, copied by the seed: unused (our wp-config.php is mounted over the placeholder), PHP in the docroot nobody asked for, and the one file
+# `wp core verify-checksums` warns about. A separate task so it also heals a site seeded before this existed (wptest, 2026-10-24).
+- name: Remove the image's wp-config-docker.php from the docroot
+  ansible.builtin.file:
+    path: "{{ wp_site_dir }}/html/wp-config-docker.php"
+    state: absent
+
+- name: Deploy the database environment file
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/site_env.j2"
+    dest: "{{ wp_site_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  register: wp_site_env
+  no_log: true
+  diff: false
+
+- name: Deploy wp-config.php
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/site_wp-config.php.j2"
+    dest: "{{ wp_site_dir }}/wp-config.php"
+    owner: root
+    group: "{{ wp_php_uid }}"
+    mode: "0640"
+  register: wp_site_wpconfig
+  no_log: true
+  diff: false
+
+- name: Deploy the php settings, the pool and the compose file
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/{{ item.src }}"
+    dest: "{{ wp_site_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: site_php.ini.j2, dest: php.ini }
+    - { src: site_fpm_pool.conf.j2, dest: fpm-pool.conf }
+    - { src: site_compose.yml.j2, dest: compose.yml }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: wp_site_files
+
+- name: Pull the images ahead of the first start
+  community.docker.docker_image_pull:
+    name: "{{ item }}"
+    pull: not_present
+  loop:
+    - "{{ wp_image_php }}"
+    - "{{ wp_image_db }}"
+
+# The shared unit for a Compose stack (templates/compose_stack.service.j2): systemd, not Ansible, owns the stack from here on.
+- name: Deploy the site's systemd unit
+  ansible.builtin.template:
+    src: "{{ shared_template_dir }}/compose_stack.service.j2"
+    dest: /etc/systemd/system/wp-{{ wp_s.name }}.service
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    compose_stack_description: "WordPress site {{ wp_s.name }}"
+    compose_stack_dir: "{{ wp_site_dir }}"
+    compose_stack_start_timeout_s: "{{ wp_stack_start_timeout_s }}"
+    compose_stack_stop_timeout_s: "{{ wp_stack_stop_timeout_s }}"
+    compose_stack_reload_service: php
+
+- name: Enable the site's unit
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    daemon_reload: true
+    enabled: true
+
+# What changed decides what the unit does. A change to compose.yml (images, limits, ports) or to .env (the database's settings) restarts the whole stack: the database
+# container is recreated too. A change only to wp-config.php, php.ini or the pool touches the php container alone: `systemctl reload` recreates just that one (a mounted file
+# is read when its container starts). Nothing changed: start, which is a no-op on a running stack. Check mode shows none of this.
+- name: Work out whether the stack needs a restart or only a php reload
+  ansible.builtin.set_fact:
+    wp_site_restart: >-
+      {{ wp_site_env.changed
+         or (wp_site_files.results | selectattr('item.dest', 'eq', 'compose.yml') | selectattr('changed') | list | length) > 0 }}
+    wp_site_php_changed: >-
+      {{ wp_site_wpconfig.changed
+         or (wp_site_files.results | rejectattr('item.dest', 'eq', 'compose.yml') | selectattr('changed') | list | length) > 0 }}
+
+- name: Start the site, or restart it when its compose file or database settings changed
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    state: "{{ 'restarted' if wp_site_restart | bool else 'started' }}"
+
+- name: Recreate only the php container when only its mounted files changed
+  ansible.builtin.systemd:
+    name: wp-{{ wp_s.name }}
+    state: reloaded
+  when:
+    - wp_site_php_changed | bool
+    - not (wp_site_restart | bool)
+
+- name: Deploy and validate the site's nginx vhost
+  block:
+    - name: Deploy the vhost
+      ansible.builtin.template:
+        src: "{{ wp_template_dir }}/site_nginx.conf.j2"
+        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: wp_site_vhost
+      notify: Reload nginx
+
+    - name: Validate the nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      check_mode: false
+  rescue:
+    - name: Restore the previous vhost
+      ansible.builtin.copy:
+        src: "{{ wp_site_vhost.backup_file }}"
+        dest: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        mode: "0644"
+        remote_src: true
+      when: (wp_site_vhost | default({})).backup_file is defined
+
+    - name: Remove a first-ever vhost that failed validation
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/wp_site_{{ wp_s.name }}.conf
+        state: absent
+      when:
+        - (wp_site_vhost | default({})).changed | default(false)
+        - (wp_site_vhost | default({})).backup_file is not defined
+
+    - name: Fail after restoring the previous vhost
+      ansible.builtin.fail:
+        msg: The new vhost for {{ wp_s.name }} failed validation; the previous one was restored and nginx was not reloaded.
+
+# The probe below goes through nginx, so the reload ("Reload nginx" in the wrapper) must have happened by then.
+- name: Reload nginx now if the vhost changed
+  ansible.builtin.meta: flush_handlers
+
+# The installer page is served by php through the whole path (nginx, FastCGI, the container, the database connection check). A local request keeps 127.0.0.1,
+# so a site on hold answers it. Not a proof of the public path: that is the first request through the tunnel, once the site is live.
+- name: Check that the site answers through nginx and php
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ wp_nginx_listen_port }}/wp-admin/install.php"
+    headers:
+      Host: "{{ wp_host }}"
+    timeout: 10
+  register: wp_site_probe
+  retries: 6
+  delay: 5
+  until: wp_site_probe.status is defined and wp_site_probe.status == 200
+  when: not ansible_check_mode
+
+# WordPress's own per-visit cron is off (wp-config.php), so this timer is what runs scheduled posts, updates checks and WooCommerce's scheduler. It starts at go-live and
+# stops when the site goes back on hold. The unit runs the same script by hand any time: systemctl start wp-cron@<site>.service.
+- name: Run the site's cron every few minutes while it is live, not while it is on hold
+  ansible.builtin.systemd:
+    name: "wp-cron@{{ wp_s.name }}.timer"
+    enabled: "{{ wp_s.state == 'live' }}"
+    state: "{{ 'started' if wp_s.state == 'live' else 'stopped' }}"
+
+# Every site is backed up every night, hold or live (a held site is often the one carrying freshly imported data). The job is wp-site-backup; the timer has no state condition.
+- name: Back the site up every night, whether it is on hold or live
+  ansible.builtin.systemd:
+    name: "wp-backup@{{ wp_s.name }}.timer"
+    enabled: true
+    state: started

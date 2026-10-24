@@ -1,0 +1,13 @@
+---
+# dellwp/wp_data_disk_dellwp.yml
+# The data disk of the WordPress VM: an ext4 filesystem with project quotas at /srv/wp, holding the sites, their backups, intake and scratch. The tasks and the reasons
+# are in tasks/wp_data_disk_common.yml; the disk is declared in host_vars/delloptiplex3040/vars.yml (data_disk) and added by
+# delloptiplex3040/proxmox_vms_delloptiplex3040.yml, which must run first. Re-run it after growing data_disk: it grows the filesystem.
+
+- name: Format and mount the WordPress data disk on dellwp
+  hosts: dellwp
+  become: true
+
+  tasks:
+    - name: Apply the data disk tasks (tasks/wp_data_disk_common.yml)
+      ansible.builtin.import_tasks: ../tasks/wp_data_disk_common.yml
