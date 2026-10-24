@@ -9,6 +9,7 @@ it catches a broken template, a wrong expression and a limit that no longer fits
 import copy
 import hashlib
 import random
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +22,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def load(path):
     return yaml.safe_load((ROOT / path).read_text())
+
+
+# The suites must not depend on which sites the repo happens to declare: sites come and go (a deleted site stays as a closed tombstone, and one day every real site may be closed). Everything
+# here is the real variables EXCEPT wp_sites, which is one fixed live site. The one test that must look at the real list (it has to fit the rules of the play) asks for it by name.
+FIXTURE_SITE = {"name": "wptest", "port": 9101, "quota_id": 1001, "state": "live", "update_policy": "auto"}
+
+
+def fixture_vars_text():
+    """host_vars/dellwp/vars.yml with its wp_sites list replaced by FIXTURE_SITE, comments and every other variable untouched."""
+    lines = (ROOT / "host_vars/dellwp/vars.yml").read_text().split("\n")
+    top = next(i for i, l in enumerate(lines) if re.match(r"^wp_sites:\s*(#.*)?$", l))
+    end = next(i for i in range(top + 1, len(lines)) if lines[i] and not lines[i].startswith(" "))
+    lines[top + 1:end] = ["  - name: %s" % FIXTURE_SITE["name"]] + ["    %s: %s" % (k, v) for k, v in FIXTURE_SITE.items() if k != "name"] + [""]
+    return "\n".join(lines)
 
 
 def env():
@@ -37,6 +52,8 @@ def base_vars():
     v = {}
     v.update(load("vars/wp.yml"))
     v.update(load("host_vars/dellwp/vars.yml"))
+    v["real_wp_sites"] = v["wp_sites"]
+    v["wp_sites"] = [dict(FIXTURE_SITE)]
     v["wp_master_secret"] = "stub-master-secret"
     # Ansible templates variables that refer to other variables (wp_image_cli is built from two lines): do the same here, so a test sees the value the play would use.
     e = jinja2.Environment(undefined=jinja2.StrictUndefined)
@@ -269,6 +286,8 @@ class Assertions(unittest.TestCase):
         return eval_that(self.that, self.v, sites)
 
     def test_the_real_list_fits(self):
+        # the one test that looks at the repo's own list: whatever it holds now (closed tombstones included) must pass the rules of the play
+        self.assertTrue(self.ok(self.v["real_wp_sites"]), "the sites in host_vars/dellwp/vars.yml break the play's own rules")
         self.assertTrue(self.ok(self.good))
 
     def test_a_closed_site_is_a_tombstone_that_keeps_its_ids_and_holds_no_ram_and_no_disk(self):

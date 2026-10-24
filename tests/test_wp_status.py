@@ -16,8 +16,18 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from test_wp_backup import Base  # noqa: E402
-from test_wp_sites_render import ROOT  # noqa: E402
+from test_wp_sites_render import ROOT, fixture_vars_text  # noqa: E402
 import wp_sites_status as W  # noqa: E402
+
+
+def _fixture_repo():
+    import tempfile
+    d = Path(tempfile.mkdtemp(prefix="wpstatus-fixture-")); (d / "host_vars/dellwp").mkdir(parents=True)
+    (d / "host_vars/dellwp/vars.yml").write_text(fixture_vars_text())
+    return d
+
+
+FIXTURE_REPO = _fixture_repo()   # the real variables with one fixed live site: the repo's own sites come and go
 
 REPQUOTA = '#!/bin/bash\n[ -f "$SHIM/repquota_fail" ] && exit 1\ncat "$SHIM/repquota.txt"\n'
 SYSTEMCTL = (
@@ -180,7 +190,7 @@ class Wrapper(unittest.TestCase):
     def test_a_closed_site_is_a_tombstone_the_host_is_not_expected_to_report(self):
         import tempfile
         d = Path(tempfile.mkdtemp(prefix="wpstatus-")); (d / "host_vars/dellwp").mkdir(parents=True)
-        text = (ROOT / "host_vars/dellwp/vars.yml").read_text()
+        text = fixture_vars_text()
         text = text.rstrip("\n") + "\n"
         a = text.index("wp_sites:\n") + len("wp_sites:\n")
         text = text[:a] + "  - name: gone\n    port: 9190\n    quota_id: 1090\n    state: closed\n" + text[a:]
@@ -243,7 +253,7 @@ class Wrapper(unittest.TestCase):
         self.assertEqual({len(l) - len(l.lstrip()) for l in lines}, {0}, "no ragged indentation")
 
     def test_main_prints_the_table_then_the_attention_list_and_returns_how_many(self):
-        declared, stale, warn, bin_ = W.load_declaration(ROOT)
+        declared, stale, warn, bin_ = W.load_declaration(FIXTURE_REPO)
         site = list(declared)[0]
         # every declared site is reported (the repo may declare more than one); only the first is broken in the second half
         ok_row = lambda x: row(site=x, deployed=declared[x], actual=declared[x], cron_timer="active" if declared[x] == "live" else "inactive")
@@ -251,11 +261,11 @@ class Wrapper(unittest.TestCase):
         out = io.StringIO()
         old = sys.stdout; sys.stdout = out
         try:
-            self.assertEqual(W.main(["--file", "-"], stdin=io.StringIO(good)), 0)
+            self.assertEqual(W.main(["--file", "-"], repo=FIXTURE_REPO, stdin=io.StringIO(good)), 0)
             self.assertIn("Nothing needs attention.", out.getvalue())
             out.truncate(0); out.seek(0)
             bad = tsv(row(site=site, deployed=declared[site], actual="none", unit="failed", containers="0/2", cron_timer="inactive", backup_timer="inactive"), *[ok_row(x) for x in list(declared)[1:]])
-            n = W.main(["--file", "-"], stdin=io.StringIO(bad))
+            n = W.main(["--file", "-"], repo=FIXTURE_REPO, stdin=io.StringIO(bad))
         finally:
             sys.stdout = old
         self.assertGreaterEqual(n, 3)
@@ -263,7 +273,7 @@ class Wrapper(unittest.TestCase):
         self.assertEqual(len([l for l in out.getvalue().splitlines() if l.startswith("  %s: " % site)]), n)
 
     def test_it_asks_dellwp_over_ssh_with_the_tools_directory_from_the_repo_and_reports_failures(self):
-        declared, stale, warn, bin_ = W.load_declaration(ROOT)
+        declared, stale, warn, bin_ = W.load_declaration(FIXTURE_REPO)
         calls = []
 
         class R:
@@ -273,11 +283,11 @@ class Wrapper(unittest.TestCase):
             calls.append(cmd); return R(0, tsv(row(site=list(declared)[0], deployed=declared[list(declared)[0]], actual=declared[list(declared)[0]])))
         old = sys.stdout; sys.stdout = io.StringIO()
         try:
-            W.main([], runner=ok)
+            W.main([], repo=FIXTURE_REPO, runner=ok)
             self.assertEqual(calls[0], ["ssh", "dellwp", "sudo -n %s/wp-sites-status" % bin_])
             err = io.StringIO(); olde = sys.stderr; sys.stderr = err
-            self.assertEqual(W.main([], runner=lambda c, **k: R(255, err="Connection refused")), 99)
-            self.assertEqual(W.main([], runner=lambda c, **k: R(0, "not a report\n")), 99)
+            self.assertEqual(W.main([], repo=FIXTURE_REPO, runner=lambda c, **k: R(255, err="Connection refused")), 99)
+            self.assertEqual(W.main([], repo=FIXTURE_REPO, runner=lambda c, **k: R(0, "not a report\n")), 99)
             sys.stderr = olde
         finally:
             sys.stdout = old

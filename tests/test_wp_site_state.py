@@ -78,6 +78,8 @@ class Edit(unittest.TestCase):
         text = (ROOT / S.VARS).read_text()
         for site in [s["name"] for s in yaml.safe_load(text)["wp_sites"]]:
             now = S.current_state(text, site)
+            if now not in S.STATES:
+                continue   # a stopped or closed site is not this script's to flip (stop, start and delete are wp_sites.py's); it is the real file's layout that is round-tripped here
             other = "hold" if now == "live" else "live"
             flipped = S.set_state(text, site, other)
             self.assertEqual(S.current_state(flipped, site), other)
