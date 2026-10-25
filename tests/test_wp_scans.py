@@ -184,6 +184,7 @@ class ClamUpdate(ScanBase):
         self.assertEqual(run.count(" -v "), 1)
         m = re.search(r"--memory (\d+m) --memory-swap (\d+m)", run)
         self.assertEqual(m.group(1), m.group(2))
+        self.assertEqual(m.group(1), "%dm" % self.v["wp_clamav_mem_mb"], "loading the signatures to test them needs what a scan needs")
         self.assertIn("signatures are in", r.stdout)
         self.assertTrue((self.sigs / "main.cvd").exists())
 
