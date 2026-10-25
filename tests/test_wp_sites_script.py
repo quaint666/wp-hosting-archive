@@ -37,6 +37,7 @@ class Base(unittest.TestCase):
         self.original = self.vars.read_text()
         self.calls, self.said, self.rc = [], [], {}
         self.answers = []
+        self.stdins, self.reply = [], {}
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -51,18 +52,38 @@ class Base(unittest.TestCase):
             raise EOFError
         return self.answers.pop(0)
 
-    def fake_run(self, cmd, tee=False):
+    def fake_run(self, cmd, tee=False, stdin=None):
         self.calls.append(cmd)
+        self.stdins.append(stdin)
         key = " ".join(cmd[:4])
         rc = next((v for k, v in self.rc.items() if key.startswith(k) or k in " ".join(cmd)), 0)
         out = "dellwp : ok=57 changed=%s unreachable=0 failed=0\n" % self.rc.get("changed", "0") if tee else ""
+        for k, v in self.reply.items():
+            if k in " ".join(cmd):
+                out = v
         return rc, out
 
     def out(self, *a):
         self.said.append(" ".join(str(x) for x in a))
 
     def sites(self, **kw):
+        kw.setdefault("judge", self.judge)
         return w.Sites(self.tmp, ask=self.ask, run=self.fake_run, out=self.out, **kw)
+
+    verdict = None
+
+    def with_state(self, state):
+        """The fixture's vars.yml with the one site in the given state (the site's own line: four spaces; the defaults block has two)."""
+        text = fixture_vars_text()
+        assert "\n    state: live\n" in text
+        return text.replace("\n    state: live\n", "\n    state: %s\n" % state, 1)
+
+    def judge(self, path, repo):
+        """The archive reader's answer, scripted: (rows, notes, nogo, facts). self.verdict may be an exception to raise."""
+        self.judged = getattr(self, "judged", []) + [path]
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict or ([], [], [], {"archive_wp": "7.1.3", "our_wp": "7.1.3", "archive_php": "8.5.12", "our_php": "8.5", "entries": 9, "size_mb": 1})
 
     def text(self):
         return "\n".join(self.said)
@@ -383,6 +404,25 @@ class Help(Base):
         flat = " ".join(text.split())   # argparse wraps lines
         self.assertIn("core: minor and security releases only, a new X.Y is only reported; plugins and themes: minor updates, while a major version is held for you with one ntfy per set", flat)
         self.assertIn("wp-site-update --apply applies everything", flat)
+
+    def test_the_import_commands_explain_themselves(self):
+        for cmd, needles in (("import", ("site", "file", "--yes", "no WordPress yet", "NO-GO", "Edits no file")), ("approve", ("--reject", "--accept-failures", "--yes", "stays on hold")),
+                             ("reset", ("not approved yet", "type the site's name")), ("report", ("site",))):
+            text = self.help_text(cmd)
+            for n in needles:
+                self.assertIn(n, " ".join(text.split()), "%s --help lacks %r" % (cmd, n))
+        self.assertIn("--no-install", self.help_text("create"))
+        top = self.help_text()
+        self.assertIn("create --name friend --no-install", top)
+        self.assertIn("wp-site-import", top)
+
+    def test_the_import_tool_the_help_names_is_deployed_and_prints_a_usage_line(self):
+        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
+        self.assertIn("wp-site-import", deployed)
+        import wp_site_import
+        self.assertIn("usage: wp-site-import", wp_site_import.USAGE)
+        for sub in ("approve", "reset", "report", "receive", "discard"):
+            self.assertIn("wp-site-import %s" % sub, wp_site_import.USAGE)
 
     def test_the_tools_the_help_names_exist_and_print_a_usage_line(self):
         deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
@@ -823,6 +863,264 @@ class Deleting(Base):
         with contextlib.redirect_stdout(top), self.assertRaises(SystemExit):
             w.main(["--help"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=lambda *a: None)
         self.assertIn("wp-site-delete", top.getvalue()); self.assertIn("Not here yet: rename.", top.getvalue()); self.assertIn("A destructive change asks twice", " ".join(top.getvalue().split()))
+
+class EmptySite(Base):
+    def test_no_install_makes_an_empty_site_on_hold_and_asks_for_no_administrator(self):
+        rc = self.sites().create(name="alpha", policy="notify", yes=True, install=False)
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.site("alpha")["state"], "hold")
+        self.assertFalse([c for c in self.calls if "wp-site-install" in " ".join(c)])
+        self.assertFalse([m for m in self.said if "PROMPT" in m and any(x in m for x in ("title", "Administrator", "email"))])
+        self.assertIn("EMPTY site", self.text())
+        self.assertIn("import alpha <file.wpress>", self.text())
+        self.assertIn(["bash", "scripts/wp_site_verify_dellwp.sh", "alpha"], self.calls)
+
+    def test_no_install_takes_no_live_state_and_no_administrator_details(self):
+        for kw in ({"state": "live"}, {"title": "T"}, {"user": "someone"}, {"email": "a@example.org"}):
+            with self.assertRaises(w.Refuse) as cm:       # everything else is given, so only the guard can be what refuses (not a missing answer)
+                self.sites().create(name="alpha", policy="notify", yes=True, yes_public=True, install=False, **kw)
+            self.assertIn("--no-install", str(cm.exception))
+        self.assertEqual(self.vars.read_text(), self.original)
+
+    def test_no_install_with_commit_commits_it(self):
+        rc = self.sites().create(name="alpha", policy="notify", yes=True, install=False, commit=True)
+        self.assertEqual(rc, 0, self.text())
+        log = subprocess.run(["git", "-C", str(self.tmp), "log", "--format=%s", "-1"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(log, "ops(wp): create empty site alpha")
+
+    def test_the_flag_reaches_create_from_the_command_line(self):
+        out = []
+        rc = w.main(["create", "--name", "alpha", "--no-install", "--policy", "notify", "--yes"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse([c for c in self.calls if "wp-site-install" in " ".join(c)])
+        self.assertEqual(w.main(["create", "--name", "beta", "--no-install", "--state", "live", "--yes"], repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append), 2)
+
+    def test_a_normal_create_still_installs(self):
+        self.assertEqual(self.sites().create(**self.create_args()), 0)
+        self.assertTrue([c for c in self.calls if "wp-site-install" in " ".join(c)])
+
+
+class Importing(Base):
+    def setUp(self):
+        super().setUp()
+        self.vars.write_text(self.with_state("hold"))
+        self.commit("hold")
+        self.original = self.vars.read_text()
+        self.f = self.tmp / "friend.wpress"
+        self.f.write_bytes(b"archive bytes " * 1000)
+        import hashlib
+        self.digest = hashlib.sha256(self.f.read_bytes()).hexdigest()
+        self.reply["wp-site-import receive"] = "received %s %d friend.wpress\n" % (self.digest, self.f.stat().st_size)
+
+    def ssh(self):
+        return [" ".join(c) for c in self.calls if c[0] == "ssh"]
+
+    def test_the_whole_flow_in_order_and_the_file_goes_only_to_the_receive_command(self):
+        rc = self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.judged, [str(self.f)])
+        ssh = [c for c in self.calls if c[0] == "ssh"]
+        self.assertEqual(ssh[0], ["ssh", "dellwp", "sudo -n wp-site-import receive friend.wpress"])
+        self.assertEqual(ssh[1], ["ssh", "-t", "dellwp", "sudo wp-site-import wptest friend.wpress"])
+        self.assertEqual(self.stdins[self.calls.index(ssh[0])], str(self.f))
+        self.assertEqual([x for x in self.stdins if x], [str(self.f)], "the file is sent once, to receive and to nothing else")
+        self.assertIn("Copied and verified", self.text())
+        self.assertIn("approve wptest", self.text())
+        self.assertEqual(self.vars.read_text(), self.original, "an import edits no file")
+
+    def test_the_preflight_is_shown_and_asked_before_anything_is_copied(self):
+        self.answers = ["n"]
+        rc = self.sites().import_site("wptest", str(self.f))
+        self.assertEqual(rc, 1)
+        self.assertIn("Copy friend.wpress", self.text())
+        self.assertIn("Nothing was copied.", self.text())
+        self.assertIn("archive: WordPress 7.1.3", self.text())
+        self.assertFalse(self.ssh())
+
+    def test_a_yes_to_the_question_copies(self):
+        self.answers = ["y"]
+        self.assertEqual(self.sites().import_site("wptest", str(self.f)), 0)
+        self.assertEqual(len(self.ssh()), 2)
+
+    def test_a_no_go_stops_before_anything_is_copied(self):
+        self.verdict = ([], [], ["core is newer"], {"archive_wp": "7.2.0", "our_wp": "7.1.3", "archive_php": "8.5", "our_php": "8.5", "entries": 1, "size_mb": 1})
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertIn("NO-GO", str(cm.exception))
+        self.assertFalse(self.ssh())
+
+    def test_an_unreadable_archive_and_an_unreachable_wordpress_org_stop_it_too(self):
+        import wp_wpress
+        for exc, needle in ((wp_wpress.ArchiveError("truncated"), "NO-GO: truncated"), (urllib_error("no route"), "NOT JUDGED")):
+            self.verdict = exc
+            with self.assertRaises(w.Refuse) as cm:
+                self.sites().import_site("wptest", str(self.f), yes=True)
+            self.assertIn(needle, str(cm.exception))
+        self.assertFalse(self.ssh())
+
+    def test_the_site_must_be_declared_open_and_on_hold(self):
+        with self.assertRaises(w.Refuse):
+            self.sites().import_site("nosuch", str(self.f), yes=True)
+        for state, needle in (("live", "on hold"), ("stopped", "start wptest")):
+            self.vars.write_text(self.with_state(state))
+            with self.assertRaises(w.Refuse) as cm:
+                self.sites().import_site("wptest", str(self.f), yes=True)
+            self.assertIn(needle, str(cm.exception))
+        self.vars.write_text(self.with_state("closed"))
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertIn("tombstone", str(cm.exception))
+        self.assertFalse(self.ssh())
+
+    def test_the_file_must_be_a_plain_wpress(self):
+        (self.tmp / "my file.wpress").write_bytes(b"x")
+        (self.tmp / "notes.txt").write_bytes(b"x")
+        (self.tmp / "link.wpress").symlink_to(self.f)
+        (self.tmp / ".hidden.wpress").write_bytes(b"x")
+        for name in ("missing.wpress", "my file.wpress", "notes.txt", "link.wpress", ".hidden.wpress", "friend.wpress\n"):
+            with self.assertRaises(w.Refuse):
+                self.sites().import_site("wptest", str(self.tmp / name), yes=True)
+        self.assertFalse(self.ssh())
+        self.assertEqual(getattr(self, "judged", []), [], "nothing is even read before the name is accepted")
+
+    def test_a_copy_that_does_not_match_is_removed_and_nothing_is_imported(self):
+        for reply in ("received %s %d friend.wpress\n" % ("0" * 64, self.f.stat().st_size), "received %s %d friend.wpress\n" % (self.digest, 5), "garbage\n", "",
+                      "received %s %d other.wpress\n" % (self.digest, self.f.stat().st_size)):
+            self.calls.clear()
+            self.reply["wp-site-import receive"] = reply
+            with self.assertRaises(w.Refuse) as cm:
+                self.sites().import_site("wptest", str(self.f), yes=True)
+            self.assertIn("does not match", str(cm.exception))
+            self.assertIn("ssh dellwp sudo -n wp-site-import discard friend.wpress", self.ssh())
+            self.assertFalse([c for c in self.ssh() if "-t" in c.split()[:2]], "no import after a bad copy")
+
+    def test_a_failed_copy_stops_without_an_import(self):
+        self.rc["ssh dellwp sudo -n wp-site-import receive"] = 255
+        self.assertEqual(self.sites().import_site("wptest", str(self.f), yes=True), 255)
+        self.assertEqual(len(self.ssh()), 1)
+        self.assertIn("copy to the VM failed", self.text())
+
+    def test_what_the_exit_code_of_the_import_means(self):
+        for rc, needle in ((1, "a step failed"), (2, "reset")):
+            self.said.clear()
+            self.rc["ssh -t dellwp sudo wp-site-import wptest"] = rc
+            self.assertEqual(self.sites().import_site("wptest", str(self.f), yes=True), rc)
+            self.assertIn(needle, self.text())
+
+    def test_a_name_with_a_space_or_a_quote_cannot_reach_the_shell_line(self):
+        # the only names that get here passed IMPORT_FILE_RE; the remote command is still built with shlex.quote
+        self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertTrue(all("'" not in c and ";" not in c for c in self.ssh()))
+
+
+def urllib_error(msg):
+    import urllib.error
+    return urllib.error.URLError(msg)
+
+
+class Approving(Base):
+    def setUp(self):
+        super().setUp()
+        self.vars.write_text(self.with_state("hold"))
+        self.commit("hold")
+        self.original = self.vars.read_text()
+        self.reply["wp-site-import report"] = "IMPORT REPORT for wptest\nCODE HELD BACK: plugin notorg\n"
+
+    def ssh(self):
+        return [" ".join(c) for c in self.calls if c[0] == "ssh"]
+
+    def test_the_report_is_shown_first_then_asked_then_approved(self):
+        self.answers = ["y"]
+        rc = self.sites().approve("wptest")
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual(self.ssh(), ["ssh dellwp sudo -n wp-site-import report wptest", "ssh -t dellwp sudo wp-site-import approve wptest"])
+        self.assertIn("Approve this import of wptest?", self.text())
+        self.assertIn(["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"], self.calls)
+        self.assertIn("still on hold", self.text())
+
+    def test_not_approved_changes_nothing(self):
+        for answer in ("n", "", "yes please"):
+            self.calls.clear()
+            self.answers = [answer]
+            self.assertEqual(self.sites().approve("wptest"), 1)
+            self.assertFalse([c for c in self.ssh() if "approve" in c])
+
+    def test_reject_and_accept_failures_are_passed_on_quoted(self):
+        rc = self.sites().approve("wptest", ["notorg", "my-theme"], accept_failures=True, yes=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("ssh -t dellwp sudo wp-site-import approve wptest --reject notorg,my-theme --accept-failures", self.ssh())
+
+    def test_a_reject_list_that_is_not_folder_names_is_refused_before_anything_runs(self):
+        for bad in (["a;b"], ["../x"], ["a b"], ["x\n"], ["$(id)"], ["a", "-b"]):
+            with self.assertRaises(w.Refuse):
+                self.sites().approve("wptest", bad, yes=True)
+        self.assertEqual(self.calls, [])
+
+    def test_a_site_that_is_not_on_hold_or_not_declared(self):
+        with self.assertRaises(w.Refuse):
+            self.sites().approve("nosuch", yes=True)
+        self.vars.write_text(self.with_state("live"))
+        with self.assertRaises(w.Refuse):
+            self.sites().approve("wptest", yes=True)
+        self.assertEqual(self.calls, [])
+
+    def test_no_report_means_no_question(self):
+        self.rc["ssh dellwp sudo -n wp-site-import report"] = 2
+        self.assertEqual(self.sites().approve("wptest", yes=True), 2)
+        self.assertFalse([c for c in self.ssh() if "approve" in c])
+
+    def test_a_refusal_on_the_vm_is_reported_and_nothing_else_runs(self):
+        self.rc["ssh -t dellwp sudo wp-site-import approve"] = 2
+        self.assertEqual(self.sites().approve("wptest", yes=True), 2)
+        self.assertIn("Nothing is deleted until it succeeds", self.text())
+        self.assertNotIn(["bash", "scripts/wp_site_verify_dellwp.sh", "wptest"], self.calls)
+
+    def test_reset_and_report_go_to_the_vm(self):
+        self.assertEqual(self.sites().reset("wptest"), 0)
+        self.assertIn("ssh -t dellwp sudo wp-site-import reset wptest", self.ssh())
+        self.assertIn(["python3", "scripts/wp_sites_status.py"], self.calls)
+        self.calls.clear()
+        self.assertEqual(self.sites().report("wptest"), 0)
+        self.assertEqual(self.ssh(), ["ssh dellwp sudo -n wp-site-import report wptest"])
+        for fn in (self.sites().reset, self.sites().report):
+            with self.assertRaises(w.Refuse):
+                fn("nosuch")
+
+    def test_a_failed_reset_says_so(self):
+        self.rc["ssh -t dellwp sudo wp-site-import reset"] = 2
+        self.assertEqual(self.sites().reset("wptest"), 2)
+        self.assertIn("did not finish", self.text())
+
+    def test_main_parses_the_new_commands(self):
+        out = []
+        f = self.tmp / "friend.wpress"
+        f.write_bytes(b"x" * 10)
+        import hashlib
+        self.reply["wp-site-import receive"] = "received %s 10 friend.wpress\n" % hashlib.sha256(b"x" * 10).hexdigest()
+        kw = dict(repo=self.tmp, ask=self.ask, run=self.fake_run, out=out.append)
+        self.assertEqual(w.main(["report", "wptest"], **kw), 0)
+        self.assertEqual(w.main(["approve", "wptest", "--reject", "a,b", "--accept-failures", "--yes"], **kw), 0)
+        self.assertIn("ssh -t dellwp sudo wp-site-import approve wptest --reject a,b --accept-failures", self.ssh())
+        self.assertEqual(w.main(["reset", "wptest"], **kw), 0)
+        self.assertEqual(w.main(["approve", "nosuch", "--yes"], **kw), 2)
+
+    def test_the_menu_offers_import_approve_reset_and_report_only_for_a_site_on_hold(self):
+        self.answers = ["9", "10", "11", "12", "4"]
+        self.vars.write_text(self.with_state("live"))
+        self.sites().menu()
+        self.assertEqual(self.text().count("No site is on hold"), 4)
+        self.said.clear(); self.calls.clear()
+        self.vars.write_text(self.original)
+        self.answers = ["11", "wptest", "12", "wptest", "4"]
+        self.sites().menu()
+        self.assertIn("ssh -t dellwp sudo wp-site-import reset wptest", self.ssh())
+        self.assertIn("ssh dellwp sudo -n wp-site-import report wptest", self.ssh())
+
+    def test_the_menu_approve_asks_what_to_leave_out(self):
+        self.answers = ["10", "wptest", "notorg", "y", "4"]
+        self.sites().menu()
+        self.assertIn("ssh -t dellwp sudo wp-site-import approve wptest --reject notorg", self.ssh())
+
 
 class Surface(Base):
     def test_list_runs_the_status_command(self):

@@ -27,7 +27,7 @@ NAME, SIZE, PATH = slice(0, 255), slice(255, 269), slice(281, HEADER)
 JSON_LIMIT = 4 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
 MAX_ITEMS = 150          # plugins plus themes one archive may name; each is a lookup on wordpress.org
-NAME_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+NAME_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 API = "https://api.wordpress.org/%s/info/1.2/?action=%s_information&request[slug]=%s&request[fields][versions]=1"
 
 

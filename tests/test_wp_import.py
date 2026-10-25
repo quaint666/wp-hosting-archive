@@ -199,10 +199,10 @@ class Base(unittest.TestCase):
     def archive(self, **kw):
         return self.put(build(kw.pop("files", None) or files(), **kw))
 
-    def run_main(self, argv, get=None, ask=None, cfg=None):
+    def run_main(self, argv, get=None, ask=None, cfg=None, stdin=None):
         self.out.clear()
         h = self.host
-        code = imp.main(cfg or self.cfg, argv, get=get or get_from(ANSWERS), run=h.run, ask=ask or (lambda prompt: ""), out=self.out.append, popen=h.popen, chown=h.chown, which=h.which)
+        code = imp.main(cfg or self.cfg, argv, get=get or get_from(ANSWERS), run=h.run, ask=ask or (lambda prompt: ""), out=self.out.append, popen=h.popen, chown=h.chown, which=h.which, stdin=stdin)
         return code, "\n".join(self.out)
 
     def tree(self, root=None):
@@ -801,7 +801,168 @@ class Failures(Base):
         self.assertIn("wp-site-import reset wptest", text)
 
 
+class Receive(Base):
+    def send(self, name, data, **kw):
+        return self.run_main(["receive", name], stdin=io.BytesIO(data), **kw)
+
+    def test_a_file_arrives_whole_with_its_hash_and_nothing_else_is_left(self):
+        data = os.urandom(3 * imp.CHUNK + 17)
+        code, text = self.send("friend.wpress", data)
+        self.assertEqual(code, 0, text)
+        import hashlib
+        self.assertEqual(text, "received %s %d friend.wpress" % (hashlib.sha256(data).hexdigest(), len(data)))
+        f = self.intake / "friend.wpress"
+        self.assertEqual(f.read_bytes(), data)
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+        self.assertEqual(sorted(p.name for p in self.intake.iterdir() if p.name != ".lock"), ["friend.wpress", "ledger.log"])
+        rec = (self.intake / "ledger.log").read_text().splitlines()[-1].split("\t")
+        self.assertEqual(rec[2:], ["received", hashlib.sha256(data).hexdigest(), str(len(data)), "friend.wpress"])
+
+    def test_a_name_that_is_not_plain_is_refused(self):
+        for name in ("../x.wpress", "a/b.wpress", "x.txt", ".hidden.wpress", "a b.wpress", "", "x.wpress\n", "x\x1b[2J.wpress"):
+            before = self.tree()
+            code, text = self.send(name, b"data")
+            self.assertEqual(code, 2, repr(name))
+            self.assertEqual(self.tree(), before)
+
+    def test_it_never_replaces_a_file_that_is_there(self):
+        self.put(b"mine")
+        code, text = self.send("friend.wpress", b"theirs")
+        self.assertEqual(code, 2)
+        self.assertIn("wp-site-import discard friend.wpress", text)
+        self.assertEqual((self.intake / "friend.wpress").read_bytes(), b"mine")
+
+    def test_a_file_larger_than_the_free_space_is_stopped_and_nothing_is_kept(self):
+        self.cfg["intake_quota_mb"] = 1
+        before = self.tree()
+        code, text = self.send("friend.wpress", b"x" * (imp.MIB + 1))
+        self.assertEqual(code, 2)
+        self.assertIn("larger than", text)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(list(self.intake.glob(".recv-*")), [], "no partial file is kept")
+        self.assertFalse((self.intake / "friend.wpress").exists())
+
+    def test_the_free_space_counts_what_is_already_there(self):
+        self.cfg["intake_quota_mb"] = 1
+        (self.intake / "bulk.dat").write_bytes(b"0" * (imp.MIB - 100))
+        self.assertEqual(self.send("friend.wpress", b"x" * 99)[0], 0)
+        (self.intake / "friend.wpress").unlink()
+        self.assertEqual(self.send("friend.wpress", b"x" * 101)[0], 2)
+
+    def test_nothing_received_is_an_error(self):
+        before = self.tree()
+        code, text = self.send("friend.wpress", b"")
+        self.assertEqual(code, 2)
+        self.assertIn("nothing was received", text)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(list(self.intake.glob(".recv-*")), [])
+
+    def test_a_stream_that_breaks_leaves_no_partial_file(self):
+        class Breaks:
+            def __init__(self, exc):
+                self.n, self.exc = 0, exc
+
+            def read(self, size):
+                self.n += 1
+                if self.n == 2:
+                    raise self.exc
+                return b"x" * 1000
+        for exc in (KeyboardInterrupt(), OSError("connection reset")):
+            before = self.tree()
+            code, text = self.run_main(["receive", "friend.wpress"], stdin=Breaks(exc))
+            self.assertIn(code, (2, 130))
+            self.assertEqual(self.tree(), before, repr(exc))
+            self.assertEqual(list(self.intake.glob(".recv-*")), [], "the partial file is removed when the stream breaks: %r" % exc)
+            self.assertFalse((self.intake / "friend.wpress").exists())
+
+    def test_a_stale_partial_from_an_earlier_try_is_replaced_not_followed(self):
+        (self.intake / ".recv-friend.wpress").write_bytes(b"old")
+        self.assertEqual(self.send("friend.wpress", b"new")[0], 0)
+        self.assertEqual((self.intake / "friend.wpress").read_bytes(), b"new")
+        outside = self.tmp / "victim"
+        outside.write_text("keep")
+        (self.intake / "x.wpress").unlink() if (self.intake / "x.wpress").exists() else None
+        (self.intake / ".recv-x.wpress").symlink_to(outside)
+        code, _ = self.send("x.wpress", b"data")
+        self.assertEqual(code, 2)
+        self.assertEqual(outside.read_text(), "keep")
+
+    def test_a_received_file_can_be_imported(self):
+        self.send("friend.wpress", build(files()))
+        self.assertEqual(self.run_main(["wptest", "friend.wpress", "--plan"])[0], 0)
+
+    def test_usage(self):
+        for argv in (["receive"], ["receive", "a", "b"], ["discard"], ["report"]):
+            self.assertEqual(self.run_main(argv, stdin=io.BytesIO(b""))[0], 2, argv)
+
+
+class Discard(Base):
+    def test_removes_the_file_and_says_so_in_the_ledger(self):
+        self.put(b"x")
+        code, text = self.run_main(["discard", "friend.wpress"])
+        self.assertEqual(code, 0, text)
+        self.assertFalse((self.intake / "friend.wpress").exists())
+        self.assertEqual((self.intake / "ledger.log").read_text().splitlines()[-1].split("\t")[2:3], ["discarded"])
+
+    def test_refuses_the_file_of_an_import_in_progress(self):
+        self.import_ok()
+        self.assert_refused(["discard", "friend.wpress"], "approve or reset that first")
+        self.assertTrue((self.intake / "friend.wpress").exists())
+
+    def test_after_a_reset_it_can_be_discarded(self):
+        self.import_ok()
+        self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")
+        self.assertEqual(self.run_main(["discard", "friend.wpress"])[0], 0)
+
+    def test_refuses_names_that_are_not_plain_and_things_that_are_not_files(self):
+        self.assert_refused(["discard", "../x.wpress"], "plain .wpress")
+        self.assert_refused(["discard", "missing.wpress"], "not a file")
+        outside = self.tmp / "victim.wpress"
+        outside.write_text("keep")
+        (self.intake / "link.wpress").symlink_to(outside)
+        self.assert_refused(["discard", "link.wpress"], "not a file")
+        self.assertTrue(outside.exists())
+
+    def test_a_damaged_record_of_another_site_does_not_block_it(self):
+        (self.intake / "work-other").mkdir()
+        (self.intake / "work-other/PLAN.json").write_text("{not json")
+        self.put(b"x")
+        self.assertEqual(self.run_main(["discard", "friend.wpress"])[0], 0)
+
+
+class ReportCommand(Base):
+    def test_prints_the_report_again(self):
+        self.import_ok()
+        code, text = self.run_main(["report", "wptest"])
+        self.assertEqual(code, 0)
+        self.assertIn("IMPORT REPORT for wptest", text)
+        self.assertEqual(text.strip(), (self.intake / "work-wptest/REPORT.txt").read_text().strip())
+
+    def test_nothing_to_report_and_bad_names(self):
+        self.assert_refused(["report", "wptest"], "no import is waiting")
+        self.assert_refused(["report", "../x"], "not a site name")
+
+    def test_a_link_is_not_followed(self):
+        outside = self.tmp / "secret.txt"
+        outside.write_text("topsecret")
+        (self.intake / "work-wptest").mkdir()
+        (self.intake / "work-wptest/REPORT.txt").symlink_to(outside)
+        code, text = self.run_main(["report", "wptest"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("topsecret", text)
+
+
 class Names(Base):
+    def test_a_trailing_newline_does_not_pass_any_name_check(self):
+        # in Python's re, $ also matches before a final newline; every check here must refuse it
+        for rx, good in ((imp.SITE_RE, "wptest"), (imp.FILE_RE, "x.wpress"), (imp.SLUG_RE, "good"), (imp.NAME_RE, "good.php"), (imp.VERSION_RE, "1.0"), (imp.HOST_RE, "a.local"), (w.NAME_PART, "good")):
+            self.assertTrue(rx.match(good), good)
+            self.assertIsNone(rx.match(good + "\n"), (rx.pattern, good))
+        for site in ("wptest\n", "wptest\n\n"):
+            self.assert_refused([site, "friend.wpress"], "not a site name")
+        self.assert_refused(["reset", "wptest\n"], "not a site name")
+        self.assert_refused(["report", "wptest\n"], "not a site name")
+
     def test_a_plugin_name_that_is_a_path_is_refused_at_the_plan(self):
         for entry in ("../../etc/x.php", "../x.php", "./x.php", "..", "a b/x.php"):
             m = meta(**dict(META, Plugins=[entry]))

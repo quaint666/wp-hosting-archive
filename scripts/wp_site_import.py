@@ -6,6 +6,9 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import reset <site>                      (asks for the site name; removes the unpacked copy)
 
     wp-site-import approve <site> [--reject a,b] [--accept-failures]
+    wp-site-import report <site>                     (prints the report again)
+    wp-site-import receive <file.wpress>             (the file on standard input: how the laptop sends it; the intake directory is root-only)
+    wp-site-import discard <file.wpress>             (removes a file from the intake directory, unless an import was made from it)
 
 After the unpack the run goes on by itself: load the SQL (the migration plugin's table prefix is swapped for the site's), copy the data (uploads, languages), reinstall every plugin and theme
 wordpress.org offers (the archive's version if it is still offered, else the newest, and the report says so), run the WP-CLI steps (update-db, the URLs, Elementor, transients, rewrite rules),
@@ -34,8 +37,8 @@ from pathlib import Path
 
 import wp_wpress as w
 
-SITE_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}$")
-FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.wpress$")
+SITE_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}\Z")
+FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.wpress\Z")
 CHUNK = 1 << 20
 MIB = 1 << 20
 # Directories of wp-content that are not carried over, whatever they hold. The first two are in the practice file (upgrade/ held 36 MB of a half-finished update); ai1wm-backups is the
@@ -50,12 +53,12 @@ PRELUDE = b"SET SESSION sql_mode='';\nSET SESSION foreign_key_checks=0;\nSET SES
 # MySQL 8's default collation does not exist in MariaDB; the dump of the practice file has none of it, an archive from MySQL 8 may
 COLLATION_FIXES = ((b"utf8mb4_0900_ai_ci", b"utf8mb4_unicode_520_ci"), (b"utf8mb4_0900_as_cs", b"utf8mb4_unicode_520_ci"))
 SERVMASK = b"SERVMASK_PREFIX_"
-HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?\Z")
 PREFIX_RE = re.compile(r"\$table_prefix\s*=\s*'([A-Za-z0-9_]+)'")
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 # A plugin or theme folder name that comes out of the archive and goes into a path: a plain name, never "..", never a slash. (A wordpress.org slug is stricter: SLUG_RE.)
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]*$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]*\Z")
 # A heuristic, not a verdict: patterns that legitimate plugins use too. A hit is a place to look, an absence proves nothing.
 SCAN_PATTERNS = ((rb"\beval\s*\(", "eval()"), (rb"\bbase64_decode\s*\(", "base64_decode()"), (rb"\bgzinflate\s*\(|\bgzuncompress\s*\(|\bstr_rot13\s*\(", "gzinflate/str_rot13"),
                  (rb"\b(?:shell_exec|passthru|proc_open|popen|pcntl_exec)\s*\(", "shell execution"), (rb"\b(?:system|exec)\s*\(", "system()/exec()"), (rb"\bassert\s*\(\s*\$", "assert($var)"))
@@ -767,16 +770,84 @@ def run_reset(cfg, site, ask, tools, out):
     return 0
 
 
+def run_receive(cfg, name, stdin, out):
+    """Take a file from standard input into the intake directory (the laptop sends it with ssh, because the directory is root-only). Writes a hidden partial file and renames it into place
+    only when the stream ended, never past the free space of the intake quota, never over a file that is there. Prints one line: received <sha256> <bytes> <name>, which the sender compares."""
+    if not FILE_RE.match(name or ""):
+        raise Refuse("'%s' is not a plain .wpress file name (letters, digits, . _ - only)" % w.printable(name, limit=60))
+    intake = Path(cfg["intake_dir"])
+    final, part = intake / name, intake / (".recv-" + name)
+    if final.exists() or final.is_symlink():
+        raise Refuse("%s is already in the intake directory: import it, or remove it first with: wp-site-import discard %s" % (name, name))
+    free = int(cfg["intake_quota_mb"]) * MIB - tree_bytes(intake)
+    digest, total = hashlib.sha256(), 0
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for chunk in iter(lambda: stdin.read(CHUNK), b""):
+                total += len(chunk)
+                if total > free:
+                    raise Refuse("the file is larger than the %.1f MB free in the intake quota: nothing was kept" % (max(free, 0) / MIB))
+                digest.update(chunk)
+                f.write(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+        if total == 0:
+            raise Refuse("nothing was received")
+        os.rename(part, final)
+    except BaseException:
+        try:
+            os.unlink(part)
+        except FileNotFoundError:
+            pass
+        raise
+    ledger(cfg, "-", "received", digest.hexdigest(), total, name)
+    out("received %s %d %s" % (digest.hexdigest(), total, name))
+    return 0
+
+
+def run_discard(cfg, name, out):
+    """Remove a file from the intake directory, unless an import in progress was made from it."""
+    if not FILE_RE.match(name or ""):
+        raise Refuse("'%s' is not a plain .wpress file name" % w.printable(name, limit=60))
+    intake = Path(cfg["intake_dir"])
+    f = intake / name
+    if not f.is_file() or f.is_symlink():
+        raise Refuse("%s is not a file in the intake directory" % name)
+    for work in sorted(intake.glob("work-*")):
+        try:
+            if read_record(work).get("file") == name:
+                raise Refuse("%s is the file of the import in %s: approve or reset that first" % (name, work.name))
+        except Refuse as e:
+            if "is the file of" in str(e):
+                raise
+    f.unlink()
+    ledger(cfg, "-", "discarded", "-", 0, name)
+    out("removed %s from the intake directory" % name)
+    return 0
+
+
+def run_report(cfg, site, out):
+    if not SITE_RE.match(site or ""):
+        raise Refuse("'%s' is not a site name" % site)
+    p = Path(cfg["intake_dir"]) / ("work-" + site) / "REPORT.txt"
+    if not p.is_file() or p.is_symlink():
+        raise Refuse("there is no report for %s: no import is waiting for approval" % site)
+    out(p.read_text().rstrip("\n"))
+    return 0
+
+
 def tty_ask(prompt):
     with open(os.environ.get("WP_SITE_TTY", "/dev/tty")) as t:
         sys.stderr.write(prompt)
         return t.readline()
 
 
-USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>")
+USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
+         "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress>")
 
 
-def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which):
+def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which, stdin=None):
     flags = {"--plan", "--accept-failures"}
     args = [x for x in argv if x not in flags]
     reject = []
@@ -799,9 +870,15 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             raise Refuse("another import is running")
         if args[:1] == ["reset"] and len(args) == 2:
             return run_reset(cfg, args[1], ask, tools, out)
+        if args[:1] == ["receive"] and len(args) == 2:
+            return run_receive(cfg, args[1], stdin or sys.stdin.buffer, out)
+        if args[:1] == ["discard"] and len(args) == 2:
+            return run_discard(cfg, args[1], out)
+        if args[:1] == ["report"] and len(args) == 2:
+            return run_report(cfg, args[1], out)
         if args[:1] == ["approve"] and len(args) == 2:
             return run_approve(cfg, args[1], reject, accept, tools, out)
-        if len(args) != 2 or args[0] in ("reset", "approve") or reject or accept:
+        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report") or reject or accept:
             out(USAGE)
             return 2
         return run_import(cfg, args[0], args[1], plan_only, get, tools, out)

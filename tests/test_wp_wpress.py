@@ -319,12 +319,12 @@ class Hostile(Base):
         self.assertIn("larger than", text)
 
     def test_plugin_and_theme_names_must_be_plain(self):
-        for entry in ("../../x/y.php", "a/b/c.php", "..", "a b/c.php", "x/\x1b[2J.php", "/abs.php", "", "a" * 150 + "/b.php"):
+        for entry in ("../../x/y.php", "a/b/c.php", "..", "a b/c.php", "x/\x1b[2J.php", "/abs.php", "", "a" * 150 + "/b.php", "good\n/good.php", "good/good.php\n", "good\n"):
             self.out.clear()
             code, text = self.run_main(self.pj(meta(Plugins=[entry])))
             self.assertEqual(code, 1, entry)
             self.assertIn("not a plain", text)
-        for theme in ("../..", "a/b", ".hidden", ""):
+        for theme in ("../..", "a/b", ".hidden", "", "blocksy\n"):
             self.out.clear()
             code, text = self.run_main(self.pj(meta(Template=theme, Stylesheet=theme)))
             self.assertEqual(code, 1, theme)
