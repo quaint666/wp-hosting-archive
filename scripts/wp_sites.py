@@ -280,9 +280,15 @@ class Sites:
         return 0
 
     def finish(self, site, what, commit=False):
-        rc, _ = self.run(["bash", "scripts/wp_site_verify_dellwp.sh", site])
+        rc, text = self.run(["bash", "scripts/wp_site_verify_dellwp.sh", site], tee=True)
         if rc != 0:
-            self.out("The verifier reported %d failed check(s) for %s." % (rc, site))
+            self.out("The verifier reported %d failed check(s) for %s:" % (rc, site))
+            # the lines again, here at the end where the next step starts: they scroll far above the summary, and a failure that cannot be named cannot be fixed or told apart from a slow start
+            failed = [l for l in (text or "").splitlines() if l.startswith("FAIL")]
+            for l in failed:
+                self.out("  " + l)
+            if not failed:
+                self.out("  (no FAIL line in its output: run  bash scripts/wp_site_verify_dellwp.sh %s  and read it)" % site)
         self.run(["python3", "scripts/wp_sites_status.py"])
         if self.git("diff", "--quiet", "HEAD", "--", VARS).returncode == 0:
             self.out("\nThe file is back to what is committed; there is nothing to commit.")

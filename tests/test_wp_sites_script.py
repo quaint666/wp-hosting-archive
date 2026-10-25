@@ -652,6 +652,21 @@ class Committing(Base):
         self.assertIn("--commit did not commit: the verifier reported failures", self.text()); self.assertIn("git add host_vars/dellwp/vars.yml", self.text())
         self.assertNotEqual(self.git_out("status", "--short", "host_vars"), "", "the edit is still there, uncommitted")
 
+    def test_the_failing_checks_are_named_again_at_the_end(self):
+        self.rc = {"bash": 1}
+        self.reply = {"wp_site_verify": "== x: containers\nok:   php active\nFAIL: php can write to uploads\nok:   something\nFAIL: hold: local request did not get 200\n53 checks, 2 failed\n"}
+        self.sites().create(**self.create_args(commit=True))
+        said = self.text()
+        self.assertIn("The verifier reported 1 failed check(s) for", said)
+        self.assertIn("  FAIL: php can write to uploads", said); self.assertIn("  FAIL: hold: local request did not get 200", said)
+        self.assertNotIn("  ok:   php active", said)
+
+    def test_a_verifier_that_fails_without_a_fail_line_says_how_to_read_it(self):
+        self.rc = {"bash": 3}
+        self.reply = {"wp_site_verify": "the script died before it checked anything\n"}
+        self.sites().create(**self.create_args(commit=True))
+        self.assertIn("no FAIL line in its output", self.text())
+
     def test_a_failed_play_blocks_the_commit(self):
         self.rc = {"ansible-playbook": 4}
         before = self.commits()
