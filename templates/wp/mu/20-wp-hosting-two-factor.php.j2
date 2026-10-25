@@ -1,0 +1,85 @@
+<?php
+/**
+ * Managed by Ansible (templates/wp/mu/20-wp-hosting-two-factor.php.j2). A must-use plugin of the hosting service, loaded from WPMU_PLUGIN_DIR (root-owned, read-only to PHP).
+ *
+ * Two-factor login for the people who can change a site. It loads the official Two Factor plugin {{ wp_two_factor_version }} from the directory next to this file (put there by
+ * tasks/wp_mu_common.yml, pinned by version and checksum, never from the database or an upload), allows only the authenticator app and the backup codes (no email method: there is no mail to
+ * rely on, and a mailbox is a weaker second factor), and then REQUIRES it of administrators and shop managers: until one has set up the authenticator app, wp-admin sends them to their
+ * profile page (the one place that stays open) and the REST API answers 403 except for the plugin's own routes. A missing or broken plugin therefore locks these users out of wp-admin
+ * instead of letting them in without the second factor; the fix is the operator's (wp-site-2fa-reset, or redeploy). Settings come from wp-config.php; WP-CLI is not gated.
+ * A user locked out of their authenticator is cleared by the operator with: ssh -t dellwp sudo wp-site-2fa-reset <site> <user>.
+ */
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+if ( ! defined( 'WP_HOSTING_TWO_FACTOR_DIR' ) ) {
+	define( 'WP_HOSTING_TWO_FACTOR_DIR', __DIR__ . '/two-factor-{{ wp_two_factor_version }}' );
+}
+if ( is_readable( WP_HOSTING_TWO_FACTOR_DIR . '/two-factor.php' ) ) {
+	require_once WP_HOSTING_TWO_FACTOR_DIR . '/two-factor.php';
+}
+
+if ( ! function_exists( 'wph_2fa_roles' ) ) {
+	function wph_2fa_roles() {
+		$list = defined( 'WP_HOSTING_2FA_ROLES' ) ? (string) constant( 'WP_HOSTING_2FA_ROLES' ) : 'administrator,shop_manager';
+		return array_values( array_filter( array_map( 'trim', explode( ',', $list ) ) ) );
+	}
+
+	/** Only the authenticator app and the backup codes are offered. */
+	function wph_2fa_providers( $providers ) {
+		unset( $providers['Two_Factor_Email'], $providers['Two_Factor_Dummy'] );
+		return $providers;
+	}
+
+	function wph_2fa_applies( $user ) {
+		return $user instanceof WP_User && $user->exists() && count( array_intersect( wph_2fa_roles(), (array) $user->roles ) ) > 0;
+	}
+
+	/** True only when the plugin is there AND this user has a second factor set up. A missing plugin is never "fine". */
+	function wph_2fa_ready( $user ) {
+		return class_exists( 'Two_Factor_Core' ) && Two_Factor_Core::is_user_using_two_factor( $user->ID );
+	}
+
+	function wph_2fa_blocked() {
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			return false;
+		}
+		$user = wp_get_current_user();
+		return wph_2fa_applies( $user ) && ! wph_2fa_ready( $user );
+	}
+
+	function wph_2fa_notice() {
+		$message = class_exists( 'Two_Factor_Core' )
+			? 'Two-factor login is required for your role. Set up the authenticator app below (and print the backup codes) to use the rest of the dashboard.'
+			: 'Two-factor login is required for your role, but its component is not available on this site. Ask the site operator.';
+		echo '<div class="notice notice-error"><p>' . esc_html( $message ) . '</p></div>';
+	}
+
+	function wph_2fa_admin_gate() {
+		if ( ! wph_2fa_blocked() ) {
+			return;
+		}
+		global $pagenow;
+		if ( 'profile.php' === $pagenow ) {
+			add_action( 'admin_notices', 'wph_2fa_notice' );
+			return;
+		}
+		wp_safe_redirect( admin_url( 'profile.php?wph_2fa=required#two-factor-options' ) );
+		exit;
+	}
+
+	function wph_2fa_rest_gate( $result, $server, $request ) {
+		if ( null !== $result || ! wph_2fa_blocked() ) {
+			return $result;
+		}
+		if ( 0 === strpos( (string) $request->get_route(), '/two-factor/' ) ) {
+			return $result;
+		}
+		return new WP_Error( 'wph_2fa_required', 'Two-factor login is required for your role: set it up on your profile page first.', array( 'status' => 403 ) );
+	}
+}
+
+add_filter( 'two_factor_providers', 'wph_2fa_providers' );
+add_action( 'admin_init', 'wph_2fa_admin_gate', 1 );
+add_filter( 'rest_pre_dispatch', 'wph_2fa_rest_gate', 10, 3 );

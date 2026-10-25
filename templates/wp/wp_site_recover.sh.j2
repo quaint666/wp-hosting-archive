@@ -169,7 +169,10 @@ reload_php
 need "WordPress does not boot on the restored database and files"
 "$WP_BIN/wp-site-cli" "$site" core is-installed </dev/null
 need "the restored site has no users"
-[ "$("$WP_BIN/wp-site-cli" "$site" user list --format=count </dev/null)" -ge 1 ]
+# The count is read without the site's plugins and themes: a plugin that loads (Elementor) prints PHP notices and its own error log into WP-CLI's output, and the number is then not the only line
+# (dellwp 2026-10-25: "integer expression expected" left a restored site in maintenance). Users do not depend on any plugin. The answer is the last line made only of digits.
+users=$("$WP_BIN/wp-site-cli" "$site" user list --format=count --skip-plugins --skip-themes </dev/null | grep -E '^[0-9]+$' | tail -n 1 || true)
+[ "${users:-0}" -ge 1 ]
 PHASE=opening
 # The home page and the login form are asked on the probe port, which ignores the maintenance flag: the site is proven BEFORE it is opened, and the same check works when the
 # flag is someone else's (the update job keeps it up while it calls this tool and opens the site itself).

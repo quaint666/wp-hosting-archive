@@ -28,7 +28,8 @@ DUMP_OK = "-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\nINSERT INTO `wp
 DOCKER_BACKUP = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 case "$1" in
-  exec) echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
+  exec) case "$*" in *information_schema*) [ -f "$SHIM/tables_fail" ] && exit 1; cat "$SHIM/tables" 2>/dev/null || echo 57; exit 0 ;; esac
+        echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
 esac
 exit 0
 '''
@@ -36,9 +37,17 @@ DATE = r'''#!/bin/bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ] && [ -n "${FAKE_STAMP:-}" ]; then echo "$FAKE_STAMP"; else exec /usr/bin/date "$@"; fi
 '''
 NTFY = '#!/bin/bash\necho "$*" >> "$SHIM/ntfy.log"\n'
+DOCKER_COUNT = r'''#!/bin/bash
+[ -f "$SHIM/tables_fail" ] && exit 1
+cat "$SHIM/tables" 2>/dev/null || echo 0
+'''
 DOCKER_RESTORE = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 args=" $* "
+# SHIM_NOISE: a plugin that prints PHP notices to stdout before WP-CLI's answer (Elementor does, on PHP 8.5)
+say() { if [ -n "${SHIM_WPFAIL:-}" ] && [[ " $args " == *" $SHIM_WPFAIL "* ]]; then echo "partial output"; echo "Error: Database connection error" >&2; exit 3; fi
+  if [ -n "${SHIM_NOANSWER:-}" ] && [[ " $args " == *" $SHIM_NOANSWER "* ]]; then printf 'Deprecated: only a notice\n'; return 0; fi
+  [ -z "${SHIM_NOISE:-}" ] || printf 'PHP Deprecated:  Creation of dynamic property in /var/www/html/x.php on line 3\nDeprecated: 12 items skipped\n99\n'; echo "$1"; }
 case "$1" in
   network) exit 0 ;;
   rm) exit 0 ;;
@@ -54,10 +63,10 @@ case "$1" in
       *" --entrypoint wp "*)
         case "$args" in
           *" is-installed "*) [ -f "$SHIM/wp_not_installed" ] && exit 1; exit 0 ;;
-          *" siteurl "*) echo "https://wptest.example.com"; exit 0 ;;
-          *" user "*) echo "${SHIM_USERS:-2}"; exit 0 ;;
-          *" post "*) echo 7; exit 0 ;;
-          *" plugin "*) echo 1; exit 0 ;;
+          *" siteurl "*) say "https://wptest.example.com"; exit 0 ;;
+          *" user "*) say "${SHIM_USERS:-2}"; exit 0 ;;
+          *" post "*) say 7; exit 0 ;;
+          *" plugin "*) say 1; exit 0 ;;
         esac ;;
     esac ;;
 esac
@@ -203,6 +212,101 @@ class Backup(Base):
         self.assertEqual(self.snapshots(), [])
         self.assertFalse((self.backups / "wptest/.last-success").exists())
 
+    # --- a site with no tables at all: only a FINAL backup, only if it never had a real snapshot
+    EMPTY_DUMP = "-- MariaDB dump\n-- Dump completed on 2026-10-24 20:15:00\n"
+
+    def empty_site(self, tables="0"):
+        self.put("dump.sql", self.EMPTY_DUMP)
+        self.put("tables", tables)
+
+    def test_a_site_that_never_had_data_can_take_an_empty_final_snapshot_and_says_so(self):
+        self.empty_site()
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("an empty final snapshot is taken (empty=yes)", r.stdout)
+        snap = self.backups / "wptest/20261024T201500Z"
+        man = dict(l.split("=", 1) for l in (snap / "MANIFEST").read_text().splitlines())
+        self.assertEqual((man["tag"], man["empty"]), ("final", "yes"))
+        with gzip.open(snap / "db.sql.gz", "rt") as f:
+            self.assertNotIn("CREATE TABLE", f.read())
+
+    def test_a_normal_snapshot_has_no_empty_mark(self):
+        self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotIn("empty", (self.backups / "wptest/20261024T201500Z/MANIFEST").read_text())
+
+    def test_a_pre_update_backup_of_an_empty_site_is_still_refused(self):
+        self.empty_site()
+        r = self.backup("20261024T200200Z", "--tag=pre-update")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_the_nightly_job_on_a_site_waiting_for_an_import_is_a_quiet_success_and_takes_nothing(self):
+        self.empty_site()
+        for args in ((), ("--force",)):
+            r = self.backup("20261024T20%02d00Z" % (len(args) + 1), *args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("waiting for an import): nothing to back up", r.stdout)
+        self.assertEqual(self.snapshots(), [])
+        self.assertFalse((self.backups / "wptest" / ".last-success").exists(), "a skipped night is not a good backup")
+        self.assertEqual([p.name for p in (self.backups / "wptest").iterdir()], [], "no partial directory is left either")
+
+    def test_the_nightly_job_on_a_site_that_had_real_backups_and_lost_its_tables_still_fails(self):
+        self.assertEqual(self.backup("20261023T201500Z").returncode, 0)
+        self.empty_site()
+        r = self.backup("20261024T201500Z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), ["20261023T201500Z"])
+
+    def test_a_nightly_job_that_cannot_count_the_tables_fails(self):
+        self.empty_site()
+        self.put("tables_fail", "1")
+        r = self.backup("20261024T201500Z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not count the tables", r.stderr)
+
+    def test_tables_without_wp_options_is_damage_not_emptiness(self):
+        self.put("dump.sql", "-- MariaDB dump\nCREATE TABLE `wp_posts` (id int);\n-- Dump completed on 2026-10-24 20:15:00\n")
+        self.put("tables", "12")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_a_site_that_ever_had_a_real_snapshot_never_gets_an_empty_final_one(self):
+        self.assertEqual(self.backup("20261023T201500Z").returncode, 0)
+        self.empty_site()
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), ["20261023T201500Z"], "the real backup is untouched")
+
+    def test_a_snapshot_without_a_manifest_counts_as_real_so_the_rule_errs_on_keeping_data(self):
+        d = self.backups / "wptest/20261023T201500Z"
+        (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x")
+        self.empty_site()
+        self.assertNotEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+
+    def test_an_earlier_empty_snapshot_does_not_count_as_real(self):
+        self.empty_site()
+        self.assertEqual(self.backup("20261023T201500Z", "--tag=final").returncode, 0)
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+
+    def test_when_the_tables_cannot_be_counted_nothing_is_taken(self):
+        self.empty_site()
+        self.put("tables_fail", "")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not count the tables", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_a_count_that_is_not_zero_is_not_empty(self):
+        for answer in ("1", "57", "", "zero", "0 "):
+            self.empty_site(answer)
+            r = self.backup("20261024T201500Z", "--tag=final")
+            self.assertNotEqual(r.returncode, 0, repr(answer))
+
     def test_a_same_second_collision_is_refused_and_does_not_nest_a_snapshot(self):
         self.assertEqual(self.backup("20261024T201500Z").returncode, 0)
         r = self.backup("20261024T201500Z")
@@ -246,6 +350,25 @@ class Backup(Base):
         self.assertEqual(set(self.snapshots()), hand)
         for stray in ("notes", "20260101", "20260101T000000Z.keep", "important.txt"):
             self.assertTrue((self.backups / "wptest" / stray).exists(), stray + " is not a snapshot and must never be deleted")
+
+    def test_a_pre_import_snapshot_is_tagged_and_is_never_pruned(self):
+        r = self.backup("20261001T020000Z", "--tag=pre-import")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("tag=pre-import", (self.backups / "wptest" / "20261001T020000Z" / "MANIFEST").read_text())
+        self.assertIn("OK: snapshot 20261001T020000Z of wptest", r.stdout, "wp-site-import reads the stamp from this line")
+        for day in range(2, 30):
+            self.backup("202610%02dT031500Z" % day)
+            self.backup("202610%02dT041500Z" % day, "--tag=pre-update")
+        snaps = self.snapshots()
+        self.assertIn("20261001T020000Z", snaps, "the old site of an import that is still waiting must survive any number of nightly runs and pre-update snapshots")
+        self.assertLess(len(snaps), 20, "the other snapshots are still pruned")
+
+    def test_a_pre_import_backup_of_an_empty_site_is_refused(self):
+        self.empty_site()
+        r = self.backup("20261024T200300Z", "--tag=pre-import")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
 
     def test_a_pre_update_snapshot_is_tagged_and_is_pruned_on_its_own(self):
         r = self.backup("20261024T020000Z", "--tag=pre-update")
@@ -436,6 +559,41 @@ class BackupCheck(Base):
         self.assertEqual(len(self.said()), 2)
         self.assertIn("has a fresh backup again", self.said()[1])
 
+    def waiting_for_an_import(self, tables="0"):
+        self.shim("docker", DOCKER_COUNT)
+        self.put("tables", tables)
+        t = time.time() - 40 * 3600
+        os.utime(self.site.parent / "wptest", (t, t))
+
+    def test_a_site_with_no_tables_and_no_snapshot_is_not_stale_however_old_it_is(self):
+        self.waiting_for_an_import()
+        for _ in range(2):
+            self.run_script(self.script)
+        self.assertEqual(self.said(), [], "an empty site waiting for an import has nothing to back up")
+
+    def test_a_site_with_tables_and_no_snapshot_is_stale(self):
+        self.waiting_for_an_import("57")
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1)
+
+    def test_a_site_with_no_tables_but_a_snapshot_is_stale(self):
+        self.waiting_for_an_import()
+        (self.backups / "wptest" / "20261020T201500Z").mkdir()
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "it once had a backup, so an emptied database is a problem")
+
+    def test_a_site_whose_last_good_backup_is_old_is_stale_even_with_no_tables(self):
+        self.waiting_for_an_import()
+        self.mark(40)
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "it was backed up once: an emptied database must not silence the alert")
+
+    def test_a_database_that_cannot_be_counted_does_not_hide_a_stale_site(self):
+        self.waiting_for_an_import()
+        self.put("tables_fail", "1")
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1)
+
     def test_the_limit_is_thirty_hours_exactly(self):
         for age, told in ((29, 0), (30, 1)):
             self.setUp()
@@ -480,8 +638,8 @@ class BackupCheck(Base):
     def test_the_hourly_unit_alerts_on_failure(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         by = {t.get("name"): t for t in tasks}
-        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Deploy the backup freshness check service"]["ansible.builtin.copy"]["content"])
-        self.assertIn("OnCalendar={{ wp_backup_check_calendar }}", by["Deploy the backup freshness check timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Stage the backup freshness check service"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnCalendar={{ wp_backup_check_calendar }}", by["Stage the backup freshness check timer"]["ansible.builtin.copy"]["content"])
         self.assertEqual(self.v["wp_backup_check_calendar"], "hourly")
 
 
@@ -547,9 +705,9 @@ class Drill(Base):
 
     def test_it_is_a_monthly_timer_after_the_proxmox_job_and_a_failure_alerts(self):
         by = {t.get("name"): t for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())}
-        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Deploy the monthly restore drill service"]["ansible.builtin.copy"]["content"])
-        self.assertIn("OnCalendar={{ wp_drill_calendar }}", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
-        self.assertIn("Persistent=true", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Stage the monthly restore drill service"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnCalendar={{ wp_drill_calendar }}", by["Stage the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("Persistent=true", by["Stage the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
         self.assertEqual(self.v["wp_drill_calendar"], "*-*-01 05:30:00")
         self.assertGreater(self.v["wp_drill_timeout_s"], 600)
 
@@ -580,6 +738,47 @@ class Restore(Base):
         self.assertIn("dellwp restore drill of wptest", self.log("ntfy.log"))
         self.assertIn("CREATE TABLE `wp_options`", self.log("loaded.sql"), "the dump must be loaded into the scratch database")
         self.assertFalse(self.scratch.exists(), "the scratch copy is removed")
+
+    def test_notices_a_plugin_prints_before_the_answers_do_not_break_the_comparison(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOISE="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("OK (https://wptest.example.com; users 2 (live 2), posts 7 (live 7), active plugins 1 (live 1))", r.stdout)
+
+    def test_notices_do_not_hide_an_empty_restore(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOISE="1", SHIM_USERS="0")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("no users", r.stdout)
+
+    def test_the_counts_are_read_without_running_the_friends_plugins_or_theme_on_both_sides(self):
+        self.run_script(self.script, "wptest")
+        reads = [c for c in self.calls() if "--entrypoint wp" in c and "wprestore_" in c and (" user list " in c or " post list " in c or " plugin list " in c or " option get " in c)]
+        self.assertEqual(len(reads), 4)
+        for c in reads:
+            self.assertIn("--skip-plugins --skip-themes", c, c)
+        live = [c for c in self.calls() if " list " in c and "wprestore_" not in c and "--entrypoint wp" in c]
+        self.assertEqual(len(live), 3, "the live site is asked the same three questions")
+        for c in live:
+            self.assertIn("--skip-plugins --skip-themes", c, c)
+        boot = [c for c in self.calls() if " core is-installed" in c]
+        self.assertEqual(len(boot), 1); self.assertNotIn("--skip-plugins", boot[0], "the boot proof loads the plugins")
+
+    def test_a_wp_cli_command_that_fails_is_named_with_what_it_printed(self):
+        r = self.run_script(self.script, "wptest", SHIM_WPFAIL="post")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAILED: WP-CLI 'post list --post_type=any --post_status=any --format=count' exited 3; it printed: partial output|", r.stdout)
+        self.assertIn("stderr: Error: Database connection error|", r.stdout)
+        self.assertFalse(self.scratch.exists())
+
+    def test_an_answer_that_is_not_there_is_named_with_what_was_printed_instead(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOANSWER="plugin")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAILED: WP-CLI 'plugin list --status=active --format=count' printed no usable answer; it printed: Deprecated: only a notice|", r.stdout)
+
+    def test_a_live_site_that_cannot_answer_is_only_a_question_mark(self):
+        (self.tmp / "bin" / "wp-site-cli").write_text("#!/bin/bash\nexit 1\n")
+        r = self.run_script(self.script, "wptest")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("users 2 (live ?), posts 7 (live ?), active plugins 1 (live ?)", r.stdout)
 
     def test_the_scratch_database_and_checks_are_as_locked_down_as_the_site(self):
         self.run_script(self.script, "wptest")

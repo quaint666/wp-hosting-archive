@@ -1,0 +1,114 @@
+---
+# tasks/wp_approvals_common.yml
+# Approvals by phone on dellwp: the root-only files (the key that signs the tokens, the login of the button user, the login of the listener), the listener and its unit. No hosts:/become: and no
+# handlers; imported via import_tasks into dellwp/wp_approvals_dellwp.yml, which sets wp_template_dir, wp_scripts_dir and wp_master_secret. The tokens themselves are made and checked by wp-site-import
+# (tasks/wp_tools_common.yml deploys it, with wp_approvals.py); without these files an import says "phone approval is off" and goes on, so this play can be run any time after the sites play.
+# Secrets: the key is derived from dellwp_wp_master_secret; the two logins are the passwords of the ntfy users `approver` and `wpvm` on centermc92 (host_vars/centermc92/vault_ntfy.yml, made by
+# scripts/wp_approvals_secrets.sh, applied there by centermc92/ntfy_centermc92.yml). Check mode cannot show: whether the listener starts, whether ntfy accepts its login, or the files' contents (no_log).
+
+- name: Stop early if a secret or the tools are missing
+  ansible.builtin.assert:
+    that:
+      - wp_master_secret is defined
+      - hostvars['centermc92']['centermc92_ntfy_approver_password'] is defined
+      - hostvars['centermc92']['centermc92_ntfy_wpvm_password'] is defined
+    fail_msg: >-
+      Missing a secret: dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml), or centermc92_ntfy_approver_password / centermc92_ntfy_wpvm_password (host_vars/centermc92/vault_ntfy.yml:
+      run scripts/wp_approvals_secrets.sh, then centermc92/ntfy_centermc92.yml). Nothing was changed.
+    quiet: true
+
+- name: Look for the tools the listener needs
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ wp_tools_lib }}/wp_approvals.py"
+    - "{{ wp_tools_lib }}/wp_wpress.py"
+    - "{{ wp_tools_bin }}/wp-site-import"
+    - "{{ wp_ntfy_notify_cmd }}"
+  register: wp_approvals_tools
+  check_mode: false
+
+- name: Stop if the tools are not installed
+  ansible.builtin.assert:
+    that: wp_approvals_tools.results | map(attribute='stat') | map(attribute='exists') | list | min
+    fail_msg: "{{ wp_approvals_tools.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }} is missing: run dellwp/wp_sites_dellwp.yml (the tools) and dellvms/ntfy_notify_dellvms.yml first. Nothing was changed."
+    quiet: true
+
+- name: Make the directories (root only)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ wp_approvals_dir }}"
+    - "{{ wp_approvals_state_dir }}"
+
+# The key signs every token. It is a function of the master secret and a label, so it needs no vault entry of its own; rotating the master secret rotates it, and tokens already sent stop working
+# (they expire after wp_approvals_ttl_s anyway).
+- name: Write the signing key
+  ansible.builtin.copy:
+    dest: "{{ wp_approvals_dir }}/key"
+    content: "{{ (wp_master_secret ~ '|wp-approvals') | hash('sha256') }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart the approval listener
+
+- name: Write the button user's login
+  ansible.builtin.copy:
+    dest: "{{ wp_approvals_dir }}/approver"
+    content: "approver:{{ hostvars['centermc92']['centermc92_ntfy_approver_password'] }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Write the listener's login
+  ansible.builtin.copy:
+    dest: "{{ wp_approvals_dir }}/listener"
+    content: "wpvm:{{ hostvars['centermc92']['centermc92_ntfy_wpvm_password'] }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart the approval listener
+
+- name: Deploy the listener module
+  ansible.builtin.copy:
+    src: "{{ wp_scripts_dir }}/wp_approval_listener.py"
+    dest: "{{ wp_tools_lib }}/wp_approval_listener.py"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the approval listener
+
+- name: Deploy the listener command
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_approval_listener.py.j2"
+    dest: "{{ wp_tools_bin }}/wp-approval-listener"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Restart the approval listener
+
+- name: Deploy the listener unit
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/wp_approval_listener.service.j2"
+    dest: /etc/systemd/system/wp-approval-listener.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the approval listener
+
+- name: Reload systemd now if the unit changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the listener
+  ansible.builtin.systemd:
+    name: wp-approval-listener
+    enabled: true
+    state: started
+    daemon_reload: true

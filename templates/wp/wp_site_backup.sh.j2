@@ -10,6 +10,8 @@
 # --tag=final (wp_sites.py stop): the last backup of a site that is about to stop. The site is put in maintenance (nginx answers 503, cron skips) before the dump, so nothing can be written
 # between this snapshot and the stop; on success the flag STAYS UP (the stop's play takes it away once the containers are down; run by hand, remove it yourself or stop the site), on a
 # failure it comes down again. A flag that was already up is never touched. Tagged snapshots are kept on their own: the newest {{ wp_backup_keep_final }} final one, and what is said below for pre-update.
+# --tag=pre-import (wp-site-import --replace): the snapshot of the site as it was before an import replaces its data. It is NEVER pruned (a deny must always be able to put the old site back); wp-site-import removes it on a
+# deny and changes its tag to pre-update on an approve, after which the normal retention ages it out.
 # --tag=pre-update (the update job): the snapshot is marked in its MANIFEST (tag=pre-update) and pruned on its own: the newest {{ wp_backup_keep_preupdate }} tagged snapshots are kept and they do not count
 # towards the daily and weekly ones. Retention: the newest {{ wp_backup_keep_daily }} untagged snapshots, plus the newest of each of the {{ wp_backup_keep_weekly }} calendar weeks (ISO) before the oldest of those. FREEZE: like every per-site
 # job, a backup is skipped (as a success) while a freeze flag exists ({{ wp_freeze_file }} or the site's own freeze file): a frozen site and its backup set stay exactly as they are.
@@ -24,11 +26,11 @@ readonly KEEP_WEEKLY='{{ wp_backup_keep_weekly }}'
 readonly KEEP_PRE='{{ wp_backup_keep_preupdate }}'
 readonly KEEP_FINAL='{{ wp_backup_keep_final }}'
 {% raw %}
-usage() { echo "usage: wp-site-backup <site> [--force] [--tag=pre-update|--tag=final]" >&2; exit 2; }
+usage() { echo "usage: wp-site-backup <site> [--force] [--tag=pre-update|--tag=final|--tag=pre-import]" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage
 require_site "$1"; shift
 force=no; tag=""
-for a in "$@"; do case $a in --force) force=yes ;; --tag=pre-update) tag=pre-update ;; --tag=final) tag=final ;; *) usage ;; esac; done
+for a in "$@"; do case $a in --force) force=yes ;; --tag=pre-update) tag=pre-update ;; --tag=final) tag=final ;; --tag=pre-import) tag=pre-import ;; *) usage ;; esac; done
 frozen=""
 for flag in "$WP_FREEZE" "$dir/freeze"; do [ -e "$flag" ] && frozen=$flag; done
 if [ -n "$frozen" ] && [ "$force" = no ]; then echo "wp-site-backup: $site is frozen ($frozen exists); skipped (--force backs up anyway)"; exit 0; fi
@@ -52,7 +54,27 @@ docker exec "$db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MAR
   | gzip > "$partial/db.sql.gz" || die "mariadb-dump failed"
 gzip -t "$partial/db.sql.gz" || die "the dump fails gzip's integrity check"
 case "$(gzip -dc "$partial/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the dump has no completion marker (truncated?)" ;; esac
-[ "$(gzip -dc "$partial/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the dump has no wp_options table (an empty database?)"
+empty=no
+if [ "$(gzip -dc "$partial/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -ne 1 ]; then
+  # A database with no tables at all is accepted in ONE case (the FINAL backup is taken as an empty snapshot, the nightly one is skipped as a success): a site that has never had a real snapshot (a site created empty, or reset after an import was turned down). Nothing is
+  # being replaced, so nothing can be lost, and without this such a site could not be stopped and so never deleted. Every other case keeps the refusal: a nightly backup of an emptied database would
+  # rotate the real backups out, and "tables but no wp_options" is damage, not emptiness. The snapshot says empty=yes in its MANIFEST.
+  tables=$(table_count "$site") || die "could not count the tables of $site"
+  real=0
+  while read -r s_; do grep -qx 'empty=yes' "$dest/$s_/MANIFEST" 2>/dev/null || real=$((real + 1)); done \
+    < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n')
+  if [ "$tables" = 0 ] && [ "$real" = 0 ] && { [ -z "$tag" ] || [ "$tag" = final ]; }; then
+    if [ "$tag" = final ]; then
+      empty=yes; echo "note: $site has no tables and has never had a real backup: an empty final snapshot is taken (empty=yes)"
+    else
+      # The nightly job on a site that is waiting for an import: nothing exists to lose and nothing to rotate out, so it is not a failure. (An emptied database of a site that HAS real backups is
+      # still refused below, and the alert stands.)
+      echo "wp-site-backup: $site has no tables and has never had a real backup (it is waiting for an import): nothing to back up"; exit 0
+    fi
+  else
+    die "the dump has no wp_options table (an empty database?)"
+  fi
+fi
 
 # 2. the files, hard-linked against the newest snapshot that is complete
 latest=$(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort | tail -n 1)
@@ -65,7 +87,7 @@ rsync -a --delete --exclude=/cache/ --exclude=/upgrade/ --exclude=/debug.log "${
 # 3. what it is
 core=$(sed -n "s/^\$wp_version = '\(.*\)';.*/\1/p" "$dir/html/wp-includes/version.php" | head -n 1)
 {
-  echo "site=$site"; echo "stamp=$stamp"; echo "core=${core:-unknown}"; [ -z "$tag" ] || echo "tag=$tag"
+  echo "site=$site"; echo "stamp=$stamp"; echo "core=${core:-unknown}"; [ -z "$tag" ] || echo "tag=$tag"; [ "$empty" = no ] || echo "empty=yes"
   echo "dump_bytes=$(stat -c %s "$partial/db.sql.gz")"
   echo "files=$(find "$partial/files" -type f | wc -l)"
   echo "kbytes=$(du -sk "$partial" | cut -f1)"
@@ -83,13 +105,15 @@ echo "OK: snapshot $stamp of $site ($(grep '^kbytes=' "$dest/$stamp/MANIFEST" | 
 if [ -n "$frozen" ]; then echo "frozen ($frozen exists): backed up because of --force; nothing is pruned"; exit 0; fi
 week() { local d=${1:0:8}; date -u -d "${d:0:4}-${d:4:2}-${d:6:2}" +%G-%V; }
 mapfile -t all < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort -r)
-plain=(); pre=(); fin=()
+plain=(); pre=(); fin=(); imp=()
 for s in "${all[@]}"; do
-  if grep -qx 'tag=pre-update' "$dest/$s/MANIFEST" 2>/dev/null; then pre+=("$s")
+  if grep -qx 'tag=pre-import' "$dest/$s/MANIFEST" 2>/dev/null; then imp+=("$s")
+  elif grep -qx 'tag=pre-update' "$dest/$s/MANIFEST" 2>/dev/null; then pre+=("$s")
   elif grep -qx 'tag=final' "$dest/$s/MANIFEST" 2>/dev/null; then fin+=("$s")
   else plain+=("$s"); fi
 done
 keep=" "; n=0; seen=" "; oldest_week=""
+for s in "${imp[@]}"; do keep+="$s "; done   # pre-import: the old site of an import that waits for a decision. Never pruned here; wp-site-import removes it on a deny and re-tags it pre-update on an approve.
 for s in "${plain[@]}"; do
   if [ "$n" -lt "$KEEP_DAILY" ]; then keep+="$s "; n=$((n + 1)); oldest_week=$(week "$s"); fi
 done

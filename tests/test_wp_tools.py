@@ -57,9 +57,9 @@ class Tools(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wptools-"))
         self.v = base_vars()
         v = dict(self.v, wp_tools_bin=str(self.tmp / "bin"), wp_tools_lib=str(self.tmp / "lib"), wp_data_mount=str(self.tmp / "data"), wp_freeze_file=str(self.tmp / "freeze"),
-                 inventory_hostname="dellwp")
+                 inventory_hostname="dellwp", wp_cli_cache_dir=str(self.tmp / "cache"))
         self.ctx = v
-        for d in ("bin", "lib", "shim", "log", "data/sites/wptest"):
+        for d in ("bin", "lib", "shim", "log", "cache", "data/sites/wptest"):
             (self.tmp / d).mkdir(parents=True)
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
@@ -137,6 +137,37 @@ class Tools(unittest.TestCase):
         for flag in ("--allow-root", "--skip-plugins", "--skip-themes"):
             self.assertNotIn(flag, a)
         self.assertNotIn("/var/run/docker.sock", " ".join(a))
+
+    def test_only_code_mode_keeps_its_downloads_between_runs(self):
+        cache = str(self.tmp / "cache")
+        self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "install", "woocommerce")
+        a = self.argv()
+        self.assertIn("%s:/wp-cli-cache" % cache, a)
+        self.assertTrue(self.pair("-e", "WP_CLI_CACHE_DIR=/wp-cli-cache"))
+        self.assertEqual([x for x in a if x.startswith("WP_CLI_CACHE_DIR=")], ["WP_CLI_CACHE_DIR=/wp-cli-cache"], "one setting, not two that fight")
+        self.assertFalse([x for x in a if x.startswith(cache) and x.endswith(":ro")], "the cache is writable: that is how it fills")
+        (self.tmp / "log" / "docker.argv").unlink()
+        self.run_tool("wp-site-cli", "wptest", "core", "version")
+        a = self.argv()
+        self.assertNotIn("%s:/wp-cli-cache" % cache, a, "the web app's own uid never sees the cache")
+        self.assertEqual([x for x in a if x.startswith("WP_CLI_CACHE_DIR=")], ["WP_CLI_CACHE_DIR=/tmp/cache"])
+        self.assertFalse([x for x in a if "wp-cli-cache" in x])
+
+    def test_code_mode_without_the_cache_directory_stops_and_says_what_to_run_and_a_plain_read_does_not_need_it(self):
+        (self.tmp / "cache").rmdir()
+        r = self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "list")
+        self.assertEqual(r.returncode, 2); self.assertIn("is missing (run dellwp/wp_sites_dellwp.yml)", r.stderr)
+        self.assertNotIn("run", self.argv(), "no container was started")
+        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "core", "version").returncode, 0)
+
+    def test_the_cache_directory_is_made_root_only_and_aged_out(self):
+        tasks = {t["name"]: t for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())}
+        d = tasks["Make the WP-CLI download cache directory"]["ansible.builtin.file"]
+        self.assertEqual((d["path"], d["owner"], d["group"], d["mode"]), ("{{ wp_cli_cache_dir }}", "root", "root", "0700"))
+        c = tasks["Age out the WP-CLI download cache"]["ansible.builtin.copy"]
+        self.assertEqual(c["dest"], "/etc/tmpfiles.d/wp-cli-cache.conf")
+        self.assertEqual(c["content"].strip(), "d {{ wp_cli_cache_dir }} 0700 root root {{ wp_cli_cache_days }}d")
+        self.assertRegex(self.v["wp_cli_cache_dir"], r"^/var/cache/[a-z-]+$"); self.assertGreaterEqual(self.v["wp_cli_cache_days"], 7)
 
     def test_code_mode_is_root_without_capabilities_and_skips_plugins(self):
         r = self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "update", "--all")
@@ -398,7 +429,7 @@ class Tools(unittest.TestCase):
         self.assertIn("readonly WP_SITES='alive held'", lib, "the tools act on sites that exist; a tombstone is 'not in wp_sites'")
         self.assertEqual(env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=[{"name": "only"}])).count("readonly WP_SITES='only'"), 1)
         tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
-        expr = [t for t in tools if t.get("name") == "Deploy the tools"][0]["vars"]["wp_update_policies"]
+        expr = [t for t in tools if t.get("name") == "Stage the tools"][0]["vars"]["wp_update_policies"]
         got = jinja2.Environment().from_string(expr).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()
         self.assertEqual(got, "alive:%s held:%s" % (self.v["wp_site_defaults"]["update_policy"], self.v["wp_site_defaults"]["update_policy"]))
 
@@ -460,6 +491,25 @@ class Tools(unittest.TestCase):
         self.assertEqual(calls[-1], (True, ["plugin", "delete", "shady-plugin"]))
         self.assertNotIn("activate", [c[1][1] for c in calls if len(c[1]) > 1])
         self.assertIn("result=FAILED", self.log("logger.log"))
+
+    def test_ext_explains_a_failed_checksum_check_before_it_removes_the_plugin(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "shady-plugin", verify_fails=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--- diagnostics for 'shady-plugin' (its checksum check failed):", r.stderr)
+        for needle in ("plugin list:", "debug lines of the same check:", "the plugin's directory:", "--- end of diagnostics"):
+            self.assertIn(needle, r.stderr)
+        calls = self.wp_calls()
+        self.assertIn((False, ["plugin", "list", "--fields=name,status,version", "--format=csv"]), calls)
+        self.assertIn((False, ["plugin", "verify-checksums", "shady-plugin", "--debug"]), calls)
+        order = [c[1][:2] for c in calls]
+        self.assertLess(order.index(["plugin", "list"]), len(order) - 1 - order[::-1].index(["plugin", "delete"]), "the diagnostics come before the plugin is removed")
+        self.assertTrue(all(not root for root, args in calls if args[:2] in (["plugin", "list"], ["plugin", "verify-checksums"])), "the diagnostics run as the web app, not as root")
+
+    def test_ext_prints_no_diagnostics_when_the_check_passes(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "woocommerce")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("diagnostics", r.stderr + r.stdout)
+        self.assertEqual(len(self.wp_calls()), 2)
 
     def test_ext_installs_a_theme_by_slug_and_says_it_cannot_verify_it(self):
         r = self.run_tool("wp-site-ext", "wptest", "theme", "install", "twentytwentysix")
@@ -652,11 +702,11 @@ class Tools(unittest.TestCase):
             got = (e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state}))
             self.assertEqual(got, want, state)
         tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
-        units = [x for x in tools if x.get("name") == "Deploy the WordPress job units"][0]
-        self.assertEqual(units["notify"], "Reload systemd")
+        send = [x for x in tools if x.get("name") == "Send the WordPress units"][0]
+        self.assertEqual(send["notify"], "Reload systemd")
         names = [x.get("name") for x in tools]
-        self.assertGreater(names.index("Reload systemd now if a unit changed"), names.index("Deploy the WordPress job units"), "the reload must follow the units it loads")
-        self.assertLess(names.index("Reload systemd now if a unit changed"), names.index("Deploy the backup freshness check service"), "the tools tasks end by deploying their own timer; the sites come after all of them")
+        self.assertGreater(names.index("Reload systemd now if a unit changed"), names.index("Send the WordPress units"), "the reload must follow the units it loads")
+        self.assertLess(names.index("Reload systemd now if a unit changed"), names.index("Enable the backup freshness check timer"), "the timers are enabled only after systemd knows the units")
         wrapper = yaml.safe_load((ROOT / "dellwp/wp_sites_dellwp.yml").read_text())[0]
         self.assertIn("Reload systemd", [h["name"] for h in wrapper["handlers"]])
 
@@ -668,16 +718,162 @@ class Tools(unittest.TestCase):
 
     def test_the_tasks_install_the_tools_root_only(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
-        deploy = [t for t in tasks if t.get("name") == "Deploy the tools"][0]["ansible.builtin.template"]
-        self.assertEqual((deploy["owner"], deploy["group"], deploy["mode"]), ("root", "root", "0750"))
-        lib = [t for t in tasks if t.get("name") == "Deploy the tools library"][0]["ansible.builtin.template"]
-        self.assertEqual((lib["owner"], lib["mode"]), ("root", "0644"))
+        by = {t["name"]: t["ansible.posix.synchronize"] for t in tasks if "ansible.posix.synchronize" in t}
+        self.assertTrue({"--chown=root:root", "--chmod=F0750"} <= set(by["Send the tools"]["rsync_opts"]))
+        for n in ("Send the tools library and the Python modules", "Send the WordPress units"):
+            self.assertTrue({"--chown=root:root", "--chmod=F0644"} <= set(by[n]["rsync_opts"]), n)
         # what the tasks DO (comments are not parsed): no task writes a sudoers file or sets a setuid mode
         plays = yaml.safe_load((ROOT / "dellwp/wp_sites_dellwp.yml").read_text())
         text = yaml.dump(tasks) + yaml.dump(plays)
         self.assertNotIn("sudoers", text)
         for mode in __import__("re").findall(r"mode: '?\"?([0-7]{3,4})", text):
             self.assertLess(int(mode, 8) & 0o7000, 1, "setuid/setgid/sticky bit in mode " + mode)
+
+
+class Staging(unittest.TestCase):
+    """tasks/wp_tools_common.yml renders on the controller and sends the files with rsync. These check the shape of those tasks, and run the real rsync with the real options on a
+    throwaway tree (as the current user: root's --chown is the only difference) to prove what the options do to the destination."""
+    def setUp(self):
+        self.tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
+        self.by = {t.get("name"): t for t in self.tasks}
+        self.d = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.d.name)
+
+    def tearDown(self):
+        self.d.cleanup()
+
+    def sync(self, name):
+        return self.by[name]["ansible.posix.synchronize"]
+
+    SENDS = {"Send the tools library and the Python modules": ("lib", "{{ wp_tools_lib }}/", "F0644"), "Send the tools": ("bin", "{{ wp_tools_bin }}/", "F0750"),
+             "Send the WordPress units": ("units", "/etc/systemd/system/", "F0644")}
+
+    # the only things written on the VM by a task of their own (everything else is rendered on the controller and sent by rsync): two directories and one tmpfiles rule
+    REMOTE_OWN = {"Make the tools library directory": "{{ wp_tools_lib }}", "Make the WP-CLI download cache directory": "{{ wp_cli_cache_dir }}", "Age out the WP-CLI download cache": "/etc/tmpfiles.d/wp-cli-cache.conf"}
+
+    def test_nothing_is_written_on_the_vm_except_by_rsync_two_directories_one_tmpfiles_rule_and_the_enabled_timers(self):
+        for t in self.tasks:
+            for mod in ("ansible.builtin.template", "ansible.builtin.copy"):
+                if mod in t and t["name"] not in self.REMOTE_OWN:
+                    self.assertEqual((t.get("delegate_to"), t.get("become"), t.get("check_mode")), ("localhost", False, False), t["name"] + ": rendering happens on the controller, in check mode too, without sudo")
+                    self.assertTrue(t[mod]["dest"].startswith("{{ wp_stage.path }}/"), t["name"] + " must write into the staging directory")
+                    self.assertTrue(t["name"].startswith("Stage ") or t["name"] == "Write the lists of the staged files", t["name"])
+            if "ansible.builtin.file" in t and t["name"] not in self.REMOTE_OWN:
+                self.assertEqual((t.get("delegate_to"), t.get("become")), ("localhost", False), t["name"])
+        for name, path in self.REMOTE_OWN.items():
+            t = self.by[name]
+            body = next(v for k, v in t.items() if k in ("ansible.builtin.file", "ansible.builtin.copy"))
+            self.assertEqual((body.get("path") or body.get("dest"), body["owner"], body["group"]), (path, "root", "root"), name)
+            self.assertNotIn("delegate_to", t, name + " is a task on the VM")
+        self.assertEqual(self.by["Make the tools library directory"]["ansible.builtin.file"]["path"], "{{ wp_tools_lib }}")
+
+    def test_staging_never_counts_as_a_change_and_never_prints_a_diff(self):
+        staged = [t for t in self.tasks if t.get("delegate_to") == "localhost"]
+        self.assertGreaterEqual(len(staged), 12)
+        for t in staged:
+            self.assertIs(t.get("changed_when"), False, t["name"] + ": staging is rewritten every run; counting it would hide the real changed=0 of the sends")
+            self.assertIs(t.get("diff"), False, t["name"] + ": a diff of every staged file buries the real differences")
+
+    def test_the_syncs_are_exactly_these_three_and_each_sends_only_what_was_staged(self):
+        syncs = [t["name"] for t in self.tasks if "ansible.posix.synchronize" in t]
+        self.assertEqual(sorted(syncs), sorted(self.SENDS))
+        for name, (sub, dest, mode) in self.SENDS.items():
+            s = self.sync(name)
+            self.assertEqual((s["src"], s["dest"]), ("{{ wp_stage.path }}/%s/" % sub, dest), name)
+            opts = s["rsync_opts"]
+            self.assertIn("--files-from={{ wp_stage.path }}/lists/%s.list" % sub, opts, "the destination directory itself must never be touched: /usr/local/sbin is root:staff")
+            self.assertIn("--chown=root:root", opts); self.assertIn("--chmod=%s" % mode, opts)
+            self.assertFalse([o for o in opts if "delete" in o], "nothing on the VM is ever deleted by these syncs")
+            self.assertEqual((s["archive"], s["checksum"], s["perms"], s["owner"], s["group"]), (False, True, True, True, True), name)
+            self.assertNotIn("delete", s); self.assertNotIn("recursive", s)
+            self.assertLess(int(mode[1:], 8) & 0o7022, 1, "no setuid, setgid, sticky or group/other write bit")
+        self.assertEqual(self.sync("Send the WordPress units")["dest"], "/etc/systemd/system/")
+        self.assertEqual(self.by["Send the WordPress units"]["notify"], "Reload systemd")
+
+    def test_every_tool_module_and_unit_is_staged_where_its_send_looks(self):
+        tools = [i["dest"] for i in self.by["Stage the tools"]["loop"]]
+        self.assertEqual(len(tools), len(set(tools)))
+        self.assertTrue({"wp-site-import", "wp-site-backup", "wp-site-delete", "wp-restore-drill"} <= set(tools))
+        for t in self.by["Stage the tools"], self.by["Stage the WordPress job units"]:
+            self.assertEqual(t["ansible.builtin.template"]["dest"].rsplit("/", 1)[0], "{{ wp_stage.path }}/" + ("bin" if t is self.by["Stage the tools"] else "units"))
+        self.assertEqual(self.by["Stage the tools library"]["ansible.builtin.template"]["dest"], "{{ wp_stage.path }}/lib/common.sh")
+        self.assertEqual(self.by["Stage the Python modules of wp-site-import"]["ansible.builtin.copy"]["dest"], "{{ wp_stage.path }}/lib/{{ item }}")
+        inline = [t["ansible.builtin.copy"]["dest"] for t in self.tasks if t["name"].startswith("Stage the ") and ("service" in t["name"] or "timer" in t["name"]) and "ansible.builtin.copy" in t]
+        self.assertEqual(len(inline), 6)
+        for d in inline:
+            self.assertRegex(d, r"^\{\{ wp_stage.path \}\}/units/wp-[a-z-]+\.(service|timer)$")
+
+    def test_no_staging_or_sending_task_can_be_skipped_by_a_condition(self):
+        for t in self.tasks:
+            if t["name"].startswith(("Stage ", "Send ", "Find the staged", "Write the lists", "Make the staging", "Remove the staging")):
+                self.assertNotIn("when", t, t["name"] + ": a skipped step would leave a stale or empty file set to be sent")
+                self.assertNotIn("ignore_errors", t, t["name"]); self.assertNotIn("failed_when", t, t["name"])
+
+    def test_the_order_stage_then_send_then_reload_then_enable_then_clean_up(self):
+        names = [t["name"] for t in self.tasks]
+        last_stage = max(i for i, n in enumerate(names) if n.startswith("Stage "))
+        first_send = min(i for i, n in enumerate(names) if n.startswith("Send "))
+        self.assertLess(names.index("Make the staging subdirectories"), min(i for i, n in enumerate(names) if n.startswith("Stage ")))
+        self.assertLess(last_stage, names.index("Find the staged files"))
+        self.assertLess(names.index("Write the lists of the staged files"), first_send)
+        self.assertLess(max(i for i, n in enumerate(names) if n.startswith("Send ")), names.index("Reload systemd now if a unit changed"))
+        for n in ("Enable the backup freshness check timer", "Enable the monthly restore drill timer", "Enable the archive purge timer"):
+            self.assertGreater(names.index(n), names.index("Reload systemd now if a unit changed"))
+        self.assertGreater(names.index("Remove the staging directory"), max(i for i, n in enumerate(names) if n.startswith("Send ")))
+
+    def test_the_lists_are_the_staged_files_and_nothing_else(self):
+        w = self.by["Write the lists of the staged files"]
+        self.assertEqual(w["ansible.builtin.copy"]["dest"], "{{ wp_stage.path }}/lists/{{ item.item }}.list")
+        f = self.by["Find the staged files"]
+        self.assertEqual(f["loop"], ["bin", "lib", "units"]); self.assertEqual(f["ansible.builtin.find"]["file_type"], "file")
+        env = jinja2.Environment(keep_trailing_newline=True)    # Ansible puts back the newline Jinja strips
+        env.filters["basename"] = os.path.basename          # Ansible's filter
+        out = env.from_string(w["ansible.builtin.copy"]["content"]).render(item={"files": [{"path": "/x/b"}, {"path": "/x/a"}]})
+        self.assertEqual(out, "a\nb\n")
+
+    # --- what the rsync options really do, with the real rsync
+    def run_rsync(self, sub, user_chown):
+        s = self.sync(next(n for n, v in self.SENDS.items() if v[0] == sub))
+        stage = self.tmp / "stage"
+        opts = [o.replace("{{ wp_stage.path }}", str(stage)).replace("--chown=root:root", "--chown=" + user_chown) for o in s["rsync_opts"]]
+        r = subprocess.run(["rsync", "-c", "-p", "-o", "-g", "--itemize-changes"] + opts + [str(stage / sub) + "/", str(self.tmp / "dest") + "/"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return [l for l in r.stdout.splitlines() if l.strip()]
+
+    def tree(self):
+        stage = self.tmp / "stage"
+        (stage / "bin").mkdir(parents=True); (stage / "lists").mkdir()
+        (stage / "bin/wp-a").write_text("one\n"); (stage / "bin/wp-b").write_text("two\n"); (stage / "bin/not-listed").write_text("x\n")
+        (stage / "lists/bin.list").write_text("wp-a\nwp-b\n")
+        dest = self.tmp / "dest"; dest.mkdir(); (dest / "other").write_text("not ours\n")
+        os.chmod(dest, 0o2775)
+        return dest
+
+    def test_rsync_sets_mode_and_owner_of_the_listed_files_and_leaves_the_directory_and_strangers_alone(self):
+        dest = self.tree()
+        me = "%d:%d" % (os.getuid(), os.getgid())
+        first = self.run_rsync("bin", me)
+        self.assertEqual(len(first), 2, first)
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["other", "wp-a", "wp-b"], "a file that was not listed is not sent")
+        for n in ("wp-a", "wp-b"):
+            self.assertEqual(stat.S_IMODE((dest / n).stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o2775, "the destination directory keeps its mode (setgid, group write)")
+        self.assertEqual((dest / "other").read_text(), "not ours\n")
+
+    def test_a_second_run_changes_nothing_and_a_changed_file_or_a_drifted_mode_is_sent_again(self):
+        dest = self.tree()
+        me = "%d:%d" % (os.getuid(), os.getgid())
+        self.run_rsync("bin", me)
+        self.assertEqual(self.run_rsync("bin", me), [], "idempotent: the second run reports nothing")
+        os.utime(self.tmp / "stage/bin/wp-a", (1, 1))
+        self.assertEqual(self.run_rsync("bin", me), [], "times do not matter, content does")
+        (self.tmp / "stage/bin/wp-a").write_text("changed\n")
+        again = self.run_rsync("bin", me)
+        self.assertEqual(len(again), 1); self.assertIn("wp-a", again[0])
+        os.chmod(dest / "wp-b", 0o777)
+        again = self.run_rsync("bin", me)
+        self.assertEqual(len(again), 1); self.assertIn("wp-b", again[0])
+        self.assertEqual(stat.S_IMODE((dest / "wp-b").stat().st_mode), 0o750, "a drifted mode is put back")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,28 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_site_2fa_reset.sh.j2). Clear a user's two-factor login (they lost the phone and the backup codes):   ssh -t dellwp sudo wp-site-2fa-reset <site> <user>
+# It deletes the Two Factor plugin's settings of that one user (the authenticator secret, the backup codes, the chosen methods and its counters) and ends the user's sessions. The password is
+# not touched. The user's next login has no second step, and the site's own rule (templates/wp/mu/20-wp-hosting-two-factor.php.j2) sends an administrator or shop manager straight to their
+# profile page to set it up again before anything else in wp-admin opens. You type the site name to go on: this removes a protection, so it asks. The user must already exist.
+set -eu
+. {{ wp_tools_lib }}/common.sh
+{% raw %}
+usage() { echo "usage: wp-site-2fa-reset <site> <user>   (run with ssh -t)" >&2; exit 2; }
+[ "$#" -eq 2 ] || usage
+require_site "$1"; user=$2
+refuse_if_stopped
+[[ $user =~ ^[A-Za-z0-9_.@-]{1,60}$ ]] || die "'$user' is not a plausible user name"
+id=$("$WP_BIN/wp-site-cli" "$site" user get "$user" --field=ID --skip-plugins --skip-themes </dev/null 2>/dev/null | tail -n 1) || die "$site has no user '$user'; nothing was changed"
+[[ $id =~ ^[0-9]+$ ]] || die "$site has no user '$user'; nothing was changed"
+open_tty
+ask "This removes the two-factor login of '$user' on $site. Type the site name to go on: " answer
+[ "$answer" = "$site" ] || die "the name did not match; nothing was changed"
+removed=0
+for key in _two_factor_enabled_providers _two_factor_provider _two_factor_totp_key _two_factor_totp_last_successful_login _two_factor_backup_codes _two_factor_nonce \
+           _two_factor_last_login_failure _two_factor_failed_login_attempts _two_factor_password_was_reset; do
+  if "$WP_BIN/wp-site-cli" "$site" user meta delete "$id" "$key" --skip-plugins --skip-themes </dev/null >/dev/null 2>&1; then removed=$((removed + 1)); fi
+done
+"$WP_BIN/wp-site-cli" "$site" user session destroy "$user" --all --skip-plugins --skip-themes </dev/null >&2 || true
+left=$("$WP_BIN/wp-site-cli" "$site" user meta list "$id" --keys=_two_factor_enabled_providers,_two_factor_totp_key,_two_factor_backup_codes --format=count --skip-plugins --skip-themes </dev/null 2>/dev/null | tail -n 1)
+[ "$left" = 0 ] || die "$left two-factor setting(s) of '$user' are still there after the delete: look at them with wp-site-cli $site user meta list $id"
+echo "== two-factor login of $user on $host cleared ($removed setting(s) removed) and their sessions ended" >&2
+{% endraw %}

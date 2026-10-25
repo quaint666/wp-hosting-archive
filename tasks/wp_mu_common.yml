@@ -1,0 +1,92 @@
+---
+# tasks/wp_mu_common.yml
+# The must-use plugins of the hosting service on dellwp: one root-owned directory (wp_mu_dir) that every site's php container mounts read-only at /var/www/wp-mu and names as WPMU_PLUGIN_DIR in its
+# wp-config.php. Imported with import_tasks from tasks/wp_sites_common.yml before any site is deployed (a bind mount of a missing directory would make Docker create it as root).
+# Holds: the login throttle (10-), the Two Factor plugin pinned by version and checksum with its loader (20-), the mail plugin (30-). The sources are templates/wp/mu/; tests/php/ runs them.
+# Secret: dellwp_wp_resend_key (host_vars/dellwp/vault_wp.yml), needed only while a site has mail_mode: send.
+# Check mode cannot show: the download, the unpack, or whether PHP accepts these files; tests/php/run_all.php and the rehearsal do.
+
+- name: Stop early if a site has an unknown mail mode, or sends mail without a key
+  ansible.builtin.assert:
+    that:
+      - wp_sites_merged | map(attribute='mail_mode') | difference(['log', 'send']) | length == 0
+      - (wp_sites_merged | rejectattr('state', 'eq', 'closed') | selectattr('mail_mode', 'eq', 'send') | list | length == 0) or dellwp_wp_resend_key is defined
+    fail_msg: >-
+      A site has a mail_mode other than log or send, or mail_mode: send while dellwp_wp_resend_key (host_vars/dellwp/vault_wp.yml) is not defined. Nothing was changed.
+    quiet: true
+
+- name: Make the must-use plugin directory
+  ansible.builtin.file:
+    path: "{{ wp_mu_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Make the download cache for the pinned plugin
+  ansible.builtin.file:
+    path: /var/cache/wp-mu
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The checksum is checked by get_url: a zip that differs from the pinned one is refused, so a changed or poisoned download never reaches the sites.
+- name: Fetch the Two Factor plugin (pinned by checksum)
+  ansible.builtin.get_url:
+    url: "https://downloads.wordpress.org/plugin/two-factor.{{ wp_two_factor_version }}.zip"
+    dest: "/var/cache/wp-mu/two-factor.{{ wp_two_factor_version }}.zip"
+    checksum: "sha256:{{ wp_two_factor_sha256 }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+# The zip holds one folder, two-factor/; it is unpacked beside the plugins under a versioned name, so a new version is a new folder and the old one goes afterwards. python3's zipfile refuses
+# names that climb out of the target. The folder appears only when the unpack finished (the move is the last step).
+- name: Unpack the Two Factor plugin
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -c
+      - >-
+        set -eu; umask 022; d=$(mktemp -d "$1/.unpack-XXXXXX"); python3 -m zipfile -e "$2" "$d"; chmod -R u=rwX,go=rX "$d"; mv "$d/two-factor" "$1/two-factor-$3"; rmdir "$d"
+      - _
+      - "{{ wp_mu_dir }}"
+      - "/var/cache/wp-mu/two-factor.{{ wp_two_factor_version }}.zip"
+      - "{{ wp_two_factor_version }}"
+    creates: "{{ wp_mu_dir }}/two-factor-{{ wp_two_factor_version }}/two-factor.php"
+
+- name: Look for other versions of the Two Factor plugin
+  ansible.builtin.find:
+    paths: "{{ wp_mu_dir }}"
+    patterns: "two-factor-*"
+    file_type: directory
+  register: wp_mu_old
+  check_mode: false
+
+- name: Remove the versions that are not the pinned one
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ wp_mu_old.files | rejectattr('path', 'eq', wp_mu_dir ~ '/two-factor-' ~ wp_two_factor_version) | list }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Deploy the must-use plugins
+  ansible.builtin.copy:
+    src: "{{ wp_template_dir }}/mu/{{ item }}"
+    dest: "{{ wp_mu_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - 10-wp-hosting-login.php
+    - 30-wp-hosting-mail.php
+
+- name: Deploy the Two Factor loader
+  ansible.builtin.template:
+    src: "{{ wp_template_dir }}/mu/20-wp-hosting-two-factor.php.j2"
+    dest: "{{ wp_mu_dir }}/20-wp-hosting-two-factor.php"
+    owner: root
+    group: root
+    mode: "0644"

@@ -46,6 +46,9 @@ wp_site_defaults:
   upload_mb: 64
   backup_quota_mb: 3072
   allow_xmlrpc: false
+  allow_app_passwords: false
+  allow_user_enum: false
+  mail_mode: log
   php_allow_functions: []
 # port = the loopback port of the site's php-fpm container (unique per site); quota_id = its ext4 project id (unique, never reused for another site).
 wp_sites:
@@ -59,6 +62,41 @@ wp_sites:
     quota_id: 1002
     state: closed
     update_policy: auto
+  - name: rehearsal
+    port: 9103
+    quota_id: 1003
+    state: closed
+    update_policy: notify
+  - name: rehearsal2
+    port: 9104
+    quota_id: 1004
+    state: closed
+    update_policy: notify
+  - name: rehearsal3
+    port: 9105
+    quota_id: 1005
+    state: closed
+    update_policy: notify
+  - name: rehearsal4
+    port: 9106
+    quota_id: 1006
+    state: closed
+    update_policy: notify
+  - name: rehearsal5
+    port: 9107
+    quota_id: 1007
+    state: closed
+    update_policy: notify
+  - name: rehearsal6
+    port: 9108
+    quota_id: 1008
+    state: closed
+    update_policy: notify
+  - name: rehearsal7
+    port: 9109
+    quota_id: 1009
+    state: hold
+    update_policy: notify
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.
@@ -123,6 +161,31 @@ wp_archive_quota_id: 3000002
 wp_archive_quota_mb: 3072
 wp_archive_keep_days: 14
 wp_archive_purge_calendar: "*-*-* 05:15:00"
+# The intake directory (made by the data disk play, mode 0700): where a friend's .wpress is copied before wp-site-import reads it. Its work-<site> directory (the unpacked copy waiting for the
+# operator's approval) and ledger.log live here too, in this project, because /srv/wp/scratch is shared with the restore drill, which sets and then removes its project limit around its own run.
+# The archive file itself counts against the quota, so it holds the file plus what is unpacked from it (a plan that does not fit is refused before anything is written).
+wp_intake_dir: "{{ wp_data_mount }}/intake"
+wp_intake_quota_id: 3000003
+wp_intake_quota_mb: 3072
+# The longest any one command of wp-site-import (a docker exec, a WP-CLI call, wp-site-ext, the SQL load) may run before the tool stops it: a hung container must not hold the import lock for ever.
+wp_import_step_timeout_s: 3600
+# Approvals by phone (scripts/wp_approvals.py, scripts/wp_approval_listener.py): a finished import sends a notification with Approve and Deny buttons to the independent ntfy, the one the alert
+# fallback already uses; its address and topic are read from wp_ntfy_conf at run time, so the address is written once (tasks/ntfy_notify_common.yml). The files in wp_approvals_dir are root-only and
+# rendered by the play from the vault: key (signs the tokens), approver (login:password of the user that can only post to the reply topic; it is inside the buttons) and listener (login:password of the
+# user that can only read it). wp_ntfy_netrc is the file ntfy-notify's fallback already reads. A token is good for wp_approvals_ttl_s seconds and for one use.
+wp_approvals_dir: /etc/wp-approvals
+wp_approvals_reply_topic: wp-approvals
+wp_approvals_ttl_s: 86400
+wp_ntfy_conf: /etc/ntfy-notify.conf
+wp_ntfy_netrc: /etc/ntfy-notify.netrc
+# The listener (scripts/wp_approval_listener.py, dellwp/wp_approvals_dellwp.yml) follows the reply topic as the read-only user and hands each token to wp-site-import resolve. It remembers the last
+# message it handled in wp_approvals_state_dir, handles at most wp_approvals_max_per_minute tokens a minute, and gives the tool wp_approvals_resolve_timeout_s to finish (an approve copies code in and
+# takes a backup). wp_ntfy_notify_cmd is the command tasks/ntfy_notify_common.yml installs; the result of a decision goes to wp_ntfy_topic.
+wp_approvals_state_dir: /var/lib/wp-approvals
+wp_approvals_max_per_minute: 20
+wp_approvals_read_timeout_s: 120
+wp_approvals_resolve_timeout_s: 7200
+wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.
@@ -138,3 +201,42 @@ wp_update_jitter_s: 300
 wp_update_timeout_s: 3000
 wp_update_probe_tries: 3
 wp_update_probe_wait_s: 10
+
+# Scans (dellwp/wp_scans_dellwp.yml, tasks/wp_scans_common.yml; the tools are installed by dellwp/wp_sites_dellwp.yml): ClamAV in a one-shot container with its signatures in wp_clamav_dir, refreshed daily;
+# and the Wordfence Intelligence vulnerability feed (templates/wp/wp_vulnfeed.py.j2, scripts/wp_vulnfeed.py): downloaded daily with a free API key (host_vars/dellwp/vault_wp.yml: dellwp_wp_wordfence_key,
+# put there by scripts/wp_provider_key.sh wordfence), reduced to an index, and every site checked against it; a NEW hit goes to ntfy once. An index older than wp_vulnfeed_max_age_days days is "NOT RUN", never
+# "none known". The update parses about 120 MB of JSON, so its unit has a memory limit.
+wp_clamav_dir: /var/lib/wp-clamav
+wp_clamav_mem_mb: 2048
+wp_clamscan_timeout_s: 1800
+wp_clamav_update_calendar: "*-*-* 02:40:00"
+wp_vulnfeed_dir: /etc/wp-vulnfeed
+wp_vulnfeed_state_dir: /var/lib/wp-vulnfeed
+wp_vulnfeed_url: https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production
+wp_vulnfeed_max_age_days: 3
+wp_vulnfeed_cmd_timeout_s: 120
+wp_vulnfeed_mem_mb: 2048
+wp_vulnfeed_timeout_s: 1800
+wp_vulnfeed_calendar: "*-*-* 04:20:00"
+
+# Must-use plugins of the hosting service (templates/wp/mu/, tasks/wp_mu_common.yml): one root-owned directory on the VM, mounted read-only into every site's php container at /var/www/wp-mu and named
+# by WPMU_PLUGIN_DIR in wp-config.php, so a friend's own wp-content/mu-plugins (held back by the import until you approve it) is a separate, inert folder and an import can never remove ours.
+#   login throttle: failed logins per visitor address and per user name in a window; xmlrpc, application passwords and user listings are off unless the site's allow_* flag says otherwise
+#   two-factor: the Two Factor plugin (pinned in vars/wp.yml), required of the roles in wp_2fa_roles
+#   mail: mail_mode log (default; nothing leaves the site) or send (the provider's HTTPS API); the sender is <site>@wp_mail_sender_domain, the key is dellwp_wp_resend_key in host_vars/dellwp/vault_wp.yml
+wp_mu_dir: "{{ wp_data_mount }}/mu"
+# Where the php container sees it. Named in three places that must agree: the compose mount, WPMU_PLUGIN_DIR in wp-config.php and open_basedir in php.ini (without it PHP may not read the
+# directory, is_dir() says no, and WordPress loads NO must-use plugin and says nothing: seen on dellwp 2026-10-25).
+wp_mu_mount: /var/www/wp-mu
+# The zips WP-CLI downloads from wordpress.org (a plugin or theme by slug and version, which never changes once published) are kept here between runs, so a second import of the same plugins
+# downloads nothing, and a bad minute on the link to wordpress.org costs only the first time (dellwp 2026-10-25: one import took 937 s, almost all of it stalled downloads). Only the --code
+# mode of wp-site-cli mounts it (root-only, 0700); every install is still checked against wordpress.org's checksums afterwards. Files older than wp_cli_cache_days days are removed by systemd-tmpfiles.
+wp_cli_cache_dir: /var/cache/wp-cli
+wp_cli_cache_days: 30
+wp_2fa_roles: "administrator,shop_manager"
+wp_login_limit_ip: 20
+wp_login_limit_user: 10
+wp_login_window_s: 900
+wp_mail_sender_domain: "mail.{{ wp_domain }}"
+wp_mail_per_hour: 20
+wp_mail_per_day: 60

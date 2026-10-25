@@ -56,7 +56,11 @@ if [ "$resume" = no ]; then
   [ -f "$snap/db.sql.gz" ] && [ -d "$snap/files" ] || die "$snap is not a complete snapshot"
   gzip -t "$snap/db.sql.gz" || die "the final snapshot's dump fails gzip's integrity check"
   case "$(gzip -dc "$snap/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the final snapshot's dump has no completion marker (truncated?)" ;; esac
-  [ "$(gzip -dc "$snap/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the final snapshot's dump has no wp_options table"
+  if grep -qx 'empty=yes' "$snap/MANIFEST"; then      # a site that never had data (wp-site-backup --tag=final marks it): its dump must really have no table
+    [ "$(gzip -dc "$snap/db.sql.gz" | grep -c '^CREATE TABLE ' || true)" -eq 0 ] || die "the final snapshot is marked empty but its dump has tables"
+  else
+    [ "$(gzip -dc "$snap/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -eq 1 ] || die "the final snapshot's dump has no wp_options table"
+  fi
   snap_core=$(sed -n 's/^core=//p' "$snap/MANIFEST" | head -n 1)
   size_kb=$(du -sk "$snap" | cut -f1)
   expires=$(date -u -d "+$KEEP_DAYS days" +%Y-%m-%d)
@@ -90,6 +94,7 @@ if [ "$resume" = no ]; then
     {
       echo "site=$site"; echo "snapshot=$newest"; echo "core=${snap_core:-unknown}"; echo "deleted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "expires=$expires"
       echo "db_sha256=$(sha256sum "$tmp/db.sql.gz" | cut -d' ' -f1)"; echo "files_sha256=$(sha256sum "$tmp/wp-content.tar.gz" | cut -d' ' -f1)"
+      ! grep -qx 'empty=yes' "$snap/MANIFEST" || echo "empty=yes"
     } > "$tmp/MANIFEST"
   fi
   gzip -t "$tmp/db.sql.gz" || die "the archived dump fails gzip's integrity check; nothing was removed"

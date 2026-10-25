@@ -70,6 +70,7 @@ esac
 DOCKER = r'''#!/bin/bash
 echo "docker $*" >> "$SHIM/order"
 case "$1" in logs) cat "$SHIM/php_log" 2>/dev/null; exit 0 ;; esac
+case "$*" in *information_schema*) [ -f "$SHIM/tables_fail" ] && exit 1; cat "$SHIM/tables" 2>/dev/null || echo 57; exit 0 ;; esac
 exit 0
 '''
 NTFY = '#!/bin/bash\necho "$*" >> "$SHIM/ntfy.log"\n'
@@ -119,6 +120,24 @@ class Update(Base):
     def last(self):
         p = self.site / ".update-last"
         return dict(l.split("=", 1) for l in p.read_text().splitlines()) if p.exists() else {}
+
+    # --- a site that is waiting for an import
+    def test_a_site_with_no_tables_has_nothing_to_update_and_says_nothing_to_the_phone(self):
+        self.put("tables", "0")
+        self.have(core="7.1.4", plugins=["woocommerce,11.0.1,11.2.1"])
+        for args in ((), ("--check",), ("--apply",)):
+            r = self.run_update(*args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("waiting for an import): nothing to update", r.stdout)
+        self.assertEqual(self.told(), [])
+        self.assertEqual(self.steps("backup") + self.steps("recover") + self.steps("ext") + self.steps("systemctl"), [])
+        self.assertFalse(self.flag.exists()); self.assertEqual(self.last(), {})
+
+    def test_a_database_that_cannot_be_counted_fails_the_job_so_it_alerts(self):
+        self.put("tables_fail", "1")
+        r = self.run_update()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not count the tables", r.stderr)
 
     # --- nothing to do, and the policies
     def test_nothing_available_changes_nothing_and_says_nothing(self):
@@ -396,9 +415,9 @@ class Update(Base):
     def test_the_tool_the_units_and_the_timer_are_deployed_and_the_policies_come_from_the_sites(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         by = {t["name"]: t for t in tasks}
-        tool = by["Deploy the tools"]
+        tool = by["Stage the tools"]
         self.assertIn({"src": "wp_site_update.sh.j2", "dest": "wp-site-update"}, tool["loop"])
-        units = {i["dest"] for i in by["Deploy the WordPress job units"]["loop"]}
+        units = {i["dest"] for i in by["Stage the WordPress job units"]["loop"]}
         self.assertTrue({"wp-update@.service", "wp-update@.timer"} <= units)
         sites = [{"name": "a", "update_policy": "auto"}, {"name": "b"}, {"name": "c", "update_policy": "freeze"}]
         got = jinja2.Environment().from_string(tool["vars"]["wp_update_policies"]).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()

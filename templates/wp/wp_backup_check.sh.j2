@@ -1,7 +1,7 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_backup_check.sh.j2). Every hour: is every site still being backed up? A backup job that fails tells ntfy through OnFailure=, but a timer
 # that silently stops firing tells nobody, and the first sign would be the day a restore is needed. A site is stale when its newest good backup (.last-success) is
-# {{ wp_backup_stale_hours }} hours old or more; a site that has never been backed up is stale once it is that old itself. Told once when it starts and once when it ends.
+# {{ wp_backup_stale_hours }} hours old or more; a site that has never been backed up is stale once it is that old itself, unless it has no tables and no snapshot (it is waiting for an import). Told once when it starts and once when it ends.
 # A STOPPED site (stopped.flag) is skipped for the same reason. A FROZEN site (the global freeze file or its own) is skipped: its backups are paused on purpose, so "stale" would be noise. It is judged again once unfrozen, which can raise one alert
 # before the next night's backup after a long freeze. WP_BACKUP_STALE_HOURS in the environment replaces the limit (the rehearsal uses 0 to make every site stale at once).
 set -u
@@ -27,6 +27,9 @@ for site in $WP_SITES; do
     age=$(( (now - $(stat -c %Y "$WP_DATA/$site")) / 3600 )); last=never
   else
     continue
+  fi
+  if [ "$last" = never ] && [ "$age" -ge "$STALE_HOURS" ] && [ "$(table_count "$site" 2>/dev/null)" = 0 ] && ! ls "$BACKUPS/$site"/[0-9]*T*Z >/dev/null 2>&1; then
+    continue   # a site that is waiting for an import: no tables and no snapshot, so there is nothing to back up and nothing that could be stale
   fi
   if [ "$age" -ge "$STALE_HOURS" ]; then
     [ -f "$f" ] || { notify "site $site has no backup newer than ${STALE_HOURS} hours (last good: $last, ${age} hours ago): the nightly job is not producing backups"; touch "$f"; }

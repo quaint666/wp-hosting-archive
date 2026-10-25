@@ -54,6 +54,9 @@ if [ "$mode" = policy ] && [ "$policy" = freeze ]; then say "$site has update po
 exec 9>"$dir/.update.lock"
 flock -n 9 || die "another update of $site is running"
 [ -f "$dir/wp-config.php" ] || die "the site is not set up under $dir"
+# A site with no tables is waiting for an import: there is nothing to update, and WP-CLI would fail on it every night. A database that cannot be asked still fails (and alerts).
+tables=$(table_count "$site") || die "could not count the tables of $site (is its database up?)"
+if [ "$tables" = 0 ]; then say "$site has no tables yet (it is waiting for an import): nothing to update"; exit 0; fi
 
 # --- what is available (read-only; core and the listings run without any plugin's code)
 # check-update prints the version, or nothing but a "Success: ... latest version" line: count only what looks like a version

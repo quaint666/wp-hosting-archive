@@ -17,6 +17,7 @@ readonly CLI_MEM='{{ wp_cli_mem_mb }}'
 readonly CLI_TMP='{{ wp_cli_tmp_mb }}'
 readonly CLI_CPUS='{{ wp_cli_cpus }}'
 readonly CLI_PIDS='{{ wp_cli_pids }}'
+readonly CACHE_DIR='{{ wp_cli_cache_dir }}'
 {% raw %}
 [ "$#" -ge 2 ] || { echo "usage: wp-site-cli <site> [--code] [--stdin] <wp arguments...>" >&2; exit 2; }
 
@@ -60,16 +61,18 @@ args=(docker run --rm --name "wpcli_${site}_$$" --network "wp-${site}_default"
   --read-only --tmpfs /tmp:size=${CLI_TMP}m,mode=1777
   --cap-drop ALL --security-opt no-new-privileges:true
   --memory "${CLI_MEM}m" --memory-swap "${CLI_MEM}m" --cpus "$CLI_CPUS" --pids-limit "$CLI_PIDS"
-  -e HOME=/tmp -e WP_CLI_CACHE_DIR=/tmp/cache)
+  -e HOME=/tmp)
 [ "$stdin" = yes ] || [ -t 0 ] && args+=(-i)
 [ -t 0 ] && [ -t 1 ] && args+=(-t)
 extra=()
 if [ "$mode" = code ]; then
-  args+=(--user 0:0 -v "$dir/html:/var/www/html")
+  # downloads are kept between runs (see wp_cli_cache_dir): the zip of a published version never changes, and the install is checked against wordpress.org's checksums afterwards
+  [ -d "$CACHE_DIR" ] || die "$CACHE_DIR is missing (run dellwp/wp_sites_dellwp.yml)"
+  args+=(--user 0:0 -v "$dir/html:/var/www/html" -v "$CACHE_DIR:/wp-cli-cache" -e WP_CLI_CACHE_DIR=/wp-cli-cache)
   extra+=(--allow-root)
   extra+=(--skip-plugins --skip-themes)
 else
-  args+=(--user "$PHP_UID:$PHP_UID" -v "$dir/html:/var/www/html:ro" -v "$dir/html/wp-content/uploads:/var/www/html/wp-content/uploads")
+  args+=(-e WP_CLI_CACHE_DIR=/tmp/cache --user "$PHP_UID:$PHP_UID" -v "$dir/html:/var/www/html:ro" -v "$dir/html/wp-content/uploads:/var/www/html/wp-content/uploads")
 fi
 args+=(-v "$dir/wp-config.php:/var/www/html/wp-config.php:ro" "$WP_IMAGE")
 

@@ -66,14 +66,14 @@ class Delete(Base):
         (self.backups / "other").mkdir(); (self.backups / "other/keep.txt").write_text("other")
         (self.vhosts / "wp_site_other.conf").write_text("server { }\n"); (self.units / "wp-other.service").write_text("[Unit]\n")
 
-    def snapshot(self, stamp, tag=None, dump=DUMP_OK, files=True, manifest=True):
+    def snapshot(self, stamp, tag=None, dump=DUMP_OK, files=True, manifest=True, empty=False):
         d = self.bk / stamp
         d.mkdir(parents=True)
         gz(dump, d / "db.sql.gz")
         if files:
             (d / "files/uploads").mkdir(parents=True); (d / "files/uploads/a.jpg").write_text("a" * 100); (d / "files/plugins").mkdir(); (d / "files/plugins/p.php").write_text("<?php\n")
         if manifest:
-            (d / "MANIFEST").write_text("site=wptest\nstamp=%s\ncore=7.1.3\n%s" % (stamp, "tag=%s\n" % tag if tag else ""))
+            (d / "MANIFEST").write_text("site=wptest\nstamp=%s\ncore=7.1.3\n%s%s" % (stamp, "tag=%s\n" % tag if tag else "", "empty=yes\n" if empty else ""))
         return d
 
     def delete(self, *args, **env):
@@ -91,6 +91,42 @@ class Delete(Base):
 
     def final(self):
         return self.archive / ("wptest-" + STAMP)
+
+    # --- a site that never had data
+    EMPTY_DUMP = "-- MariaDB dump\n-- Dump completed on 2026-10-24 20:15:00\n"
+
+    def only_snapshot(self, **kw):
+        import shutil
+        shutil.rmtree(self.bk / STAMP)
+        return self.snapshot(STAMP, tag="final", **kw)
+
+    def test_a_site_that_never_had_data_is_archived_and_deleted_from_its_empty_final_snapshot(self):
+        self.only_snapshot(dump=self.EMPTY_DUMP, empty=True)
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        f = self.final()
+        m = dict(l.split("=", 1) for l in (f / "MANIFEST").read_text().splitlines())
+        self.assertEqual(m.get("empty"), "yes", "the archive says it holds nothing")
+        self.assertEqual(gzip.open(f / "db.sql.gz", "rt").read(), self.EMPTY_DUMP)
+        self.assertFalse(self.site.exists())
+
+    def test_an_empty_dump_that_is_not_marked_empty_is_still_refused(self):
+        self.only_snapshot(dump=self.EMPTY_DUMP, empty=False)
+        r = self.delete()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.untouched()
+
+    def test_a_snapshot_marked_empty_whose_dump_has_tables_is_refused(self):
+        self.only_snapshot(dump=DUMP_OK, empty=True)
+        r = self.delete()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("marked empty but its dump has tables", r.stderr)
+        self.untouched()
+
+    def test_a_normal_archive_has_no_empty_mark(self):
+        self.assertEqual(self.delete().returncode, 0)
+        self.assertNotIn("empty", (self.final() / "MANIFEST").read_text())
 
     # --- a good delete
     def test_a_good_delete_archives_first_checks_the_archive_and_then_removes_exactly_this_site(self):
@@ -276,9 +312,10 @@ class Delete(Base):
 
     def test_the_file_never_calls_delete_data_outside_and_is_deployed_root_only(self):
         tasks = load("tasks/wp_tools_common.yml")
-        deploy = [t for t in tasks if t.get("name") == "Deploy the tools"][0]
+        deploy = [t for t in tasks if t.get("name") == "Stage the tools"][0]
         self.assertIn({"src": "wp_site_delete.sh.j2", "dest": "wp-site-delete"}, deploy["loop"]); self.assertIn({"src": "wp_archive_purge.sh.j2", "dest": "wp-archive-purge"}, deploy["loop"])
-        self.assertEqual((deploy["ansible.builtin.template"]["owner"], deploy["ansible.builtin.template"]["mode"]), ("root", "0750"))
+        send = [t for t in tasks if t.get("name") == "Send the tools"][0]["ansible.posix.synchronize"]
+        self.assertIn("--chown=root:root", send["rsync_opts"]); self.assertIn("--chmod=F0750", send["rsync_opts"]); self.assertEqual(send["dest"], "{{ wp_tools_bin }}/")
         code = "\n".join(l for l in (ROOT / "templates/wp/wp_site_delete.sh.j2").read_text().splitlines() if not l.lstrip().startswith("#"))
         for bad in ("git ", "ansible", "rm -rf /", "docker restart"):
             self.assertNotIn(bad, code)
@@ -336,7 +373,7 @@ class Purge(Base):
 
     def test_the_unit_and_the_timer_alert_on_failure_and_run_daily(self):
         tasks = load("tasks/wp_tools_common.yml"); by = {t["name"]: t for t in tasks}
-        svc = by["Deploy the archive purge service"]["ansible.builtin.copy"]["content"]; tim = by["Deploy the archive purge timer"]["ansible.builtin.copy"]["content"]
+        svc = by["Stage the archive purge service"]["ansible.builtin.copy"]["content"]; tim = by["Stage the archive purge timer"]["ansible.builtin.copy"]["content"]
         self.assertIn("OnFailure=wp-job-failed@%N.service", svc); self.assertIn("ExecStart={{ wp_tools_bin }}/wp-archive-purge", svc)
         self.assertIn("OnCalendar={{ wp_archive_purge_calendar }}", tim); self.assertIn("Persistent=true", tim)
         self.assertEqual(by["Enable the archive purge timer"]["ansible.builtin.systemd"]["name"], "wp-archive-purge.timer")
