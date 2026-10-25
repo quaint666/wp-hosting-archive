@@ -667,6 +667,19 @@ class Restore(Base):
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("no users", r.stdout)
 
+    def test_the_counts_are_read_without_running_the_friends_plugins_or_theme_on_both_sides(self):
+        self.run_script(self.script, "wptest")
+        reads = [c for c in self.calls() if "--entrypoint wp" in c and "wprestore_" in c and (" user list " in c or " post list " in c or " plugin list " in c or " option get " in c)]
+        self.assertEqual(len(reads), 4)
+        for c in reads:
+            self.assertIn("--skip-plugins --skip-themes", c, c)
+        live = [c for c in self.calls() if " list " in c and "wprestore_" not in c and "--entrypoint wp" in c]
+        self.assertEqual(len(live), 3, "the live site is asked the same three questions")
+        for c in live:
+            self.assertIn("--skip-plugins --skip-themes", c, c)
+        boot = [c for c in self.calls() if " core is-installed" in c]
+        self.assertEqual(len(boot), 1); self.assertNotIn("--skip-plugins", boot[0], "the boot proof loads the plugins")
+
     def test_a_wp_cli_command_that_fails_is_named_with_what_it_printed(self):
         r = self.run_script(self.script, "wptest", SHIM_WPFAIL="post")
         self.assertEqual(r.returncode, 1, r.stdout)
