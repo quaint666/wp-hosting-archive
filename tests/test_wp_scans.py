@@ -179,7 +179,7 @@ class ClamUpdate(ScanBase):
         r = self.update()
         self.assertEqual(r.returncode, 0, r.stderr)
         run = next(c for c in self.calls() if c.startswith("run "))
-        for needle in ("--rm", "--cap-drop ALL", "--security-opt no-new-privileges:true", "-v %s:/var/lib/clamav " % self.sigs, "--entrypoint freshclam " + self.v["wp_image_clamav"], "--datadir=/var/lib/clamav", "--user=root"):
+        for needle in ("--rm", "--cap-drop ALL", "--cap-add SETUID --cap-add SETGID", "--cap-add CHOWN", "--security-opt no-new-privileges:true", "-v %s:/var/lib/clamav " % self.sigs, "--entrypoint freshclam " + self.v["wp_image_clamav"], "--datadir=/var/lib/clamav", "--user=root"):
             self.assertIn(needle, run)
         self.assertEqual(run.count(" -v "), 1)
         m = re.search(r"--memory (\d+m) --memory-swap (\d+m)", run)
