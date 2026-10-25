@@ -171,6 +171,23 @@ class Verdicts(Base):
             self.assertEqual(code, 1, (path, name))
             self.assertIn("unsafe path", text)
 
+    def test_control_characters_in_a_name_are_no_go(self):
+        for name in ("a\x01.php", "a\x7f.php", "a\n.php"):
+            self.out.clear()
+            code, text = self.run_main(self.archive(good_files() + [("plugins/good", name, b"x")]))
+            self.assertEqual(code, 1, repr(name))
+            self.assertIn("unsafe path", text)
+
+    def test_a_multisite_archive_is_no_go(self):
+        code, text = self.run_main(self.archive(good_files() + [(".", "multisite.json", b"{}")]))
+        self.assertEqual(code, 1)
+        self.assertIn("multisite", text)
+
+    def test_pin_reads_the_image_reference(self):
+        self.assertEqual(w.pin("wordpress:7.1.3-php8.5-fpm"), ("7.1.3", "8.5"))
+        with self.assertRaises(w.ArchiveError):
+            w.pin("wordpress:latest")
+
     def test_a_dotted_file_name_is_not_unsafe(self):
         code, _ = self.run_main(self.archive(good_files() + [("plugins/good", "..hidden.php", b"x"), ("plugins/good", "a..b.php", b"x")]))
         self.assertEqual(code, 0)

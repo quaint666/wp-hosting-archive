@@ -57,11 +57,14 @@
       - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_scratch_quota_id | int)
       - (wp_archive_quota_id | int) != (wp_scratch_quota_id | int)
       - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_archive_quota_id | int)
+      - (wp_intake_quota_id | int) != (wp_scratch_quota_id | int)
+      - (wp_intake_quota_id | int) != (wp_archive_quota_id | int)
+      - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_intake_quota_id | int)
     fail_msg: >-
       wp_sites (host_vars/dellwp/vars.yml) does not fit: every entry needs name, port and quota_id; names are 2 to 24 characters of a-z, 0-9 and -, not reserved, unique;
       ports above 1024 and project ids from 1000 are unique; state is hold, live, stopped or closed (a closed site is a tombstone: its name, port and project id stay reserved, but it holds no RAM and no disk); the memory limits of the sites that run plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
       {{ wp_vm.memory }} MB; the quotas and backup quotas of the sites that exist plus {{ wp_data_reserve_mb }} MB must fit in its {{ wp_vm.data_disk }} GB data disk; wp_backup_quota_offset must be
-      larger than the spread of the quota ids (a backup project id must never equal another site's id) and the highest backup id must stay below wp_scratch_quota_id and wp_archive_quota_id, which must differ. Nothing was changed.
+      larger than the spread of the quota ids (a backup project id must never equal another site's id) and the highest backup id must stay below wp_scratch_quota_id, wp_archive_quota_id and wp_intake_quota_id, which must differ. Nothing was changed.
     quiet: true
 
 # A closed site is a tombstone: it is in the list so that its name, port and project id are never given to another site, but nothing of it may be on the VM. The PLAY NEVER DELETES
@@ -89,6 +92,28 @@
     wp_pq_path: "{{ wp_archive_dir }}"
     wp_pq_id: "{{ wp_archive_quota_id }}"
     wp_pq_mb: "{{ wp_archive_quota_mb }}"
+
+# The intake directory (made by the data disk play too) is a project of its own for the same reason: a .wpress and its unpacked copy can never grow past the quota.
+- name: Look for the intake directory
+  ansible.builtin.stat:
+    path: "{{ wp_intake_dir }}"
+  register: wp_intake_stat
+  check_mode: false
+
+- name: Stop if the intake directory is missing
+  ansible.builtin.assert:
+    that:
+      - wp_intake_stat.stat.isdir | default(false)
+    fail_msg: >-
+      {{ wp_intake_dir }} does not exist. Run dellwp/wp_data_disk_dellwp.yml first: it makes the top-level directories of the data disk, including the intake. Nothing was changed.
+    quiet: true
+
+- name: Put the intake directory in its quota project (tasks/wp_project_quota_common.yml)
+  ansible.builtin.include_tasks: wp_project_quota_common.yml
+  vars:
+    wp_pq_path: "{{ wp_intake_dir }}"
+    wp_pq_id: "{{ wp_intake_quota_id }}"
+    wp_pq_mb: "{{ wp_intake_quota_mb }}"
 
 - name: Look for the site directories of the closed sites
   ansible.builtin.stat:

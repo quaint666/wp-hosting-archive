@@ -123,6 +123,12 @@ wp_archive_quota_id: 3000002
 wp_archive_quota_mb: 3072
 wp_archive_keep_days: 14
 wp_archive_purge_calendar: "*-*-* 05:15:00"
+# The intake directory (made by the data disk play, mode 0700): where a friend's .wpress is copied before wp-site-import reads it. Its work-<site> directory (the unpacked copy waiting for the
+# operator's approval) and ledger.log live here too, in this project, because /srv/wp/scratch is shared with the restore drill, which sets and then removes its project limit around its own run.
+# The archive file itself counts against the quota, so it holds the file plus what is unpacked from it (a plan that does not fit is refused before anything is written).
+wp_intake_dir: "{{ wp_data_mount }}/intake"
+wp_intake_quota_id: 3000003
+wp_intake_quota_mb: 3072
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.

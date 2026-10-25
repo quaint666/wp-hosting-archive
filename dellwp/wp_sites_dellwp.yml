@@ -17,6 +17,7 @@
     # templates/ at the repo root: template looks only next to the task file and the playbook, so the paths are explicit (the dellvms/ plays do the same).
     shared_template_dir: "{{ playbook_dir }}/../templates"
     wp_template_dir: "{{ shared_template_dir }}/wp"
+    wp_scripts_dir: "{{ playbook_dir }}/../scripts"
 
   tasks:
     - name: Install the operator's tools (tasks/wp_tools_common.yml)

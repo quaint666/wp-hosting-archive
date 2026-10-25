@@ -33,13 +33,20 @@ class ArchiveError(Exception):
     pass
 
 
+def pin(image):
+    """('7.1.3', '8.5') out of an image reference such as wordpress:7.1.3-php8.5-fpm."""
+    m = re.fullmatch(r"wordpress:(\d+\.\d+(?:\.\d+)?)-php(\d+\.\d+)-fpm", str(image))
+    if not m:
+        raise ArchiveError("'%s' is not of the form wordpress:<version>-php<minor>-fpm" % image)
+    return m.group(1), m.group(2)
+
+
 def ours(repo=REPO):
     """The WordPress and PHP the sites run, out of the one pin (vars/wp.yml). A missing line fails: no default."""
-    text = (Path(repo) / WP_VARS).read_text()
-    m = re.search(r'^wp_image_php:\s*"wordpress:(\d+\.\d+(?:\.\d+)?)-php(\d+\.\d+)-fpm"', text, re.M)
+    m = re.search(r'^wp_image_php:\s*"([^"]+)"', (Path(repo) / WP_VARS).read_text(), re.M)
     if not m:
-        raise ArchiveError("%s has no wp_image_php line of the form wordpress:<version>-php<minor>-fpm" % WP_VARS)
-    return m.group(1), m.group(2)
+        raise ArchiveError("%s has no wp_image_php line" % WP_VARS)
+    return pin(m.group(1))
 
 
 def vtuple(version):
@@ -50,7 +57,8 @@ def vtuple(version):
 
 def unsafe(path, name):
     full = path.replace("\\", "/") + "/" + name if path not in ("", ".") else name
-    return "\\" in path or "\\" in name or full.startswith("/") or re.match(r"^[A-Za-z]:", full) is not None or ".." in full.split("/")
+    return ("\\" in path or "\\" in name or full.startswith("/") or re.match(r"^[A-Za-z]:", full) is not None or ".." in full.split("/")
+            or any(ord(c) < 32 or ord(c) == 127 for c in full))
 
 
 class Archive:
@@ -134,7 +142,7 @@ def lookup(kind, slug, get):
 
 def judge_item(kind, slug, header, get, our_php):
     """One plugin or theme: its archive version, what wordpress.org says, and a verdict (ok, note, nogo)."""
-    row = {"kind": kind[:-1], "slug": slug, "have": header_version(header) if header else None, "latest": "-", "requires_php": "-", "verdict": "ok", "why": ""}
+    row = {"kind": kind[:-1], "slug": slug, "have": header_version(header) if header else None, "latest": "-", "requires_php": "-", "verdict": "ok", "why": "", "onorg": False}
     if header is None:
         row.update(verdict="note", why="no readable header in the archive")
         return row
@@ -142,6 +150,7 @@ def judge_item(kind, slug, header, get, our_php):
     if rec is None:
         row.update(verdict="note", why="not on wordpress.org: you approve or reject it by hand")
         return row
+    row["onorg"] = True
     row["latest"] = rec.get("version") or "?"
     row["requires_php"] = rec.get("requires_php") or "-"
     need = rec.get("requires_php")
@@ -158,10 +167,11 @@ def preflight(path, repo=REPO, get=fetch):
     """Returns (rows, notes, nogo, facts). Raises ArchiveError for an archive that cannot be read; a network error propagates (exit 2)."""
     our_wp, our_php = ours(repo)
     with Archive(path) as a:
-        return _preflight(a, our_wp, our_php, get)
+        return judge(a, our_wp, our_php, get)
 
 
-def _preflight(a, our_wp, our_php, get):
+def judge(a, our_wp, our_php, get):
+    """The verdicts for an archive that is already open: (rows, notes, nogo, facts), as preflight returns them. Also used by wp-site-import on the VM."""
     pj = a.find(".", "package.json")
     if pj is None:
         raise ArchiveError("no package.json: this is not an All-in-One WP Migration archive")
@@ -172,6 +182,9 @@ def _preflight(a, our_wp, our_php, get):
     if a.find(".", "database.sql") is None:
         raise ArchiveError("no database.sql in the archive")
     nogo, notes, rows = [], [], []
+    for name in ("multisite.json", "blogs.json"):
+        if a.find(".", name):
+            nogo.append("this is a multisite network (%s): not supported" % name)
     for bad in a.unsafe_paths():
         nogo.append("unsafe path in the archive: %s" % bad)
     wp = (meta.get("WordPress") or {}).get("Version")
