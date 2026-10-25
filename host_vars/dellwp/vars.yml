@@ -59,6 +59,11 @@ wp_sites:
     quota_id: 1002
     state: closed
     update_policy: auto
+  - name: rehearsal
+    port: 9103
+    quota_id: 1003
+    state: hold
+    update_policy: notify
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.
