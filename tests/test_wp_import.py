@@ -89,6 +89,7 @@ class FakeHost:
         self.siteurl = "http://old.local"
         self.table_names = ["wp_options", "wp_posts"]
         self.wait_times_out, self.killed, self.timeouts, self.cli_log, self.on_chown = False, False, set(), [], None
+        self.stored_urls = None
 
     def which(self, name):
         return self.clam if name == "clamscan" else None
@@ -132,6 +133,11 @@ class FakeHost:
         if "COUNT(*)" in sql:
             rc, text = self.fail.get("count", (0, str(self.tables)))
             return Done(rc, text + "\n", "No such container" if rc else "")
+        if "option_name IN" in sql:
+            if "option_names" in self.fail:
+                return Done(*self.fail["option_names"])
+            url = self.stored_urls if self.stored_urls is not None else "https://wptest.example.test"
+            return Done(0, "home\t%s\nsiteurl\t%s\n" % (url, url))
         if "siteurl" in sql:
             return Done(0, (self.siteurl if self.tables else "") + "\n")
         raise AssertionError("an unexpected query: %s" % sql)
@@ -341,11 +347,11 @@ class Pipeline(Base):
         self.import_ok()
         cli = self.host.cli_calls()
         self.assertIn(["core", "update-db"], cli)
-        self.assertIn(["option", "update", "siteurl", "https://wptest.example.test"], cli)
-        self.assertIn(["option", "update", "home", "https://wptest.example.test"], cli)
+        self.assertNotIn(["option", "update", "siteurl", "https://wptest.example.test"], cli, "wp-config.php defines WP_SITEURL, so this would write nothing and say ok")
         self.assertIn(["option", "update", "blog_public", "0"], cli)
         self.assertIn(["transient", "delete", "--all"], cli)
-        self.assertIn(["rewrite", "flush"], cli)
+        self.assertIn(["option", "delete", "rewrite_rules"], cli)
+        self.assertNotIn(["rewrite", "flush"], cli, "a flush with themes skipped stores an incomplete rule set")
         sr = [c for c in cli if c[0] == "search-replace"]
         self.assertEqual([c[1:3] for c in sr], [["http://old.local", "https://wptest.example.test"], ["https://old.local", "https://wptest.example.test"], ["//old.local", "//wptest.example.test"],
                                                 ["http:\\/\\/old.local", "https:\\/\\/wptest.example.test"], ["https:\\/\\/old.local", "https:\\/\\/wptest.example.test"],
@@ -435,6 +441,67 @@ class Pipeline(Base):
         self.assertFalse([c for c in self.host.calls if "live" in c])
 
 
+class StoredUrls(Base):
+    def test_the_stored_rows_are_read_from_the_database_and_must_be_the_new_name(self):
+        text = self.import_ok()
+        self.assertRegex(text, r"ok\s+stored siteurl and home\s+both are https://wptest\.example\.test in the database")
+        q = [c for c in self.host.calls if c[:3] == ["docker", "exec", "-e"] and "option_name IN" in c[3]][0]
+        self.assertIn("FROM wp_options", q[3])
+
+    def test_an_old_address_left_in_the_database_fails_the_import(self):
+        self.host.stored_urls = "http://old.local"
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1)
+        self.assertRegex(text, r"FAILED\s+stored siteurl and home\s+FAILED: the database has .*old\.local")
+
+    def test_a_trailing_slash_is_not_a_difference(self):
+        self.host.stored_urls = "https://wptest.example.test/"
+        self.archive()
+        self.assertEqual(self.run_main(["wptest", "friend.wpress"])[0], 0)
+
+    def test_missing_rows_or_an_unreadable_database_fail_it(self):
+        for answer in ((0, ""), (0, "siteurl\thttps://wptest.example.test\n"), (1, "")):
+            self.setUp()
+            self.host.fail["option_names"] = answer
+            self.archive()
+            code, text = self.run_main(["wptest", "friend.wpress"])
+            self.assertEqual(code, 1, answer)
+            self.assertIn("stored siteurl and home", text)
+            self.tearDown()
+
+
+class RewriteRules(Base):
+    def test_stored_rules_are_deleted_not_flushed(self):
+        text = self.import_ok()
+        self.assertRegex(text, r"ok\s+rewrite rules\s+deleted: WordPress builds them again on the first request")
+
+    def test_no_stored_rules_is_not_a_failure(self):
+        self.host.fail["cli:option delete"] = (1, "Error: Could not delete 'rewrite_rules' option. Does it exist?")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 0, text)
+        self.assertRegex(text, r"ok\s+rewrite rules\s+none were stored")
+
+    def test_any_other_failure_of_it_is_one(self):
+        self.host.fail["cli:option delete"] = (1, "Error: database gone")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1)
+        self.assertRegex(text, r"FAILED\s+rewrite rules\s+FAILED: Error: database gone")
+
+
+class ReportTable(Base):
+    def test_a_multi_line_error_stays_on_one_line_of_the_table(self):
+        self.host.fail["ext:good"] = (1, "FAILED:\nError: You need to specify\nwp-site-ext: plugin 'good' did not match")
+        self.host.fail["ext:good:versioned"] = (1, "FAILED:\nError: You need to specify\nwp-site-ext: plugin 'good' did not match")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        line = [l for l in text.splitlines() if "plugin good" in l and "FAILED" in l and "STEPS" not in l][0]
+        self.assertIn("Error: You need to specify wp-site-ext: plugin 'good' did not match", line)
+        self.assertEqual(len([l for l in text.splitlines() if l.startswith("Error:")]), 0)
+
+
 class Scan(Base):
     def test_suspicious_held_code_is_listed(self):
         fl = [f for f in files() if f[1] != "m.php"] + [("mu-plugins", "m.php", b"<?php system($_GET['c']);"), ("plugins/notorg", "evil.php", b"<?php eval(base64_decode($_POST['x']));")]
@@ -493,7 +560,7 @@ class StepFailures(Base):
         code, text = self.run_main(["wptest", "friend.wpress"])
         self.assertEqual(code, 1)
         self.assertRegex(text, r"FAILED\s+core update-db")
-        self.assertIn(["rewrite", "flush"], self.host.cli_calls())
+        self.assertIn(["option", "delete", "rewrite_rules"], self.host.cli_calls())
         self.assertEqual(os.path.basename(self.host.calls[-1][0]), "wp-site-backup")
 
     def test_a_plugin_already_in_the_image_is_left_alone(self):
@@ -898,6 +965,30 @@ class Receive(Base):
 
 
 class Discard(Base):
+    def test_if_present_is_silent_when_there_is_nothing_to_remove(self):
+        code, text = self.run_main(["discard", "--if-present", "friend.wpress"])
+        self.assertEqual((code, text), (0, ""))
+        self.assertFalse((self.intake / "ledger.log").exists(), "nothing happened, nothing is recorded")
+
+    def test_if_present_still_removes_a_file_that_is_there_and_still_refuses_an_import_in_progress(self):
+        self.put(b"x")
+        self.assertEqual(self.run_main(["discard", "--if-present", "friend.wpress"])[0], 0)
+        self.assertFalse((self.intake / "friend.wpress").exists())
+        self.import_ok()
+        self.assert_refused(["discard", "--if-present", "friend.wpress"], "approve or reset that first")
+
+    def test_if_present_does_not_excuse_a_link_or_a_bad_name(self):
+        outside = self.tmp / "victim.wpress"
+        outside.write_text("keep")
+        (self.intake / "link.wpress").symlink_to(outside)
+        self.assert_refused(["discard", "--if-present", "link.wpress"], "not a file")
+        self.assert_refused(["discard", "--if-present", "../x.wpress"], "plain .wpress")
+        self.assertTrue(outside.exists())
+
+    def test_the_flag_belongs_to_discard_alone(self):
+        for argv in (["reset", "wptest", "--if-present"], ["wptest", "friend.wpress", "--if-present"], ["approve", "wptest", "--if-present"], ["report", "wptest", "--if-present"]):
+            self.assertEqual(self.run_main(argv)[0], 2, argv)
+
     def test_removes_the_file_and_says_so_in_the_ledger(self):
         self.put(b"x")
         code, text = self.run_main(["discard", "friend.wpress"])
@@ -951,6 +1042,32 @@ class ReportCommand(Base):
         code, text = self.run_main(["report", "wptest"])
         self.assertEqual(code, 2)
         self.assertNotIn("topsecret", text)
+
+
+class Prompt(unittest.TestCase):
+    def test_the_question_is_flushed_before_the_tool_waits_for_the_answer(self):
+        import io
+        events = []
+
+        class Err(io.StringIO):
+            def write(self, text):
+                events.append(("write", text))
+                return super().write(text)
+
+            def flush(self):
+                events.append(("flush", None))
+
+        tty = Path(tempfile.mkdtemp()) / "tty"
+        tty.write_text("wptest\n")
+        real_err, old = sys.stderr, os.environ.get("WP_SITE_TTY")
+        sys.stderr, os.environ["WP_SITE_TTY"] = Err(), str(tty)
+        try:
+            answer = imp.tty_ask("Type the site name: ")
+        finally:
+            sys.stderr = real_err
+            os.environ.pop("WP_SITE_TTY") if old is None else os.environ.__setitem__("WP_SITE_TTY", old)
+        self.assertEqual(answer, "wptest\n")
+        self.assertEqual(events, [("write", "Type the site name: "), ("flush", None)], "a prompt without a newline stays in a line-buffered stderr until it is flushed")
 
 
 class Names(Base):
@@ -1014,7 +1131,7 @@ class Hostile(Base):
         self.assertTrue(self.host.cli_log)
         for args, flags in self.host.cli_log:
             self.assertIn("--skip-themes", flags, args)
-            loads_plugins = args[:1] == ["elementor"] or args[:2] == ["rewrite", "flush"]
+            loads_plugins = args[:1] == ["elementor"]
             self.assertEqual("--skip-plugins" in flags, not loads_plugins, args)
 
     def test_the_options_that_name_code_are_reset_before_anything_else_runs(self):

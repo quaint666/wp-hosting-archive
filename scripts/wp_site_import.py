@@ -8,7 +8,7 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import approve <site> [--reject a,b] [--accept-failures]
     wp-site-import report <site>                     (prints the report again)
     wp-site-import receive <file.wpress>             (the file on standard input: how the laptop sends it; the intake directory is root-only)
-    wp-site-import discard <file.wpress>             (removes a file from the intake directory, unless an import was made from it)
+    wp-site-import discard <file.wpress> [--if-present]   (removes a file from the intake directory, unless an import was made from it; --if-present: silent when it is not there)
     wp-site-import resolve <token>                   (what the phone's Approve and Deny buttons lead to, through the listener: scripts/wp_approval_listener.py)
 
 When an import has finished, a notification goes to the phone (the independent ntfy) with a Deny button and, only if the import is clean (no failed step, checksums ok, no ClamAV find, no
@@ -190,6 +190,14 @@ def db_query(site, sql, run):
     if p.returncode != 0:
         raise Refuse("could not read the database of %s (%s): is its stack up? systemctl status wp-%s" % (site, (p.stderr or out or "no answer").strip()[:200], site))
     return out.split("\n")[0].strip()
+
+
+def db_query_all(site, sql, run):
+    """Every line of the answer to one statement, as the site's database user. Raises Refuse when the container does not answer."""
+    p = run(["docker", "exec", "-e", "SQL=" + sql, db_name(site), "sh", "-c", DB_SH], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+        raise Refuse("could not read the database of %s (%s)" % (site, (p.stderr or p.stdout or "no answer").strip()[:160]))
+    return [l for l in (p.stdout or "").splitlines() if l.strip()]
 
 
 def check_db_empty(site, run):
@@ -494,8 +502,6 @@ def wpcli_steps(cfg, site, work, record, tools):
         return ok, out
 
     step("core update-db", "core", "update-db")
-    step("option siteurl", "option", "update", "siteurl", new_url)
-    step("option home", "option", "update", "home", new_url)
     meta = json.loads((work / "package.json").read_text())
     hosts = [h for h in old_hosts(meta) if h != new_host]
     for h in hosts:
@@ -505,6 +511,16 @@ def wpcli_steps(cfg, site, work, record, tools):
         for a, b in (("http://" + h, new_url), ("https://" + h, new_url), ("//" + h, "//" + new_host),
                      ("http:\\/\\/" + h, "https:\\/\\/" + new_host), ("https:\\/\\/" + h, "https:\\/\\/" + new_host), ("\\/\\/" + h, "\\/\\/" + new_host)):
             step("search-replace %s" % a, "search-replace", a, b, "--all-tables-with-prefix", "--report-changed-only", "--precise")
+    # wp-config.php defines WP_HOME and WP_SITEURL, which shadow the stored options: `wp option update siteurl` then says "unchanged" and writes nothing (seen on dellwp 2026-10-25). What the
+    # search-replace passes did to the stored rows is read from the database itself.
+    try:
+        rows = db_query_all(site, "SELECT option_name, option_value FROM %soptions WHERE option_name IN ('siteurl','home') ORDER BY option_name" % record["prefix"], tools.run)
+        got = dict(r.split("\t", 1) for r in rows if "\t" in r)
+        bad = {k: v for k, v in got.items() if v.rstrip("/") != new_url}
+        steps.append({"name": "stored siteurl and home", "ok": set(got) == {"siteurl", "home"} and not bad,
+                      "note": "both are %s in the database" % new_url if set(got) == {"siteurl", "home"} and not bad else "FAILED: the database has %s" % (w.printable(json.dumps(got), limit=160) or "no siteurl/home row")})
+    except Refuse as e:
+        steps.append({"name": "stored siteurl and home", "ok": False, "note": "FAILED: " + str(e)[:200]})
     active, _ = tools.cli(site, "plugin", "is-active", "elementor")
     if active:
         ok, help_text = tools.cli(site, "elementor", plugins=True)
@@ -521,8 +537,12 @@ def wpcli_steps(cfg, site, work, record, tools):
         if flush:
             step("elementor %s" % flush, "elementor", flush, plugins=True)
     step("transient delete", "transient", "delete", "--all")
-    ok, out = tools.cli(site, "rewrite", "flush", plugins=True)
-    steps.append({"name": "rewrite flush", "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:]})
+    # Not `rewrite flush`: with themes skipped (on purpose: no theme code runs before approval) WP-CLI warns "Some rewrite rules may be missing" and stores the incomplete set (seen on dellwp
+    # 2026-10-25). Deleting the stored rules makes WordPress build them again on the first request, with the theme and every plugin loaded [from memory].
+    ok, out = tools.cli(site, "option", "delete", "rewrite_rules")
+    none_stored = (not ok) and "does it exist" in out.lower()
+    steps.append({"name": "rewrite rules", "ok": ok or none_stored, "note": "none were stored: WordPress builds them on the first request" if none_stored
+                  else ("deleted: WordPress builds them again on the first request" if ok else "FAILED: " + out[-300:])})
     step("option blog_public", "option", "update", "blog_public", "0")
     step("cache flush", "cache", "flush")
     return steps
@@ -599,7 +619,7 @@ def build_report(site, record, steps, res, work):
     lines = ["IMPORT REPORT for %s  (%s, sha256 %s...)" % (site, record["file"], record["sha256"][:16]),
              "archive WordPress %s, PHP %s; sites WordPress %s, PHP %s" % (f["archive_wp"], f["archive_php"], f["our_wp"], f["our_php"]), "",
              "STEPS (%d, %d failed)" % (len(steps), sum(1 for s in steps if not s["ok"]))]
-    lines += ["  %-6s %-52s %s" % ("ok" if s["ok"] else "FAILED", s["name"][:52], s["note"]) for s in steps]
+    lines += ["  %-6s %-52s %s" % ("ok" if s["ok"] else "FAILED", s["name"][:52], " ".join(str(s["note"]).split())[:240]) for s in steps]
     lines += ["", "CODE HELD BACK until you approve it (nothing of it has run):"]
     items = held_items(record, work)
     lines += ["  %-10s %-36s %d files" % i for i in items] or ["  none"]
@@ -907,13 +927,15 @@ def run_receive(cfg, name, stdin, out):
     return 0
 
 
-def run_discard(cfg, name, out):
-    """Remove a file from the intake directory, unless an import in progress was made from it."""
+def run_discard(cfg, name, out, if_present=False):
+    """Remove a file from the intake directory, unless an import in progress was made from it. With if_present, a file that is not there is not an error and nothing is printed."""
     if not FILE_RE.match(name or ""):
         raise Refuse("'%s' is not a plain .wpress file name" % w.printable(name, limit=60))
     intake = Path(cfg["intake_dir"])
     f = intake / name
     if not f.is_file() or f.is_symlink():
+        if if_present and not f.exists() and not f.is_symlink():
+            return 0
         raise Refuse("%s is not a file in the intake directory" % name)
     for work in sorted(intake.glob("work-*")):
         try:
@@ -941,23 +963,24 @@ def run_report(cfg, site, out):
 def tty_ask(prompt):
     with open(os.environ.get("WP_SITE_TTY", "/dev/tty")) as t:
         sys.stderr.write(prompt)
+        sys.stderr.flush()       # stderr is line-buffered and a prompt has no newline: without this the question is never shown and the tool waits for an answer nobody can see (dellwp 2026-10-25)
         return t.readline()
 
 
 USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
-         "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress>\n"
+         "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress> [--if-present]\n"
          "       wp-site-import resolve <token>            (a signed token from the phone: approve a clean import, or deny)")
 
 
 def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which, stdin=None, clock=time.time, post=None):
-    flags = {"--plan", "--accept-failures"}
+    flags = {"--plan", "--accept-failures", "--if-present"}
     args = [x for x in argv if x not in flags]
     reject = []
     if "--reject" in args:
         i = args.index("--reject")
         reject = [x for x in (args[i + 1] if i + 1 < len(args) else "").split(",") if x]
         args = args[:i] + args[i + 2:]
-    plan_only, accept = "--plan" in argv, "--accept-failures" in argv
+    plan_only, accept, if_present = "--plan" in argv, "--accept-failures" in argv, "--if-present" in argv
     tools = Tools(cfg, run, popen, chown, which, clock, post)
     raw_out = out
 
@@ -971,7 +994,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         except OSError:
             raise Refuse("another import is running")
         command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") else "import"
-        if (plan_only and command != "import") or ((reject or accept) and command != "approve"):
+        if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard"):
             out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped
             return 2
         if args[:1] == ["reset"] and len(args) == 2:
@@ -981,7 +1004,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         if args[:1] == ["receive"] and len(args) == 2:
             return run_receive(cfg, args[1], stdin or sys.stdin.buffer, out)
         if args[:1] == ["discard"] and len(args) == 2:
-            return run_discard(cfg, args[1], out)
+            return run_discard(cfg, args[1], out, if_present)
         if args[:1] == ["report"] and len(args) == 2:
             return run_report(cfg, args[1], out)
         if args[:1] == ["approve"] and len(args) == 2:

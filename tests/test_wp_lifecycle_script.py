@@ -58,7 +58,7 @@ class Syntax(unittest.TestCase):
         used = set()
         for label, body in snippets():
             used |= set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)\}?", body))
-        local = {"FAIL", "DIR", "HOST", "WORK", "UP", "DB", "BASE", "CS", "PC", "AP", "PATH", "HOME", "PIPESTATUS", "SQL", "MARIADB_DATABASE", "MARIADB_PASSWORD", "MARIADB_USER"}   # the last four are for docker exec's own shell
+        local = {"FAIL", "DIR", "HOST", "WORK", "UP", "DB", "BASE", "CS", "PC", "AP", "PREFIX", "PATH", "HOME", "PIPESTATUS", "SQL", "MARIADB_DATABASE", "MARIADB_PASSWORD", "MARIADB_USER"}   # the last four are for docker exec's own shell
         self.assertEqual(sorted(used - passed - local - {"BIN"}), [], "a snippet uses a variable the VM does not receive")
         for needed in ("SITE", "DOMAIN", "BIN", "SITES", "INTAKE", "LISTEN", "BDIR", "ARCH", "ADIR", "FILENAME"):
             self.assertIn(needed, passed)
@@ -143,6 +143,19 @@ class Arguments(Harness):
         self.assertIn("already in wp_sites", r.stderr)
         self.assertEqual(self.calls(), [])
 
+    def test_existing_needs_a_declared_site_on_hold(self):
+        r = self.run_script("--existing", "--site", "nosuch", "--yes")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--existing needs 'nosuch' to be in wp_sites and on hold (it is not there)", r.stderr)
+        r = self.run_script("--existing", "--site", "wptest", "--yes")       # the fixture's site is live
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("(it is live)", r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_name_in_use_points_at_existing(self):
+        r = self.run_script("--site", "wptest", "--yes")
+        self.assertIn("use --existing for an empty site on hold", r.stderr)
+
     def test_not_confirming_does_nothing(self):
         r = self.run_script(stdin="n\n")
         self.assertEqual(r.returncode, 1)
@@ -194,6 +207,16 @@ class Flow(Harness):
         # the stand-in cannot make the repo say closed, so that last check is the one that fails, and only it
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("FAIL: the repo says 'life' is closed", r.stdout)
+
+    def test_existing_skips_the_create_and_goes_on_with_the_import(self):
+        vars_path = self.repo / "host_vars/dellwp/vars.yml"
+        text = vars_path.read_text()
+        vars_path.write_text(text.replace("\nwp_sites:\n", "\nwp_sites:\n  - name: held\n    port: 9109\n    quota_id: 1009\n    state: hold\n", 1))
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "held"], check=True, capture_output=True)
+        r = self.run_script("--yes", "--no-phone", "--existing", "--site", "held", "--until", "approve")
+        verbs = [c.split()[1] for c in self.sites_calls()]
+        self.assertEqual(verbs, ["import", "reset", "import", "approve"], r.stdout)
+        self.assertIn("(--existing: the site is already declared; no create)", r.stdout)
 
     def test_the_snippets_receive_the_repos_values_and_the_site_name(self):
         self.run_script("--yes", "--no-phone", "--site", "life", "--until", "create")

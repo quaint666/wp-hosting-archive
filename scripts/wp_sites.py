@@ -594,7 +594,7 @@ class Sites:
                 h.update(chunk)
         digest = h.hexdigest()
         # a copy of this file left by an earlier try (a reset or a Deny keeps the file) is replaced; one that an import still waiting on the VM was made from is not touched
-        _, gone = self.run(["ssh", HOST, "sudo -n wp-site-import discard " + shlex.quote(f.name)], tee=True)
+        _, gone = self.run(["ssh", HOST, "sudo -n wp-site-import discard --if-present " + shlex.quote(f.name)], tee=True)
         if "is the file of the import" in (gone or ""):
             raise Refuse("%s is the file of an import that is still waiting on the VM: approve it or undo it first (python3 scripts/wp_sites.py approve|reset <site>)" % f.name)
         rc, text = self.run(["ssh", HOST, "sudo -n wp-site-import receive " + shlex.quote(f.name)], tee=True, stdin=str(f))

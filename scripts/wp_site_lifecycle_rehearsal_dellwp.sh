@@ -12,13 +12,14 @@
 #   8. stop      a final backup, containers down, the paused page; then start: back on hold with the data
 #   9. delete    wp_sites.py delete (you type the name twice): the site is gone, its archive is on the VM, the repo says closed
 # It makes real commits to vars.yml (create, stop, start, delete: --commit) on your current branch, which must not be main, and leaves the site's tombstone there for good (a name is never reused).
-# The archive of the deleted site stays on the VM for 14 days. Options:  --site NAME (default rehearsal)  --file PATH (default wpress/*.wpress)  --no-phone  --with-live  --until PHASE
+# The archive of the deleted site stays on the VM for 14 days. Options:  --site NAME (default rehearsal)  --existing (the site is already in wp_sites, empty and on hold: skip the create, e.g. after
+# a reset)  --file PATH (default wpress/*.wpress)  --no-phone  --with-live  --until PHASE
 # (create, import, deny, approve, operate, live, stop, delete: stop after that phase, leaving the site as it is)  --yes (do not ask before starting).
 # It stops at the first phase that fails badly and says how to clean up. What it does not prove: that the real Elementor or WooCommerce commands behave like the discovered names (the report says
 # what ran), that a friend's own plugin is safe, anything about the public path unless --with-live, or the 02:00 update timer.
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SITE=rehearsal; FILE=""; PHONE=yes; LIVE=no; UNTIL=delete; YES=no
+SITE=rehearsal; FILE=""; PHONE=yes; LIVE=no; UNTIL=delete; YES=no; EXISTING=no
 usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
     --with-live) LIVE=yes; shift ;;
     --until) UNTIL=${2:-}; shift 2 ;;
     --yes) YES=yes; shift ;;
+    --existing) EXISTING=yes; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -43,12 +45,17 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 git diff --quiet HEAD -- host_vars/dellwp/vars.yml || { echo "host_vars/dellwp/vars.yml has uncommitted changes: commit or revert them first" >&2; exit 2; }
 
 # everything the VM side needs comes from the repo's own variables, nothing is typed here twice
-read -r DOMAIN BIN SITES INTAKE LISTEN PROBE BDIR ARCH ADIR < <(python3 -I - "$REPO" "$SITE" <<'PY'
+read -r DOMAIN BIN SITES INTAKE LISTEN PROBE BDIR ARCH ADIR < <(python3 -I - "$REPO" "$SITE" "$EXISTING" <<'PY'
 import sys, yaml
-repo, site = sys.argv[1:3]
+repo, site, existing = sys.argv[1:4]
 h = yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))
-if any(s["name"] == site for s in h["wp_sites"]):
-    sys.exit("'%s' is already in wp_sites (a closed site's name is never reused): choose another with --site" % site)
+entry = next((s for s in h["wp_sites"] if s["name"] == site), None)
+if existing == "yes":
+    state = {**h["wp_site_defaults"], **(entry or {})}["state"] if entry else None
+    if state != "hold":
+        sys.exit("--existing needs '%s' to be in wp_sites and on hold (it is %s)" % (site, state or "not there"))
+elif entry:
+    sys.exit("'%s' is already in wp_sites (a closed site's name is never reused): choose another with --site, or use --existing for an empty site on hold" % site)
 m = h["wp_data_mount"]
 def r(v):
     out = v.replace("{{ wp_data_mount }}", m)
@@ -74,6 +81,8 @@ code() { local path=$1; shift; curl -s -o /dev/null -w '%{http_code}' --max-time
 wpc() { "$BIN/wp-site-cli" "$SITE" "$@" </dev/null; }
 db() { docker exec -e SQL="$1" "$DB" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "$SQL" "$MARIADB_DATABASE"' </dev/null; }
 tables() { db "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()"; }
+PREFIX=$(sed -n "s/.*\$table_prefix *= *'\([A-Za-z0-9_]*\)'.*/\1/p" "$DIR/wp-config.php" 2>/dev/null | head -n 1)
+stored() { db "SELECT option_value FROM ${PREFIX:-wp_}options WHERE option_name='$1'"; }
 tree() { find "$DIR/html/wp-content" -printf '%P %u %m\n' 2>/dev/null | sort; }
 ledger() { grep -P "\t$SITE\t" "$INTAKE/ledger.log" 2>/dev/null | cut -f3 | tr '\n' ' '; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null </dev/null)" = true ]; }
@@ -90,8 +99,8 @@ imported_checks() {
   check "the report is private (600)" "$(stat -c %a "$WORK/REPORT.txt" 2>&1)" 600
   has "the database was loaded (tables)" "$(tables)"
   check "WordPress is installed" "$(wpc core is-installed >/dev/null 2>&1 && echo yes || echo no)" yes
-  check "siteurl is this site's name" "$(wpc option get siteurl 2>&1)" "https://$HOST"
-  check "home is this site's name" "$(wpc option get home 2>&1)" "https://$HOST"
+  check "the stored siteurl is this site's name (read from the database: wp-config.php's WP_SITEURL would hide it from wp option)" "$(stored siteurl)" "https://$HOST"
+  check "the stored home is this site's name" "$(stored home)" "https://$HOST"
   check "search engines are discouraged (blog_public)" "$(wpc option get blog_public 2>&1)" 0
   AP=$(wpc option get active_plugins --format=json 2>&1); case $AP in *litespeed*|*all-in-one-wp-migration*) bad "active_plugins still names a dropped plugin: $AP" ;; *) ok "active_plugins names none of the dropped plugins" ;; esac
   python3 -I - "$WORK/PLAN.json" "$DIR/html/wp-content" "$WORK/wp-content" <<'PY'
@@ -109,7 +118,8 @@ for kind, sub in (("plugins", "plugins"), ("themes", "themes")):
 sys.exit(bad)
 PY
   FAIL=$((FAIL + $?))
-  check "no PHP or hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 \( -iname '*.php*' -o -name '.*' \) 2>/dev/null | wc -l)" 0
+  check "no PHP file over 64 bytes under uploads (a plugin's own 'silence' stub is not the archive's)" "$(find "$DIR/html/wp-content/uploads" -type f -iname '*.php*' -size +64c 2>/dev/null | wc -l)" 0
+  check "no hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' 2>/dev/null | wc -l)" 0
   check "uploads belong to the php user" "$(find "$DIR/html/wp-content/uploads" ! -user 33 2>/dev/null | wc -l)" 0
   check "the plugins directory is root's (php cannot write code)" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
   has "the first backup exists (snapshots)" "$(ls "$BDIR/$SITE" 2>/dev/null | grep -c '^[0-9]\{8\}T')"
@@ -165,7 +175,8 @@ python3 -I scripts/wp_wpress.py preflight "$FILE" | tail -n 1 | grep -q '^GO' ; 
 [ "$FAIL" = 0 ] || fatal "the preflight found problems; fix them first"
 
 PHASE=create; say "1. create an empty site on hold"
-python3 scripts/wp_sites.py create --name "$SITE" --no-install --policy notify --yes --commit; bump $? "wp_sites.py create --no-install" || fatal "create failed"
+if [ "$EXISTING" = yes ]; then echo "(--existing: the site is already declared; no create)"
+else python3 scripts/wp_sites.py create --name "$SITE" --no-install --policy notify --yes --commit; bump $? "wp_sites.py create --no-install" || fatal "create failed"; fi
 vmrun <<'EOF'
 running "$UP" && ok "the php container is running" || bad "$UP is not running"
 running "$DB" && ok "the database container is running" || bad "$DB is not running"
@@ -231,10 +242,11 @@ check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
 check "the .wpress is gone from the intake directory" "$([ -e "$INTAKE/$FILENAME" ] && echo yes || echo no)" no
 check "the ledger records the approval" "$(ledger | grep -c 'approved')" 1
 has "the database is still loaded (tables)" "$(tables)"
-check "siteurl is still this site" "$(wpc option get siteurl 2>&1)" "https://$HOST"
+check "the stored siteurl is still this site" "$(stored siteurl)" "https://$HOST"
 check "the plugins directory is root's" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
 check "nothing under plugins, themes or mu-plugins is writable by the php user" "$(find "$DIR/html/wp-content/plugins" "$DIR/html/wp-content/themes" "$DIR/html/wp-content/mu-plugins" -user 33 2>/dev/null | wc -l)" 0
-check "no PHP or hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 \( -iname '*.php*' -o -name '.*' \) 2>/dev/null | wc -l)" 0
+check "no PHP file over 64 bytes under uploads" "$(find "$DIR/html/wp-content/uploads" -type f -iname '*.php*' -size +64c 2>/dev/null | wc -l)" 0
+check "no hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' 2>/dev/null | wc -l)" 0
 hold_checks
 finish
 EOF
@@ -277,7 +289,7 @@ python3 scripts/wp_sites.py start "$SITE" --yes --commit; bump $? "wp_sites.py s
 vmrun <<'EOF'
 running "$UP" && running "$DB" && ok "both containers are running again" || bad "containers did not come back"
 has "the data survived (tables)" "$(tables)"
-check "siteurl survived" "$(wpc option get siteurl 2>&1)" "https://$HOST"
+check "the stored siteurl survived" "$(stored siteurl)" "https://$HOST"
 hold_checks
 finish
 EOF

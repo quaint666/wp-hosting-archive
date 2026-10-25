@@ -920,7 +920,7 @@ class Importing(Base):
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.judged, [str(self.f)])
         ssh = [c for c in self.calls if c[0] == "ssh"]
-        self.assertEqual(ssh[0], ["ssh", "dellwp", "sudo -n wp-site-import discard friend.wpress"], "an old copy from an earlier try is replaced, not refused")
+        self.assertEqual(ssh[0], ["ssh", "dellwp", "sudo -n wp-site-import discard --if-present friend.wpress"], "an old copy from an earlier try is replaced, not refused")
         self.assertEqual(ssh[1], ["ssh", "dellwp", "sudo -n wp-site-import receive friend.wpress"])
         self.assertEqual(ssh[2], ["ssh", "-t", "dellwp", "sudo wp-site-import wptest friend.wpress"])
         self.assertEqual(self.stdins[self.calls.index(ssh[1])], str(self.f))
@@ -948,7 +948,7 @@ class Importing(Base):
         with self.assertRaises(w.Refuse) as cm:
             self.sites().import_site("wptest", str(self.f), yes=True)
         self.assertIn("still waiting on the VM", str(cm.exception))
-        self.assertEqual(self.ssh(), ["ssh dellwp sudo -n wp-site-import discard friend.wpress"], "nothing was sent")
+        self.assertEqual(self.ssh(), ["ssh dellwp sudo -n wp-site-import discard --if-present friend.wpress"], "nothing was sent")
 
     def test_a_stale_copy_from_a_reset_is_replaced_and_the_file_goes_again(self):
         self.reply["wp-site-import discard"] = "removed friend.wpress from the intake directory\n"
