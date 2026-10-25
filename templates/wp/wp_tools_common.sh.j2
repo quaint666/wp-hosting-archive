@@ -24,6 +24,11 @@ require_site() {
 # failing on a missing container or network. Call it after require_site.
 refuse_if_stopped() { [ ! -e "$dir/stopped.flag" ] || die "$site is stopped (it has no containers); start it first: python3 scripts/wp_sites.py start $site"; }
 
+# The number of tables in a site's database; 0 is a site that is waiting for an import. Fails when the database cannot be asked: the caller decides what that means (a tool that alerts says so).
+table_count() {
+  docker exec "wp_${1//-/_}_db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()" "$MARIADB_DATABASE"' </dev/null
+}
+
 # Opens fd 3 on the terminal (WP_SITE_TTY exists for the tests). Secrets are read from fd 3, silently, and never put in an argument or the environment.
 open_tty() { exec 3<"${WP_SITE_TTY:-/dev/tty}" || die "no terminal to read from (use ssh -t)"; }
 ask() { printf '%s' "$1" >&2; IFS= read -r -u 3 "$2" || die "no answer"; }

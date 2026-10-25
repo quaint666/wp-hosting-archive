@@ -54,15 +54,21 @@ gzip -t "$partial/db.sql.gz" || die "the dump fails gzip's integrity check"
 case "$(gzip -dc "$partial/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the dump has no completion marker (truncated?)" ;; esac
 empty=no
 if [ "$(gzip -dc "$partial/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -ne 1 ]; then
-  # A database with no tables at all is accepted in ONE case: the FINAL backup of a site that has never had a real snapshot (a site created empty, or reset after an import was turned down). Nothing is
+  # A database with no tables at all is accepted in ONE case (the FINAL backup is taken as an empty snapshot, the nightly one is skipped as a success): a site that has never had a real snapshot (a site created empty, or reset after an import was turned down). Nothing is
   # being replaced, so nothing can be lost, and without this such a site could not be stopped and so never deleted. Every other case keeps the refusal: a nightly backup of an emptied database would
   # rotate the real backups out, and "tables but no wp_options" is damage, not emptiness. The snapshot says empty=yes in its MANIFEST.
-  tables=$(docker exec "$db" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()" "$MARIADB_DATABASE"' </dev/null) || die "could not count the tables of $site"
+  tables=$(table_count "$site") || die "could not count the tables of $site"
   real=0
   while read -r s_; do grep -qx 'empty=yes' "$dest/$s_/MANIFEST" 2>/dev/null || real=$((real + 1)); done \
     < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n')
-  if [ "$tag" = final ] && [ "$tables" = 0 ] && [ "$real" = 0 ]; then
-    empty=yes; echo "note: $site has no tables and has never had a real backup: an empty final snapshot is taken (empty=yes)"
+  if [ "$tables" = 0 ] && [ "$real" = 0 ] && [ "$tag" != pre-update ]; then
+    if [ "$tag" = final ]; then
+      empty=yes; echo "note: $site has no tables and has never had a real backup: an empty final snapshot is taken (empty=yes)"
+    else
+      # The nightly job on a site that is waiting for an import: nothing exists to lose and nothing to rotate out, so it is not a failure. (An emptied database of a site that HAS real backups is
+      # still refused below, and the alert stands.)
+      echo "wp-site-backup: $site has no tables and has never had a real backup (it is waiting for an import): nothing to back up"; exit 0
+    fi
   else
     die "the dump has no wp_options table (an empty database?)"
   fi

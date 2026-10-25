@@ -37,6 +37,10 @@ DATE = r'''#!/bin/bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ] && [ -n "${FAKE_STAMP:-}" ]; then echo "$FAKE_STAMP"; else exec /usr/bin/date "$@"; fi
 '''
 NTFY = '#!/bin/bash\necho "$*" >> "$SHIM/ntfy.log"\n'
+DOCKER_COUNT = r'''#!/bin/bash
+[ -f "$SHIM/tables_fail" ] && exit 1
+cat "$SHIM/tables" 2>/dev/null || echo 0
+'''
 DOCKER_RESTORE = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 args=" $* "
@@ -230,13 +234,37 @@ class Backup(Base):
         self.backup("20261024T201500Z", "--tag=final")
         self.assertNotIn("empty", (self.backups / "wptest/20261024T201500Z/MANIFEST").read_text())
 
-    def test_every_other_way_of_taking_an_empty_backup_is_still_refused(self):
+    def test_a_pre_update_backup_of_an_empty_site_is_still_refused(self):
         self.empty_site()
-        for args in ((), ("--tag=pre-update",), ("--force",)):
-            r = self.backup("20261024T20%02d00Z" % (len(args) + 1), *args)
-            self.assertNotEqual(r.returncode, 0, args)
-            self.assertIn("no wp_options table", r.stderr)
+        r = self.backup("20261024T200200Z", "--tag=pre-update")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
         self.assertEqual(self.snapshots(), [])
+
+    def test_the_nightly_job_on_a_site_waiting_for_an_import_is_a_quiet_success_and_takes_nothing(self):
+        self.empty_site()
+        for args in ((), ("--force",)):
+            r = self.backup("20261024T20%02d00Z" % (len(args) + 1), *args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("waiting for an import): nothing to back up", r.stdout)
+        self.assertEqual(self.snapshots(), [])
+        self.assertFalse((self.backups / "wptest" / ".last-success").exists(), "a skipped night is not a good backup")
+        self.assertEqual([p.name for p in (self.backups / "wptest").iterdir()], [], "no partial directory is left either")
+
+    def test_the_nightly_job_on_a_site_that_had_real_backups_and_lost_its_tables_still_fails(self):
+        self.assertEqual(self.backup("20261023T201500Z").returncode, 0)
+        self.empty_site()
+        r = self.backup("20261024T201500Z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), ["20261023T201500Z"])
+
+    def test_a_nightly_job_that_cannot_count_the_tables_fails(self):
+        self.empty_site()
+        self.put("tables_fail", "1")
+        r = self.backup("20261024T201500Z")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not count the tables", r.stderr)
 
     def test_tables_without_wp_options_is_damage_not_emptiness(self):
         self.put("dump.sql", "-- MariaDB dump\nCREATE TABLE `wp_posts` (id int);\n-- Dump completed on 2026-10-24 20:15:00\n")
@@ -511,6 +539,41 @@ class BackupCheck(Base):
         self.run_script(self.script); self.run_script(self.script)
         self.assertEqual(len(self.said()), 2)
         self.assertIn("has a fresh backup again", self.said()[1])
+
+    def waiting_for_an_import(self, tables="0"):
+        self.shim("docker", DOCKER_COUNT)
+        self.put("tables", tables)
+        t = time.time() - 40 * 3600
+        os.utime(self.site.parent / "wptest", (t, t))
+
+    def test_a_site_with_no_tables_and_no_snapshot_is_not_stale_however_old_it_is(self):
+        self.waiting_for_an_import()
+        for _ in range(2):
+            self.run_script(self.script)
+        self.assertEqual(self.said(), [], "an empty site waiting for an import has nothing to back up")
+
+    def test_a_site_with_tables_and_no_snapshot_is_stale(self):
+        self.waiting_for_an_import("57")
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1)
+
+    def test_a_site_with_no_tables_but_a_snapshot_is_stale(self):
+        self.waiting_for_an_import()
+        (self.backups / "wptest" / "20261020T201500Z").mkdir()
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "it once had a backup, so an emptied database is a problem")
+
+    def test_a_site_whose_last_good_backup_is_old_is_stale_even_with_no_tables(self):
+        self.waiting_for_an_import()
+        self.mark(40)
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1, "it was backed up once: an emptied database must not silence the alert")
+
+    def test_a_database_that_cannot_be_counted_does_not_hide_a_stale_site(self):
+        self.waiting_for_an_import()
+        self.put("tables_fail", "1")
+        self.run_script(self.script)
+        self.assertEqual(len(self.said()), 1)
 
     def test_the_limit_is_thirty_hours_exactly(self):
         for age, told in ((29, 0), (30, 1)):
