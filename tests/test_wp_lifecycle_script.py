@@ -25,7 +25,7 @@ TEXT = SCRIPT.read_text()
 def snippets():
     """(label, body) of the library and of every heredoc sent to the VM."""
     out = [("LIB", re.search(r"<<'LIB'\n(.*?)\nLIB\n", TEXT, re.S).group(1))]
-    for i, m in enumerate(re.finditer(r"vmrun <<'EOF'\n(.*?)\nEOF\n", TEXT, re.S)):
+    for i, m in enumerate(re.finditer(r"(?:vmrun|vmtest) <<'EOF'\n(.*?)\nEOF\n", TEXT, re.S)):
         out.append(("snippet %d" % i, m.group(1)))
     return out
 
@@ -48,9 +48,17 @@ class Syntax(unittest.TestCase):
             for m in re.finditer(r"python3 -I - [^\n]*<<'PY'\n(.*?)\nPY\n", body, re.S):
                 compile(m.group(1), label, "exec")
 
+    def exit_status_snippets(self):
+        """Snippets sent with vmtest: their exit status is the answer, so they do not end in finish."""
+        out = set()
+        for i, m in enumerate(re.finditer(r"(vmrun|vmtest) <<'EOF'\n(.*?)\nEOF\n", TEXT, re.S)):
+            if m.group(1) == "vmtest":
+                out.add("snippet %d" % i)
+        return out
+
     def test_every_snippet_ends_by_reporting_its_failures_as_its_exit_code(self):
         for label, body in snippets()[1:]:
-            self.assertTrue(body.rstrip().endswith("finish") or body.rstrip().endswith("finish\n") or "\nfinish" in body, label)
+            self.assertTrue(body.rstrip().endswith("finish") or label in self.exit_status_snippets() or "\nfinish" in body, label)
 
     def test_a_snippet_that_asks_for_a_variable_has_it_in_the_env_line(self):
         env_line = re.search(r'sudo -n env ([^"]*) bash -s', TEXT).group(1)
@@ -62,6 +70,12 @@ class Syntax(unittest.TestCase):
         self.assertEqual(sorted(used - passed - local - {"BIN"}), [], "a snippet uses a variable the VM does not receive")
         for needed in ("SITE", "DOMAIN", "BIN", "SITES", "INTAKE", "LISTEN", "BDIR", "ARCH", "ADIR", "FILENAME"):
             self.assertIn(needed, passed)
+
+    def test_options_are_read_with_plugins_skipped_and_hidden_files_are_named(self):
+        self.assertRegex(TEXT, r'wpr\(\) \{ "\$BIN/wp-site-cli" "\$SITE" "\$@" --skip-plugins --skip-themes')
+        self.assertNotRegex(TEXT, r'wpc option get (blog_public|active_plugins)')
+        self.assertIn("(info) hidden file:", TEXT)
+        self.assertIn("(diff, < now, > before)", TEXT)
 
     def test_nothing_secret_is_in_the_script_and_the_password_prompts_are_not_bypassed(self):
         self.assertNotRegex(TEXT, r"(?i)password\s*=\s*['\"]\w")
@@ -86,7 +100,7 @@ class Harness(unittest.TestCase):
         (self.repo / "wpress/practice.wpress").write_bytes(b"x" * 10)
         self.log = self.repo / "calls.log"
         # stand-ins: ssh swallows its input and succeeds; the python scripts record their arguments
-        (self.repo / "bin/ssh").write_text('#!/bin/bash\necho "ssh $*" >> "%s"\ncat >/dev/null 2>&1 || true\ncase "$*" in *"bash -s"*) exit ${SSH_BASH_RC:-${SSH_RC:-0}} ;; *"sudo -n true"*) exit ${SSH_SUDO_RC:-${SSH_RC:-0}} ;; esac\nexit ${SSH_RC:-0}\n' % self.log)
+        (self.repo / "bin/ssh").write_text('#!/bin/bash\necho "ssh $*" >> "%s"\nin=$(cat 2>/dev/null || true)\n[ -n "${SSH_FAIL_ON:-}" ] && case "$in" in *"$SSH_FAIL_ON"*) exit 1 ;; esac\ncase "$*" in *"bash -s"*) exit ${SSH_BASH_RC:-${SSH_RC:-0}} ;; *"sudo -n true"*) exit ${SSH_SUDO_RC:-${SSH_RC:-0}} ;; esac\nexit ${SSH_RC:-0}\n' % self.log)
         for name in ("wp_sites.py", "wp_wpress.py"):
             body = "#!/usr/bin/env python3\nimport sys\nopen(%r, 'a').write('%s ' + ' '.join(sys.argv[1:]) + '\\n')\n" % (str(self.log), name)
             if name == "wp_wpress.py":
@@ -254,6 +268,32 @@ class Flow(Harness):
         self.assertIn("import exited 2", r.stdout)
         self.assertIn("python3 scripts/wp_sites.py reset life", r.stdout)
         self.assertIn("delete life --commit", r.stdout)
+
+    def test_a_site_with_no_data_after_the_approve_phase_stops_the_run_before_it_operates_on_nothing(self):
+        r = self.run_script("--yes", "--no-phone", "--site", "life", env=dict(self.env, SSH_FAIL_ON='"$(tables)" -gt 0'))      # only the vmtest snippet has this text
+        verbs = [c.split()[1] for c in self.sites_calls()]
+        self.assertEqual(verbs[-1], "approve", "nothing after the approve phase ran")
+        self.assertNotIn("stop", verbs)
+        self.assertIn("the site is empty after this phase", r.stdout)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("== 6. operate", r.stdout)
+
+    def test_no_approve_button_on_a_clean_import_is_a_failure_and_falls_back_to_the_terminal(self):
+        # answers: go on; a notification arrived; Deny's message arrived; no Approve button
+        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\nn\n")
+        verbs = [c.split()[1] for c in self.sites_calls()]
+        self.assertEqual(verbs, ["create", "import", "import", "approve"], r.stdout)
+        self.assertIn("FAIL: no Approve button on a clean import", r.stdout)
+        self.assertIn("NO: the second notification had no Approve button", r.stdout)
+        self.assertNotIn("Tap APPROVE now", r.stdout)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_an_approve_button_that_is_there_is_waited_for_and_never_pressed_for_you(self):
+        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\ny\ny\n")
+        verbs = [c.split()[1] for c in self.sites_calls()]
+        self.assertEqual(verbs, ["create", "import", "import"], "with the button there, the tap does the approving")
+        self.assertIn("Tap APPROVE now", r.stdout)
+        self.assertIn("yes: the second notification had an Approve button", r.stdout)
 
     def test_the_phone_path_waits_for_a_tap_and_reports_a_missing_one(self):
         # a stand-in ssh that always says the work directory is still there makes the wait time out; shorten the wait by patching a copy of the script

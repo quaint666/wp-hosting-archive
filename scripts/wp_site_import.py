@@ -443,13 +443,16 @@ def install_from_org(site, record, work, tools):
         if present:
             steps.append({"name": "%s %s" % (kind, slug), "ok": True, "note": "already in the image: left as it is"})
             continue
-        ok, out, note = False, "", ""
-        if have and VERSION_RE.match(have):
+        # The newest is installed instead of the archive's version ONLY when wordpress.org itself says that version is gone (the preflight read its list of versions: a row note). A versioned
+        # install that fails for any other reason is a failed step with the command's own output: it used to fall back to the newest whatever the reason and call that "not offered any more",
+        # which hid the real error (dellwp 2026-10-25: Elementor's checksum lookup) and installed a version the friend never had.
+        gone = r.get("verdict") == "note" and "no longer offered" in str(r.get("why", ""))
+        if have and VERSION_RE.match(have) and not gone:
             ok, out = tools.ext(site, kind, "install", slug, "--version=" + have)
             note = "installed version %s" % have
-        if not ok:
+        else:
             ok, out = tools.ext(site, kind, "install", slug)
-            note = ("version %s is not offered any more: the newest was installed" % have) if have else "the newest was installed"
+            note = ("version %s is no longer offered by wordpress.org: the newest was installed" % have) if have and gone else "the newest was installed (the archive's version could not be read)"
         if ok:
             record["installed"][kind].append(slug)
             save_record(work, record)

@@ -573,14 +573,47 @@ class Scan(Base):
 
 
 class StepFailures(Base):
-    def test_a_version_that_is_not_offered_falls_back_to_the_newest_and_says_so(self):
-        self.host.fail["ext:good:versioned"] = (1, "Error: Version not found")
-        text = self.import_ok()
-        self.assertIn("version 1.0 is not offered any more: the newest was installed", text)
+    def test_a_version_wordpress_org_no_longer_offers_gets_the_newest_and_the_report_says_why(self):
+        answers = dict(ANSWERS)
+        answers[("plugins", "good")] = {"version": "1.1", "requires_php": "7.4", "versions": {"1.1": "u", "trunk": "u"}}      # the archive has 1.0: not in the list
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"], get=get_from(answers))
+        self.assertEqual(code, 0, text)
+        self.assertIn("version 1.0 is no longer offered by wordpress.org: the newest was installed", text)
+        ext = [c[2:] for c in self.host.calls if os.path.basename(c[0]) == "wp-site-ext" and c[2] == "plugin"]
+        self.assertEqual(ext, [["plugin", "install", "good"]], "no versioned attempt for a version that is known to be gone")
         self.assertTrue((self.html / "wp-content/plugins/good").exists())
 
-    def test_an_install_that_fails_both_ways_is_a_failed_step_and_the_run_goes_on(self):
-        self.host.fail["ext:good"] = (1, "Error: checksums do not match")
+    def test_a_versioned_install_that_fails_for_any_other_reason_is_a_failed_step_not_a_substitution(self):
+        self.host.fail["ext:good:versioned"] = (1, "Error: You need to specify either one or more plugin slugs to check\n--- diagnostics for 'good' (its checksum check failed):")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1, text)
+        self.assertRegex(text, r"FAILED\s+plugin good\s+FAILED: Error: You need to specify")
+        self.assertNotIn("no longer offered", text)
+        self.assertNotIn("the newest was installed", text)
+        ext = [c[2:] for c in self.host.calls if os.path.basename(c[0]) == "wp-site-ext" and c[2] == "plugin"]
+        self.assertEqual(ext, [["plugin", "install", "good", "--version=1.0"]], "one attempt, at the archive's version; nothing else is installed in its place")
+        self.assertFalse((self.html / "wp-content/plugins/good").exists())
+        self.assertIn("--- diagnostics for 'good'", text, "the command's own output is in the details")
+
+    def test_a_version_string_that_is_not_a_version_is_not_passed_to_the_installer_and_is_not_called_gone(self):
+        fl = [f for f in files() if f[1] != "good.php"] + [("plugins/good", "good.php", plugin_php("1.0 beta; x"))]
+        self.archive(files=fl)
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 0, text)
+        self.assertIn("the newest was installed (the archive's version could not be read)", text)
+        self.assertNotIn("no longer offered", text)
+        ext = [c[2:] for c in self.host.calls if os.path.basename(c[0]) == "wp-site-ext" and c[2] == "plugin"]
+        self.assertEqual(ext, [["plugin", "install", "good"]])
+
+    def test_an_archive_whose_version_cannot_be_read_gets_the_newest_and_says_so(self):
+        fl = [f for f in files() if f[1] != "good.php"] + [("plugins/good", "good.php", b"<?php // no header")]
+        self.archive(files=fl)
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertIn("the newest was installed (the archive's version could not be read)", text)
+
+    def test_an_install_that_fails_is_a_failed_step_and_the_run_goes_on(self):
         self.host.fail["ext:good:versioned"] = (1, "Error: checksums do not match")
         self.archive()
         code, text = self.run_main(["wptest", "friend.wpress"])

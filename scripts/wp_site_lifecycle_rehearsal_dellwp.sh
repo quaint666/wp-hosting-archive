@@ -79,6 +79,8 @@ check() { if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 (wanted '$3', got 
 has() { if [ "$2" -gt 0 ] 2>/dev/null; then ok "$1 ($2)"; else bad "$1 (got '$2')"; fi; }
 code() { local path=$1; shift; curl -s -o /dev/null -w '%{http_code}' --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' "$@" "http://127.0.0.1:$LISTEN$path" </dev/null; }
 wpc() { "$BIN/wp-site-cli" "$SITE" "$@" </dev/null; }
+# a read that must not load any plugin: Elementor prints PHP 8.5 deprecation notices into the output when it is loaded (seen 2026-10-25), which is not what a check should compare
+wpr() { "$BIN/wp-site-cli" "$SITE" "$@" --skip-plugins --skip-themes </dev/null; }
 db() { docker exec -e SQL="$1" "$DB" sh -c 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "$SQL" "$MARIADB_DATABASE"' </dev/null; }
 tables() { db "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()"; }
 PREFIX=$(sed -n "s/.*\$table_prefix *= *'\([A-Za-z0-9_]*\)'.*/\1/p" "$DIR/wp-config.php" 2>/dev/null | head -n 1)
@@ -87,6 +89,15 @@ tree() { find "$DIR/html/wp-content" -printf '%P %u %m\n' 2>/dev/null | sort; }
 ledger() { grep -P "\t$SITE\t" "$INTAKE/ledger.log" 2>/dev/null | cut -f3 | tr '\n' ' '; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null </dev/null)" = true ]; }
 finish() { [ "$FAIL" = 0 ] && echo "   (all ok)"; [ "$FAIL" -gt 100 ] && FAIL=100; exit "$FAIL"; }
+
+# Hidden files under uploads: the importer never copies one (they are counted as "not copied"), so what is there was made by a plugin or WordPress itself. They are listed, and each must be a small
+# file (1 KB at most), which is what a plugin's own .htaccess is; a large one would be something else.
+hidden_check() {
+  local list; list=$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' -type f -printf '%s %u %p\n' 2>/dev/null)
+  [ -z "$list" ] || echo "$list" | sed 's/^/   (info) hidden file: /'
+  check "no hidden file under uploads is larger than 1 KB" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' -type f -size +1k 2>/dev/null | wc -l)" 0
+  check "no hidden directory or link under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' ! -type f 2>/dev/null | wc -l)" 0
+}
 
 hold_checks() {
   check "hold: a request from the VM itself is answered" "$(code / | grep -E -c '^(200|301|302)$')" 1
@@ -101,8 +112,8 @@ imported_checks() {
   check "WordPress is installed" "$(wpc core is-installed >/dev/null 2>&1 && echo yes || echo no)" yes
   check "the stored siteurl is this site's name (read from the database: wp-config.php's WP_SITEURL would hide it from wp option)" "$(stored siteurl)" "https://$HOST"
   check "the stored home is this site's name" "$(stored home)" "https://$HOST"
-  check "search engines are discouraged (blog_public)" "$(wpc option get blog_public 2>&1)" 0
-  AP=$(wpc option get active_plugins --format=json 2>&1); case $AP in *litespeed*|*all-in-one-wp-migration*) bad "active_plugins still names a dropped plugin: $AP" ;; *) ok "active_plugins names none of the dropped plugins" ;; esac
+  check "search engines are discouraged (blog_public)" "$(wpr option get blog_public 2>&1)" 0
+  AP=$(wpr option get active_plugins --format=json 2>&1); case $AP in *litespeed*|*all-in-one-wp-migration*) bad "active_plugins still names a dropped plugin: $AP" ;; *) ok "active_plugins names none of the dropped plugins" ;; esac
   python3 -I - "$WORK/PLAN.json" "$DIR/html/wp-content" "$WORK/wp-content" <<'PY'
 import json, os, sys
 rec = json.load(open(sys.argv[1])); site, work = sys.argv[2], sys.argv[3]
@@ -119,7 +130,7 @@ sys.exit(bad)
 PY
   FAIL=$((FAIL + $?))
   check "no PHP file over 64 bytes under uploads (a plugin's own 'silence' stub is not the archive's)" "$(find "$DIR/html/wp-content/uploads" -type f -iname '*.php*' -size +64c 2>/dev/null | wc -l)" 0
-  check "no hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' 2>/dev/null | wc -l)" 0
+  hidden_check
   check "uploads belong to the php user" "$(find "$DIR/html/wp-content/uploads" ! -user 33 2>/dev/null | wc -l)" 0
   check "the plugins directory is root's (php cannot write code)" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
   has "the first backup exists (snapshots)" "$(ls "$BDIR/$SITE" 2>/dev/null | grep -c '^[0-9]\{8\}T')"
@@ -128,8 +139,11 @@ PY
   hold_checks
 }
 LIB
-vmrun() {
+vmtest() {      # the snippet's exit status is the answer
   { printf '%s\n' "$REMOTE_LIB"; cat; } | ssh dellwp "sudo -n env SITE=$SITE DOMAIN=$DOMAIN BIN=$BIN SITES=$SITES INTAKE=$INTAKE LISTEN=$LISTEN PROBE=$PROBE BDIR=$BDIR ARCH=$ARCH ADIR=$ADIR FILENAME=$FILENAME bash -s"
+}
+vmrun() {       # the snippet's failures are added to the count
+  vmtest
   local rc=$?; FAIL=$((FAIL + rc)); return 0
 }
 
@@ -213,6 +227,7 @@ vmrun <<'EOF'
 check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
 check "the database is empty again" "$(tables)" 0
 check "the site's file tree is exactly what it was before the import" "$(tree | diff - "$BASE" >/dev/null && echo same || echo different)" same
+tree | diff - "$BASE" | head -n 20 | sed 's/^/   (diff, < now, > before) /' || true
 [ -f "$INTAKE/$FILENAME" ] && ok "the .wpress is still in the intake directory" || bad "the .wpress is gone from the intake directory"
 check "the ledger records the decision" "$(ledger | grep -c 'reset')" 1
 check "no partial file in the intake directory" "$(ls -A "$INTAKE" | grep -c '^\.recv-')" 0
@@ -229,14 +244,19 @@ finish
 EOF
 
 PHASE=approve; say "5. approve"
-if [ "$PHONE" = yes ]; then
-  confirmed "The second notification arrived with an Approve button (the import was clean), or you know why it did not"
-  echo "   Tap APPROVE now (waiting up to 10 minutes). If there is no Approve button, press Ctrl-C and use: python3 scripts/wp_sites.py approve $SITE"
+if [ "$PHONE" = yes ] && yn "Did the second notification arrive with an Approve button?"; then
+  MANUAL+=("yes: the second notification had an Approve button")
+  echo "   Tap APPROVE now (waiting up to 10 minutes)."
   waitgone 600; bump $? "the work directory is gone after the tap" || fatal "no decision arrived"
   confirmed "A message 'Phone decision done: ...' arrived on the phone after Approve"
 else
+  if [ "$PHONE" = yes ]; then MANUAL+=("NO: the second notification had no Approve button"); echo "FAIL: no Approve button on a clean import"; FAIL=$((FAIL+1)); echo "   (approving in the terminal instead, so the rest of the lifecycle can be checked)"; fi
   python3 scripts/wp_sites.py approve "$SITE" --yes; bump $? "wp_sites.py approve" || fatal "approve failed"
 fi
+vmtest <<'EOF'
+[ "$(tables)" -gt 0 ] 2>/dev/null
+EOF
+bump $? "the site has data after the decision" || fatal "the site is empty after this phase: it was denied or undone, so the checks that follow would prove nothing"
 vmrun <<'EOF'
 check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
 check "the .wpress is gone from the intake directory" "$([ -e "$INTAKE/$FILENAME" ] && echo yes || echo no)" no
@@ -246,7 +266,7 @@ check "the stored siteurl is still this site" "$(stored siteurl)" "https://$HOST
 check "the plugins directory is root's" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
 check "nothing under plugins, themes or mu-plugins is writable by the php user" "$(find "$DIR/html/wp-content/plugins" "$DIR/html/wp-content/themes" "$DIR/html/wp-content/mu-plugins" -user 33 2>/dev/null | wc -l)" 0
 check "no PHP file over 64 bytes under uploads" "$(find "$DIR/html/wp-content/uploads" -type f -iname '*.php*' -size +64c 2>/dev/null | wc -l)" 0
-check "no hidden file under uploads" "$(find "$DIR/html/wp-content/uploads" -mindepth 1 -name '.*' 2>/dev/null | wc -l)" 0
+hidden_check
 hold_checks
 finish
 EOF
