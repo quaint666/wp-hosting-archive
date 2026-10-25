@@ -32,6 +32,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 - name: Make the staging subdirectories
   ansible.builtin.file:
@@ -42,6 +44,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 - name: Stage the tools library
   ansible.builtin.template:
@@ -51,6 +55,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 # wp-site-import is Python: the logic, the archive reader and the approval tokens are the tested modules in scripts/ (tests/test_wp_import.py, test_wp_wpress.py, test_wp_approvals.py), copied as they are; the wrapper below only
 # carries the repo's values. wp_scripts_dir is set by the wrapper play.
@@ -66,6 +72,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 - name: Stage the tools
   ansible.builtin.template:
@@ -93,6 +101,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   vars:
     wp_update_policies: >-
       {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
@@ -117,12 +127,16 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 # One check for all sites, not an instance per site: is every site still being backed up? (templates/wp/wp_backup_check.sh.j2)
 - name: Stage the backup freshness check service
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-backup-check.service"
     mode: "0600"
@@ -139,6 +153,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-backup-check.timer"
     mode: "0600"
@@ -158,6 +174,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-restore-drill.service"
     mode: "0600"
@@ -178,6 +196,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-restore-drill.timer"
     mode: "0600"
@@ -198,6 +218,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-archive-purge.service"
     mode: "0600"
@@ -216,6 +238,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/units/wp-archive-purge.timer"
     mode: "0600"
@@ -240,6 +264,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 - name: Write the lists of the staged files
   ansible.builtin.copy:
@@ -252,6 +278,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 # --checksum: compare content, not times (the staged copies are new every run). --chown and --chmod make the owner and the mode part of what is compared, so a file whose mode drifted is sent
 # again and the run says changed. Check mode is an rsync dry run: it lists what would be sent.
@@ -312,6 +340,8 @@
   delegate_to: localhost
   become: false
   check_mode: false
+  changed_when: false
+  diff: false
 
 - name: Enable the backup freshness check timer
   ansible.builtin.systemd:

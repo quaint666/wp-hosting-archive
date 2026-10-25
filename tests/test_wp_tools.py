@@ -728,6 +728,13 @@ class Staging(unittest.TestCase):
                 self.assertEqual((t.get("delegate_to"), t.get("become")), ("localhost", False), t["name"])
         self.assertEqual(self.by["Make the tools library directory"]["ansible.builtin.file"]["path"], "{{ wp_tools_lib }}")
 
+    def test_staging_never_counts_as_a_change_and_never_prints_a_diff(self):
+        staged = [t for t in self.tasks if t.get("delegate_to") == "localhost"]
+        self.assertGreaterEqual(len(staged), 12)
+        for t in staged:
+            self.assertIs(t.get("changed_when"), False, t["name"] + ": staging is rewritten every run; counting it would hide the real changed=0 of the sends")
+            self.assertIs(t.get("diff"), False, t["name"] + ": a diff of every staged file buries the real differences")
+
     def test_the_syncs_are_exactly_these_three_and_each_sends_only_what_was_staged(self):
         syncs = [t["name"] for t in self.tasks if "ansible.posix.synchronize" in t]
         self.assertEqual(sorted(syncs), sorted(self.SENDS))
