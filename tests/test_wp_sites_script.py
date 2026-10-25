@@ -54,6 +54,9 @@ class Base(unittest.TestCase):
 
     def fake_run(self, cmd, tee=False, stdin=None):
         self.calls.append(cmd)
+        if not hasattr(self, "tee_log"):
+            self.tee_log = []
+        self.tee_log.append((" ".join(cmd), tee))
         self.stdins.append(stdin)
         key = " ".join(cmd[:4])
         rc = next((v for k, v in self.rc.items() if key.startswith(k) or k in " ".join(cmd)), 0)
@@ -660,6 +663,7 @@ class Committing(Base):
         self.assertIn("The verifier reported 1 failed check(s) for", said)
         self.assertIn("  FAIL: php can write to uploads", said); self.assertIn("  FAIL: hold: local request did not get 200", said)
         self.assertNotIn("  ok:   php active", said)
+        self.assertIn(("bash scripts/wp_site_verify_dellwp.sh wptest", True), self.tee_log, "its output is captured (and still shown as it comes) so the failing lines can be repeated")
 
     def test_a_verifier_that_fails_without_a_fail_line_says_how_to_read_it(self):
         self.rc = {"bash": 3}
