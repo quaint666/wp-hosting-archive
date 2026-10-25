@@ -131,6 +131,23 @@ wp_intake_quota_id: 3000003
 wp_intake_quota_mb: 3072
 # The longest any one command of wp-site-import (a docker exec, a WP-CLI call, wp-site-ext, the SQL load) may run before the tool stops it: a hung container must not hold the import lock for ever.
 wp_import_step_timeout_s: 3600
+# Approvals by phone (scripts/wp_approvals.py, scripts/wp_approval_listener.py): a finished import sends a notification with Approve and Deny buttons to the independent ntfy, the one the alert
+# fallback already uses; its address and topic are read from wp_ntfy_conf at run time, so the address is written once (tasks/ntfy_notify_common.yml). The files in wp_approvals_dir are root-only and
+# rendered by the play from the vault: key (signs the tokens), approver (login:password of the user that can only post to the reply topic; it is inside the buttons) and listener (login:password of the
+# user that can only read it). wp_ntfy_netrc is the file ntfy-notify's fallback already reads. A token is good for wp_approvals_ttl_s seconds and for one use.
+wp_approvals_dir: /etc/wp-approvals
+wp_approvals_reply_topic: wp-approvals
+wp_approvals_ttl_s: 86400
+wp_ntfy_conf: /etc/ntfy-notify.conf
+wp_ntfy_netrc: /etc/ntfy-notify.netrc
+# The listener (scripts/wp_approval_listener.py, dellwp/wp_approvals_dellwp.yml) follows the reply topic as the read-only user and hands each token to wp-site-import resolve. It remembers the last
+# message it handled in wp_approvals_state_dir, handles at most wp_approvals_max_per_minute tokens a minute, and gives the tool wp_approvals_resolve_timeout_s to finish (an approve copies code in and
+# takes a backup). wp_ntfy_notify_cmd is the command tasks/ntfy_notify_common.yml installs; the result of a decision goes to wp_ntfy_topic.
+wp_approvals_state_dir: /var/lib/wp-approvals
+wp_approvals_max_per_minute: 20
+wp_approvals_read_timeout_s: 120
+wp_approvals_resolve_timeout_s: 7200
+wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.

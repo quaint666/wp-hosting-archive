@@ -17,6 +17,8 @@ CONFIG = {
     "tools_bin": "{{ wp_tools_bin }}",
     "php_uid": {{ wp_php_uid }},
     "step_timeout_s": {{ wp_import_step_timeout_s }},
+    "approvals": {"key_file": "{{ wp_approvals_dir }}/key", "approver_file": "{{ wp_approvals_dir }}/approver", "ntfy_conf": "{{ wp_ntfy_conf }}", "netrc": "{{ wp_ntfy_netrc }}",
+                  "reply_topic": "{{ wp_approvals_reply_topic }}", "ttl_s": {{ wp_approvals_ttl_s }}},
     "sites": {
 {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}
         "{{ s.name }}": {"state": "{{ s.state | default(wp_site_defaults.state) }}", "quota_mb": {{ s.quota_mb | default(wp_site_defaults.quota_mb) }}},

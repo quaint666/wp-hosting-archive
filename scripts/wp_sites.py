@@ -593,6 +593,10 @@ class Sites:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
         digest = h.hexdigest()
+        # a copy of this file left by an earlier try (a reset or a Deny keeps the file) is replaced; one that an import still waiting on the VM was made from is not touched
+        _, gone = self.run(["ssh", HOST, "sudo -n wp-site-import discard " + shlex.quote(f.name)], tee=True)
+        if "is the file of the import" in (gone or ""):
+            raise Refuse("%s is the file of an import that is still waiting on the VM: approve it or undo it first (python3 scripts/wp_sites.py approve|reset <site>)" % f.name)
         rc, text = self.run(["ssh", HOST, "sudo -n wp-site-import receive " + shlex.quote(f.name)], tee=True, stdin=str(f))
         if rc != 0:
             self.out("The copy to the VM failed (exit %d); read its message above. Nothing was imported." % rc)
@@ -649,7 +653,7 @@ class Sites:
             self.out("wp-site-import reset did not finish (exit %d); read its message above." % rc)
             return rc
         self.run(["python3", "scripts/wp_sites_status.py"])
-        self.out("\nThe import of %s is undone; the file is still in the VM's intake directory (python3 scripts/wp_sites.py import %s <file> sends and imports again)." % (site, site))
+        self.out("\nThe import of %s is undone; the file is still in the VM's intake directory (python3 scripts/wp_sites.py import %s <file> replaces that copy and imports again)." % (site, site))
         return 0
 
     # --- menu

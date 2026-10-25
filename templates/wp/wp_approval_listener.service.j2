@@ -1,0 +1,20 @@
+# Managed by Ansible (templates/wp/wp_approval_listener.service.j2). Follows the approvals topic on the independent ntfy and passes each signed token to wp-site-import resolve (see
+# scripts/wp_approval_listener.py). It decides nothing itself. Runs as root because the tool it starts needs docker and the site directories; NoNewPrivileges and a private /tmp are the
+# limits that cost nothing. Restart=always with no start limit: a dead listener must come back by itself, and a login that ntfy refuses is paused and reported by the program, not by systemd.
+[Unit]
+Description=WordPress import approvals from the phone (ntfy to wp-site-import resolve)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ wp_tools_bin }}/wp-approval-listener
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

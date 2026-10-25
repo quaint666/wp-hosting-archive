@@ -27,7 +27,7 @@
     group: root
     mode: "0644"
 
-# wp-site-import is Python: the logic and the archive reader are the tested modules in scripts/ (tests/test_wp_import.py, tests/test_wp_wpress.py), copied as they are; the wrapper below only
+# wp-site-import is Python: the logic, the archive reader and the approval tokens are the tested modules in scripts/ (tests/test_wp_import.py, test_wp_wpress.py, test_wp_approvals.py), copied as they are; the wrapper below only
 # carries the repo's values. wp_scripts_dir is set by the wrapper play.
 - name: Deploy the Python modules of wp-site-import
   ansible.builtin.copy:
@@ -38,6 +38,7 @@
     mode: "0644"
   loop:
     - wp_wpress.py
+    - wp_approvals.py
     - wp_site_import.py
 
 - name: Deploy the tools

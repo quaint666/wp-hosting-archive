@@ -920,9 +920,10 @@ class Importing(Base):
         self.assertEqual(rc, 0, self.text())
         self.assertEqual(self.judged, [str(self.f)])
         ssh = [c for c in self.calls if c[0] == "ssh"]
-        self.assertEqual(ssh[0], ["ssh", "dellwp", "sudo -n wp-site-import receive friend.wpress"])
-        self.assertEqual(ssh[1], ["ssh", "-t", "dellwp", "sudo wp-site-import wptest friend.wpress"])
-        self.assertEqual(self.stdins[self.calls.index(ssh[0])], str(self.f))
+        self.assertEqual(ssh[0], ["ssh", "dellwp", "sudo -n wp-site-import discard friend.wpress"], "an old copy from an earlier try is replaced, not refused")
+        self.assertEqual(ssh[1], ["ssh", "dellwp", "sudo -n wp-site-import receive friend.wpress"])
+        self.assertEqual(ssh[2], ["ssh", "-t", "dellwp", "sudo wp-site-import wptest friend.wpress"])
+        self.assertEqual(self.stdins[self.calls.index(ssh[1])], str(self.f))
         self.assertEqual([x for x in self.stdins if x], [str(self.f)], "the file is sent once, to receive and to nothing else")
         self.assertIn("Copied and verified", self.text())
         self.assertIn("approve wptest", self.text())
@@ -940,7 +941,19 @@ class Importing(Base):
     def test_a_yes_to_the_question_copies(self):
         self.answers = ["y"]
         self.assertEqual(self.sites().import_site("wptest", str(self.f)), 0)
-        self.assertEqual(len(self.ssh()), 2)
+        self.assertEqual(len(self.ssh()), 3)
+
+    def test_a_copy_that_an_import_is_waiting_on_is_never_replaced(self):
+        self.reply["wp-site-import discard"] = "wp-site-import: friend.wpress is the file of the import in work-wptest: approve or reset that first\n"
+        with self.assertRaises(w.Refuse) as cm:
+            self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertIn("still waiting on the VM", str(cm.exception))
+        self.assertEqual(self.ssh(), ["ssh dellwp sudo -n wp-site-import discard friend.wpress"], "nothing was sent")
+
+    def test_a_stale_copy_from_a_reset_is_replaced_and_the_file_goes_again(self):
+        self.reply["wp-site-import discard"] = "removed friend.wpress from the intake directory\n"
+        self.assertEqual(self.sites().import_site("wptest", str(self.f), yes=True), 0)
+        self.assertEqual([x for x in self.stdins if x], [str(self.f)])
 
     def test_a_no_go_stops_before_anything_is_copied(self):
         self.verdict = ([], [], ["core is newer"], {"archive_wp": "7.2.0", "our_wp": "7.1.3", "archive_php": "8.5", "our_php": "8.5", "entries": 1, "size_mb": 1})
@@ -997,7 +1010,7 @@ class Importing(Base):
     def test_a_failed_copy_stops_without_an_import(self):
         self.rc["ssh dellwp sudo -n wp-site-import receive"] = 255
         self.assertEqual(self.sites().import_site("wptest", str(self.f), yes=True), 255)
-        self.assertEqual(len(self.ssh()), 1)
+        self.assertEqual(len(self.ssh()), 2)         # the discard, then the receive that failed
         self.assertIn("copy to the VM failed", self.text())
 
     def test_what_the_exit_code_of_the_import_means(self):

@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
 import jinja2  # noqa: E402
+import yaml  # noqa: E402
 import wp_site_import as imp  # noqa: E402
 import wp_wpress as w  # noqa: E402
 from test_wp_sites_render import ROOT, load  # noqa: E402
@@ -1372,6 +1373,8 @@ class Wrapper(unittest.TestCase):
         self.assertEqual(cfg["sites"], {"alpha": {"state": "hold", "quota_mb": 4096}, "beta": {"state": v["wp_site_defaults"]["state"], "quota_mb": v["wp_site_defaults"]["quota_mb"]}})
         self.assertEqual((cfg["intake_dir"], cfg["intake_quota_mb"], cfg["image_pin"], cfg["data_mount"]), (v["wp_intake_dir"], v["wp_intake_quota_mb"], v["wp_image_php"], v["wp_data_mount"]))
         self.assertEqual((cfg["domain"], cfg["tools_bin"], cfg["php_uid"], cfg["step_timeout_s"]), (v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"], v["wp_import_step_timeout_s"]))
+        self.assertEqual(cfg["approvals"], {"key_file": v["wp_approvals_dir"] + "/key", "approver_file": v["wp_approvals_dir"] + "/approver", "ntfy_conf": v["wp_ntfy_conf"], "netrc": v["wp_ntfy_netrc"],
+                                            "reply_topic": v["wp_approvals_reply_topic"], "ttl_s": v["wp_approvals_ttl_s"]})
         self.assertIsInstance(cfg["php_uid"], int)
         self.assertIn('sys.path.insert(0, "%s")' % v["wp_tools_lib"], text)
 
@@ -1389,7 +1392,9 @@ class Wrapper(unittest.TestCase):
             lib, intake = d / "lib", d / "data/intake"
             lib.mkdir(); intake.mkdir(parents=True); (d / "data/sites/wptest").mkdir(parents=True)
             text, _ = self.render(wp_sites=[{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "hold"}], wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
-            for m in ("wp_wpress.py", "wp_site_import.py"):
+            deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the Python modules of wp-site-import" for i in t["loop"]]
+            self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_site_import.py", "wp_wpress.py"], "the play must copy every module the tool imports")
+            for m in deployed:
                 (lib / m).write_text((ROOT / "scripts" / m).read_text())
             tool = d / "wp-site-import"
             tool.write_text(text.replace("#!/usr/bin/python3 -I", "#!%s -I" % sys.executable))

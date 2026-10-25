@@ -1,0 +1,23 @@
+#!/usr/bin/python3 -I
+# Managed by Ansible (templates/wp/wp_approval_listener.py.j2). The service behind the Approve and Deny buttons of an import notification: it follows the reply topic on the independent ntfy as a
+# read-only user and hands each token-shaped message to   wp-site-import resolve <token>   which decides everything. The logic is {{ wp_tools_lib }}/wp_approval_listener.py (copied from scripts/, where
+# tests/test_wp_approvals.py runs it); this file only carries the repo's values. The ntfy address is read from {{ wp_ntfy_conf }} at run time, so it is written once. Run by
+# wp-approval-listener.service as root (the tool it starts needs docker and the site directories).
+import sys
+
+sys.path.insert(0, "{{ wp_tools_lib }}")
+import wp_approval_listener  # noqa: E402
+
+CONFIG = {
+    "ntfy_conf": "{{ wp_ntfy_conf }}",
+    "listener_file": "{{ wp_approvals_dir }}/listener",
+    "reply_topic": "{{ wp_approvals_reply_topic }}",
+    "state_file": "{{ wp_approvals_state_dir }}/last-id",
+    "tool": "{{ wp_tools_bin }}/wp-site-import",
+    "notify_cmd": "{{ wp_ntfy_notify_cmd }}",
+    "result_topic": "{{ wp_ntfy_topic }}",
+    "resolve_timeout_s": {{ wp_approvals_resolve_timeout_s }},
+    "max_per_minute": {{ wp_approvals_max_per_minute }},
+    "read_timeout_s": {{ wp_approvals_read_timeout_s }},
+}
+sys.exit(wp_approval_listener.main(CONFIG))

@@ -9,6 +9,11 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import report <site>                     (prints the report again)
     wp-site-import receive <file.wpress>             (the file on standard input: how the laptop sends it; the intake directory is root-only)
     wp-site-import discard <file.wpress>             (removes a file from the intake directory, unless an import was made from it)
+    wp-site-import resolve <token>                   (what the phone's Approve and Deny buttons lead to, through the listener: scripts/wp_approval_listener.py)
+
+When an import has finished, a notification goes to the phone (the independent ntfy) with a Deny button and, only if the import is clean (no failed step, checksums ok, no ClamAV find, no
+suspicious pattern), an Approve button. A token is signed, expires, is bound to the exact report and is used once; it can approve a clean import or deny, and nothing else: --accept-failures,
+--reject and going live are not available to it. Without the key file the run says that phone approval is off and goes on.
 
 After the unpack the run goes on by itself: load the SQL (the migration plugin's table prefix is swapped for the site's), copy the data (uploads, languages), reinstall every plugin and theme
 wordpress.org offers (the archive's version if it is still offered, else the newest, and the report says so), run the WP-CLI steps (update-db, the URLs, Elementor, transients, rewrite rules),
@@ -32,9 +37,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 from pathlib import Path
 
+import wp_approvals as ap
 import wp_wpress as w
 
 SITE_RE = re.compile(r"^[a-z][a-z0-9-]{1,23}\Z")
@@ -293,8 +300,8 @@ def save_record(work, record):
 
 class Tools:
     """The things the run asks of the host, in one place so that the tests can stand in for them."""
-    def __init__(self, cfg, run, popen, chown, which):
-        self.cfg, self.popen, self.chown, self.which = cfg, popen, chown, which
+    def __init__(self, cfg, run, popen, chown, which, clock=time.time, post=None):
+        self.cfg, self.popen, self.chown, self.which, self.clock, self.post = cfg, popen, chown, which, clock, post
         self.timeout = int(cfg["step_timeout_s"])
         self.run = lambda cmd, **kw: run(cmd, timeout=self.timeout, **kw)
 
@@ -618,6 +625,99 @@ def build_report(site, record, steps, res, work):
     return w.printable("\n".join(lines), keep_newline=True)
 
 
+# ---- approvals by phone (the tokens are in wp_approvals.py; what a valid one may do is decided here)
+
+def unclean_reasons(record):
+    """Why an import may not be approved from a phone. Empty means clean. A missing result counts against it: silence is not a pass."""
+    why = []
+    failed = [s["name"] for s in record.get("steps", []) if not s["ok"]]
+    if failed:
+        why.append("%d step(s) failed (%s)" % (len(failed), failed[0]))
+    sc = record.get("scan")
+    if not isinstance(sc, dict):
+        return why + ["no scan result"]
+    for key, label in (("core", "core checksums"), ("plugins", "plugin checksums")):
+        if not (isinstance(sc.get(key), (list, tuple)) and sc[key] and sc[key][0] is True):   # a tuple in memory, a list once it has been through JSON
+            why.append("%s failed" % label)
+    clam = str(sc.get("clam", "FAILED: no result"))
+    if clam.startswith(("FOUND", "FAILED")):
+        why.append("ClamAV: " + clam[:60])
+    for key, label in (("held_total", "held-back file(s)"), ("uploads_hits_total", "file(s) under uploads")):
+        if sc.get(key, 1) != 0:
+            why.append("%s %s match suspicious patterns" % (sc.get(key, "some"), label))
+    return why
+
+
+def notify_report(cfg, site, record, work, tools):
+    """Send the phone notification for a finished import: Deny always, Approve only when the import is clean. Never raises: the answer is one line the run prints."""
+    a = cfg.get("approvals")
+    if not a:
+        return "phone approval is not configured"
+    try:
+        key = ap.read_key(a["key_file"])
+        url, ask_topic = ap.read_conf(a["ntfy_conf"])
+        sender = ap.sender_auth(a["netrc"], url)
+        button = ap.approver_auth(a["approver_file"])
+        sha = hashlib.sha256((work / "REPORT.txt").read_bytes()).hexdigest()
+        why = unclean_reasons(record)
+        now = tools.clock()
+        tokens, issued = {}, {}
+        for action in (("approve",) if not why else ()) + ("deny",):
+            tokens[action], nonce = ap.mint(key, site, action, sha, a["ttl_s"], now)
+            issued[nonce] = action
+        record["tokens"] = issued
+        save_record(work, record)
+        held = held_items(record, work)
+        body = "\n".join(["%s: %d steps, %d failed." % (site, len(record["steps"]), sum(1 for s in record["steps"] if not s["ok"])),
+                          ("Held back for you: " + ", ".join("%s %s (%d files)" % i for i in held)) if held else "Nothing held back.",
+                          "ClamAV: " + str(record["scan"].get("clam", "?"))[:60]]
+                         + (["NOT CLEAN: " + "; ".join(why) + ". Decide at the control page: wp_sites.py approve %s [--reject ...] [--accept-failures]." % site] if why
+                            else ["Clean. Approve copies the held-back code in; the site stays on hold."]))
+        (tools.post or ap.post_json)(url, sender, ap.build_message(url, ask_topic, a["reply_topic"], button, site, body, tokens))
+        return "phone notification sent (%s)" % ("Approve and Deny" if not why else "Deny only: " + why[0])
+    except ap.ApprovalError as e:
+        return "phone approval is off or failed: %s" % e
+    except Exception as e:        # a notification must never fail the import it reports on
+        return "the phone notification failed: %s" % w.printable(e, limit=120)
+
+
+def run_resolve(cfg, token, tools, out):
+    """What a valid token may do: approve a CLEAN import (no override of any kind) or deny (reset) the import it was issued for. Consumed before it acts."""
+    a = cfg.get("approvals")
+    if not a:
+        raise Refuse("phone approval is not configured")
+    try:
+        d = ap.verify(ap.read_key(a["key_file"]), token, tools.clock())
+    except ap.ApprovalError as e:
+        raise Refuse("token refused: %s" % e)
+    site = d["s"]
+    check_site(cfg, site)
+    work = Path(cfg["intake_dir"]) / ("work-" + site)
+    if not work.is_dir() or work.is_symlink():
+        raise Refuse("token refused: no import of %s is waiting" % site)
+    record = read_record(work)
+    if record.get("stage") != "reported":
+        raise Refuse("token refused: the import of %s is at stage '%s', not 'reported'" % (site, record.get("stage")))
+    issued = record.get("tokens")
+    if not isinstance(issued, dict) or issued.get(d["n"]) != d["a"]:
+        raise Refuse("token refused: it was not issued for the import now waiting, or it was used")
+    try:
+        current = hashlib.sha256((work / "REPORT.txt").read_bytes()).hexdigest()
+    except OSError:
+        raise Refuse("token refused: the report cannot be read")
+    if current != d["r"]:
+        raise Refuse("token refused: the report is not the one the token was issued for")
+    record["tokens"] = {}          # one use: consumed before anything runs, and a failure does not leave a second try
+    save_record(work, record)
+    ledger(cfg, site, "token-" + d["a"], d["n"])
+    if d["a"] == "approve":
+        why = unclean_reasons(record)
+        if why:
+            raise Refuse("not approved: %s. Decide at the control page" % "; ".join(why))
+        return run_approve(cfg, site, [], False, tools, out)
+    return run_reset(cfg, site, None, tools, out, confirmed=True)
+
+
 # ---- the run
 
 def run_import(cfg, site, arg, plan_only, get, tools, out):
@@ -681,6 +781,7 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
     save_record(work, record)
     ledger(cfg, site, "reported", digest, size, path.name)
     out("\n" + report)
+    out(notify_report(cfg, site, record, work, tools))
     return 1 if any(not s["ok"] for s in steps) else 0
 
 
@@ -754,13 +855,13 @@ def undo(cfg, site, work, tools, out):
     out("removed %d copied files and %d installed plugins/themes" % (len(files), sum(len(v) for v in record.get("installed", {}).values())))
 
 
-def run_reset(cfg, site, ask, tools, out):
+def run_reset(cfg, site, ask, tools, out, confirmed=False):
     if not SITE_RE.match(site or ""):
         raise Refuse("'%s' is not a site name" % site)
     work = Path(cfg["intake_dir"]) / ("work-" + site)
     if not work.is_dir() or work.is_symlink():
         raise Refuse("there is nothing to reset: %s is not a directory" % work)
-    if ask("Type the site name (%s) to undo the import and remove %s: " % (site, work)).strip() != site:
+    if not confirmed and ask("Type the site name (%s) to undo the import and remove %s: " % (site, work)).strip() != site:
         raise Refuse("the name did not match: nothing was removed")
     if (work / "PLAN.json").exists():
         undo(cfg, site, work, tools, out)
@@ -844,10 +945,11 @@ def tty_ask(prompt):
 
 
 USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
-         "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress>")
+         "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress>\n"
+         "       wp-site-import resolve <token>            (a signed token from the phone: approve a clean import, or deny)")
 
 
-def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which, stdin=None):
+def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which, stdin=None, clock=time.time, post=None):
     flags = {"--plan", "--accept-failures"}
     args = [x for x in argv if x not in flags]
     reject = []
@@ -856,7 +958,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         reject = [x for x in (args[i + 1] if i + 1 < len(args) else "").split(",") if x]
         args = args[:i] + args[i + 2:]
     plan_only, accept = "--plan" in argv, "--accept-failures" in argv
-    tools = Tools(cfg, run, popen, chown, which)
+    tools = Tools(cfg, run, popen, chown, which, clock, post)
     raw_out = out
 
     def out(text):          # everything printed passes the filter: names and versions come from the archive
@@ -868,8 +970,14 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise Refuse("another import is running")
+        command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") else "import"
+        if (plan_only and command != "import") or ((reject or accept) and command != "approve"):
+            out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped
+            return 2
         if args[:1] == ["reset"] and len(args) == 2:
             return run_reset(cfg, args[1], ask, tools, out)
+        if args[:1] == ["resolve"] and len(args) == 2:
+            return run_resolve(cfg, args[1], tools, out)
         if args[:1] == ["receive"] and len(args) == 2:
             return run_receive(cfg, args[1], stdin or sys.stdin.buffer, out)
         if args[:1] == ["discard"] and len(args) == 2:
@@ -878,7 +986,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             return run_report(cfg, args[1], out)
         if args[:1] == ["approve"] and len(args) == 2:
             return run_approve(cfg, args[1], reject, accept, tools, out)
-        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report") or reject or accept:
+        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") or reject or accept:
             out(USAGE)
             return 2
         return run_import(cfg, args[0], args[1], plan_only, get, tools, out)
