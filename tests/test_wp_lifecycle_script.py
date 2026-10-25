@@ -86,6 +86,11 @@ class Syntax(unittest.TestCase):
             self.assertIn(line, seg, phase)
             self.assertLess(seg.index(line), seg.index("vmrun <<"), phase)
 
+    def test_the_import_checks_show_the_scan_lines_and_fail_only_when_a_scan_tool_broke(self):
+        self.assertIn("(ClamAV|known vulnerabilities):", TEXT)
+        self.assertIn("'^  ClamAV: .*FAILED'", TEXT); self.assertIn("'^  known vulnerabilities: FAILED'", TEXT)
+        self.assertIn("NOT RUN is allowed", TEXT)
+
     def test_the_replace_phase_sits_between_approve_and_operate_and_only_runs_when_asked(self):
         a, b = TEXT.index("PHASE=approve"), TEXT.index("PHASE=operate")
         self.assertTrue(a < TEXT.index("PHASE=replace") < b)
@@ -134,6 +139,11 @@ class Harness(unittest.TestCase):
             if name == "wp_wpress.py":
                 body += "print('GO')\n"
             (self.repo / "scripts" / name).write_text(body)
+        # curl: answers like the site would, by the state the last `modify` asked for (it reads the call log); CURL_* in the environment change what it says
+        (self.repo / "bin/curl").write_text('#!/bin/bash\necho "curl $*" >> "%s"\nlast=$(grep -o "state=[a-z]*" "%s" | tail -n 1)\nurl=${@: -1}\n'
+                                            'if [ "$last" = state=live ]; then\n  case "$*" in *" -w "*) case "$url" in *wp-login.php) echo "${CURL_LOGIN:-200}" ;; *) echo "${CURL_LIVE:-200}" ;; esac ;;\n'
+                                            '    *) printf \'<html><link href="/wp-content/themes/x/style.css">%%s</html>\' "${CURL_BODY:-}" ;; esac\n'
+                                            'else\n  case "$*" in *" -w "*) echo "${CURL_HOLD:-403}" ;; *) echo forbidden ;; esac\nfi\n' % (str(self.log), str(self.log)))
         (self.repo / "scripts/wp_site_verify_dellwp.sh").write_text('#!/bin/bash\necho "verify $*" >> "%s"\necho "5 checks, 0 failed"\n' % self.log)
         for p in (self.repo / "bin").iterdir():
             p.chmod(0o755)
@@ -306,6 +316,36 @@ class Flow(Harness):
         self.assertIn("wp_sites.py modify life --set state=live --commit", calls)
         self.assertEqual(calls[-1], "wp_sites.py modify life --set state=hold --yes --commit")
         self.assertNotIn("--yes-public", " ".join(calls))
+
+    def live(self, **env):
+        return self.run_script("--yes", "--no-phone", "--with-live", "--site", "life", "--until", "live", env=dict(self.env, **env))
+
+    def test_going_live_checks_the_page_the_login_and_the_timers_and_then_that_the_public_is_shut_out_again(self):
+        r = self.live()
+        for ok in ("answers 200 through the tunnel", "the front page is WordPress's", "the front page shows no PHP error", "the login page answers 200", "back on hold the public no longer gets the site (answer: '403')"):
+            self.assertIn("ok: " + ok if not ok.startswith("answers") else ok, r.stdout, ok)
+        self.assertNotIn("FAIL: https://", r.stdout)
+        self.assertIn("reachable by anyone", r.stdout)
+        calls = self.calls()
+        order = [i for i, c in enumerate(calls) if "state=" in c]
+        self.assertEqual([calls[i].split("state=")[1].split()[0] for i in order], ["live", "hold"])
+
+    def test_a_site_that_is_still_public_after_going_back_to_hold_is_a_failure(self):
+        r = self.live(CURL_HOLD="200")
+        self.assertIn("FAIL: back on hold, https://life.", r.stdout); self.assertIn("still answers 200: the site is still public", r.stdout)
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_a_front_page_that_is_not_wordpress_or_shows_php_errors_is_a_failure(self):
+        r = self.live(CURL_BODY="Fatal error: Uncaught Error in /var/www/html/wp-content/plugins/x.php")
+        self.assertIn("FAIL: the front page shows a PHP error", r.stdout)
+        r = self.live(CURL_LOGIN="500")
+        self.assertIn("FAIL: the login page answered '500'", r.stdout)
+        r = self.live(CURL_LIVE="530")
+        self.assertIn("FAIL: https://life.", r.stdout); self.assertIn("is there a DNS record and a tunnel route", r.stdout)
+
+    def test_without_with_live_nothing_public_is_asked_for(self):
+        r = self.run_script("--yes", "--no-phone", "--site", "life", "--until", "operate")
+        self.assertNotIn("state=live", " ".join(self.calls())); self.assertFalse([c for c in self.calls() if c.startswith("curl")])
 
     def test_a_phase_that_fails_stops_the_run_and_says_how_to_clean_up(self):
         (self.repo / "scripts/wp_sites.py").write_text("#!/usr/bin/env python3\nimport sys\nopen(%r, 'a').write('wp_sites.py ' + ' '.join(sys.argv[1:]) + '\\n')\nsys.exit(2 if sys.argv[1] == 'import' else 0)\n" % str(self.log))

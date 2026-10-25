@@ -138,6 +138,9 @@ PY
   check "uploads belong to the php user" "$(find "$DIR/html/wp-content/uploads" ! -user 33 2>/dev/null | wc -l)" 0
   check "the plugins directory is root's (php cannot write code)" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
   has "the first backup exists (snapshots)" "$(snaps)"
+  grep -E '^  (ClamAV|known vulnerabilities):' "$WORK/REPORT.txt" 2>/dev/null | sed 's/^ */   (info) /'
+  check "ClamAV did not fail to run (NOT RUN is allowed until wp_scans_dellwp.yml has run)" "$(grep -c '^  ClamAV: .*FAILED' "$WORK/REPORT.txt" 2>/dev/null || true)" 0
+  check "the vulnerability check did not fail to run" "$(grep -c '^  known vulnerabilities: FAILED' "$WORK/REPORT.txt" 2>/dev/null || true)" 0
   check "the ledger shows the unpack, the load and the report" "$(ledger | grep -c 'unpacked .*loaded .*reported')" 1
   has "tokens were issued for the phone (1 or 2)" "$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("tokens", {})))' "$WORK/PLAN.json" 2>/dev/null)"
   hold_checks
@@ -360,11 +363,31 @@ stop_here operate
 
 if [ "$LIVE" = yes ]; then
   PHASE=live; say "7. go live (public) and back to hold"
+  echo "   This makes https://$HOST/ reachable by anyone for a minute or two, with the imported content. A hold site is refused to visitors; a live one is not."
   python3 scripts/wp_sites.py modify "$SITE" --set state=live --commit; bump $? "wp_sites.py modify state=live (it asked its own question)" || fatal "going live failed"
   sleep 5
   C=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$HOST/" </dev/null)
-  case $C in 200|301|302) bump 0 "https://$HOST/ answers $C through the tunnel" ;; *) bump 1 "https://$HOST/ answered '$C'" ;; esac
+  case $C in 200|301|302) bump 0 "https://$HOST/ answers $C through the tunnel" ;; *) bump 1 "https://$HOST/ answered '$C' (is there a DNS record and a tunnel route for $HOST?)" ;; esac
+  BODY=$(curl -sL --max-time 30 "https://$HOST/" </dev/null)
+  case $BODY in *wp-content*) bump 0 "the front page is WordPress's (it links to wp-content)" ;; *) bump 1 "the front page does not look like WordPress (no wp-content in it)" ;; esac
+  case $BODY in *"Fatal error"*|*"Parse error"*|*"Uncaught"*) bump 1 "the front page shows a PHP error" ;; *) bump 0 "the front page shows no PHP error" ;; esac
+  L=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$HOST/wp-login.php" </dev/null)
+  [ "$L" = 200 ] && bump 0 "the login page answers 200" || bump 1 "the login page answered '$L'"
+  vmrun <<'EOF'
+check "the cron timer is on while the site is live" "$(systemctl is-enabled "wp-cron@$SITE.timer" 2>/dev/null || true)" enabled
+check "the backup timer is on" "$(systemctl is-enabled "wp-backup@$SITE.timer" 2>/dev/null || true)" enabled
+check "no maintenance flag is up" "$([ -e "$DIR/maintenance.flag" ] && echo yes || echo no)" no
+finish
+EOF
   python3 scripts/wp_sites.py modify "$SITE" --set state=hold --yes --commit; bump $? "back on hold" || fatal "could not put it back on hold"
+  sleep 5
+  H=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://$HOST/" </dev/null)
+  [ "$H" != 200 ] && bump 0 "back on hold the public no longer gets the site (answer: '$H')" || bump 1 "back on hold, https://$HOST/ still answers 200: the site is still public"
+  vmrun <<'EOF'
+check "the cron timer is off again on hold" "$(systemctl is-enabled "wp-cron@$SITE.timer" 2>/dev/null || true)" disabled
+hold_checks
+finish
+EOF
   stop_here live
 else
   echo; echo "(7. live: skipped; use --with-live to go public through the tunnel and back)"
