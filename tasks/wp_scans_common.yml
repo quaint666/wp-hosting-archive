@@ -1,0 +1,164 @@
+---
+# tasks/wp_scans_common.yml
+# The scans on dellwp: ClamAV (its signatures directory, the image, a daily refresh) and the vulnerability feed (its key, its state directory, a daily update-and-check). No hosts:/become: and no
+# handlers; imported via import_tasks into dellwp/wp_scans_dellwp.yml. The tools themselves (wp-clamscan, wp-clamav-update, wp-vulnfeed and wp_vulnfeed.py) are installed by
+# dellwp/wp_sites_dellwp.yml (tasks/wp_tools_common.yml), which this play needs to have run first. wp-site-import calls them during every import; without this play they say NOT RUN and the import
+# goes on. Secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml, put there by scripts/wp_vulnfeed_secret.sh).
+# Check mode cannot show: the image pull, whether freshclam can reach its mirrors, whether the key is accepted, or the key file's contents (no_log).
+
+- name: Stop early if the key or the tools are missing
+  ansible.builtin.assert:
+    that:
+      - dellwp_wp_wordfence_key is defined
+    fail_msg: >-
+      Missing a secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml): run scripts/wp_vulnfeed_secret.sh (a free key from your Wordfence.com account, Integrations). Nothing was changed.
+    quiet: true
+
+- name: Look for the tools the scans need
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ wp_tools_bin }}/wp-clamscan"
+    - "{{ wp_tools_bin }}/wp-clamav-update"
+    - "{{ wp_tools_bin }}/wp-vulnfeed"
+    - "{{ wp_tools_lib }}/wp_vulnfeed.py"
+    - /etc/systemd/system/wp-job-failed@.service
+  register: wp_scans_tools
+  check_mode: false
+
+- name: Stop if the tools are not installed
+  ansible.builtin.assert:
+    that: wp_scans_tools.results | map(attribute='stat') | map(attribute='exists') | list | min
+    fail_msg: "{{ wp_scans_tools.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }} is missing: run dellwp/wp_sites_dellwp.yml first. Nothing was changed."
+    quiet: true
+
+- name: Pull the ClamAV image
+  community.docker.docker_image_pull:
+    name: "{{ wp_image_clamav }}"
+    pull: not_present
+
+- name: Make the signatures directory
+  ansible.builtin.file:
+    path: "{{ wp_clamav_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Make the feed's key directory (root only)
+  ansible.builtin.file:
+    path: "{{ wp_vulnfeed_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Make the feed's state directory
+  ansible.builtin.file:
+    path: "{{ wp_vulnfeed_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the feed key
+  ansible.builtin.copy:
+    dest: "{{ wp_vulnfeed_dir }}/key"
+    content: "{{ dellwp_wp_wordfence_key }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+# The units run as root and say so loudly when they fail (wp-job-failed@ tells ntfy). The feed's update parses about 120 MB of JSON, so it has a memory limit: it is killed, not the VM.
+- name: Deploy the signatures refresh service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-clamav-update.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Refresh the ClamAV signatures used by the WordPress imports
+      After=docker.service network-online.target
+      Wants=network-online.target
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-clamav-update
+      TimeoutStartSec=1200
+      Nice=10
+      IOSchedulingClass=idle
+
+- name: Deploy the signatures refresh timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-clamav-update.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily refresh of the ClamAV signatures
+
+      [Timer]
+      OnCalendar={{ wp_clamav_update_calendar }}
+      RandomizedDelaySec={{ wp_backup_jitter_s }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Deploy the vulnerability feed service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-vulnfeed.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Download the WordPress vulnerability feed and check every site against it
+      After=network-online.target
+      Wants=network-online.target
+      OnFailure=wp-job-failed@%N.service
+
+      [Service]
+      Type=oneshot
+      ExecStart={{ wp_tools_bin }}/wp-vulnfeed update
+      ExecStart={{ wp_tools_bin }}/wp-vulnfeed check-all
+      MemoryMax={{ wp_vulnfeed_mem_mb }}M
+      TimeoutStartSec={{ wp_vulnfeed_timeout_s }}
+      Nice=10
+      IOSchedulingClass=idle
+
+- name: Deploy the vulnerability feed timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wp-vulnfeed.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Daily download of the WordPress vulnerability feed and check of every site
+
+      [Timer]
+      OnCalendar={{ wp_vulnfeed_calendar }}
+      RandomizedDelaySec={{ wp_backup_jitter_s }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the signatures refresh timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-clamav-update.timer
+    enabled: true
+    state: started
+
+- name: Enable the vulnerability feed timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-vulnfeed.timer
+    enabled: true
+    state: started

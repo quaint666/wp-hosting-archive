@@ -183,3 +183,20 @@ wp_update_jitter_s: 300
 wp_update_timeout_s: 3000
 wp_update_probe_tries: 3
 wp_update_probe_wait_s: 10
+
+# Scans (dellwp/wp_scans_dellwp.yml, tasks/wp_scans_common.yml; the tools are installed by dellwp/wp_sites_dellwp.yml): ClamAV in a one-shot container with its signatures in wp_clamav_dir, refreshed daily;
+# and the Wordfence Intelligence vulnerability feed (templates/wp/wp_vulnfeed.py.j2, scripts/wp_vulnfeed.py): downloaded daily with a free API key (host_vars/dellwp/vault_wp.yml: dellwp_wp_wordfence_key,
+# put there by scripts/wp_vulnfeed_secret.sh), reduced to an index, and every site checked against it; a NEW hit goes to ntfy once. An index older than wp_vulnfeed_max_age_days days is "NOT RUN", never
+# "none known". The update parses about 120 MB of JSON, so its unit has a memory limit.
+wp_clamav_dir: /var/lib/wp-clamav
+wp_clamav_mem_mb: 2048
+wp_clamscan_timeout_s: 1800
+wp_clamav_update_calendar: "*-*-* 02:40:00"
+wp_vulnfeed_dir: /etc/wp-vulnfeed
+wp_vulnfeed_state_dir: /var/lib/wp-vulnfeed
+wp_vulnfeed_url: https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production
+wp_vulnfeed_max_age_days: 3
+wp_vulnfeed_cmd_timeout_s: 120
+wp_vulnfeed_mem_mb: 2048
+wp_vulnfeed_timeout_s: 1800
+wp_vulnfeed_calendar: "*-*-* 04:20:00"

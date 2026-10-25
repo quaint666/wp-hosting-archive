@@ -1,0 +1,17 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_clamav_update.sh.j2). Refresh the ClamAV signatures:   wp-clamav-update      (wp-clamav-update.timer runs it daily; run it once by hand after the first deploy)
+# The signatures live in {{ wp_clamav_dir }} on the VM; freshclam runs in a one-shot container of {{ wp_image_clamav }}, the only place ClamAV needs the network, with nothing mounted but that
+# directory. The image is pulled if it is not on the VM yet. One update at a time. A failure exits non-zero, which fails the unit, whose OnFailure= tells ntfy.
+set -eu -o pipefail
+readonly DB='{{ wp_clamav_dir }}'
+readonly IMG='{{ wp_image_clamav }}'
+{% raw %}
+[ -d "$DB" ] || { echo "wp-clamav-update: $DB does not exist (run dellwp/wp_scans_dellwp.yml)" >&2; exit 2; }
+exec 9>"$DB/.update.lock"
+flock -n 9 || { echo "wp-clamav-update: another update is running" >&2; exit 2; }
+docker image inspect "$IMG" >/dev/null 2>&1 </dev/null || docker pull --quiet "$IMG" >/dev/null </dev/null
+docker run --rm --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --security-opt no-new-privileges:true --memory 512m --memory-swap 512m \
+  -v "$DB:/var/lib/clamav" --entrypoint freshclam "$IMG" --stdout --no-warnings --user=root --datadir=/var/lib/clamav </dev/null
+ls "$DB"/main.c[vl]d >/dev/null 2>&1 && ls "$DB"/daily.c[vl]d >/dev/null 2>&1 || { echo "wp-clamav-update: freshclam finished but the signatures are not in $DB" >&2; exit 2; }
+echo "wp-clamav-update: signatures are in $DB"
+{% endraw %}

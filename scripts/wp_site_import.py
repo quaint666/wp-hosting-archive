@@ -337,11 +337,18 @@ class Tools:
         return os.path.join(self.cfg["tools_bin"], name)
 
     def call(self, *cmd):
+        rc, text = self.call_rc(*cmd)
+        return rc == 0, text
+
+    def call_rc(self, *cmd):
+        """(exit code, output). A command that is not there is 127, one that does not answer in time is 124."""
         try:
             p = self.run(list(cmd), capture_output=True, text=True, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            return False, "timed out after %d s" % self.timeout
-        return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+            return 124, "timed out after %d s" % self.timeout
+        except FileNotFoundError:
+            return 127, "%s is not installed" % os.path.basename(str(cmd[0]))
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
 
     def cli(self, site, *args, plugins=False):
         """WP-CLI as the web app, with no theme code loaded and, unless the step needs it, no plugin code: the database is the archive's, and it decides what WordPress would include."""
@@ -675,6 +682,20 @@ def php_in_uploads(uploads):
     return sorted(out)
 
 
+def tool_scan(tools, name, args, clean_word):
+    """One of the VM's scan tools (wp-clamscan, wp-vulnfeed). Their exit codes: 0 clean, 1 something found (its lines are the answer), 3 not set up (the last line says why: a state, not a
+    failure), anything else the tool itself failed. 'NOT RUN' never reads as clean, and the phone's Approve button depends only on FOUND and FAILED (unclean_reasons)."""
+    rc, out = tools.call_rc(tools.bin(name), *args)
+    last = (out.strip().splitlines() or [""])[-1]
+    if rc == 0:
+        return clean_word
+    if rc == 1:
+        return "FOUND: " + out[-400:]
+    if rc == 3 or rc == 127:
+        return "NOT RUN: " + last[:200]
+    return "FAILED to run (exit %d): %s" % (rc, last[:200])
+
+
 def scan(site, site_dir, work, record, tools):
     res = {}
     held = [work / "wp-content" / d for d in ("plugins", "themes", "mu-plugins") if (work / "wp-content" / d).is_dir()]
@@ -686,13 +707,9 @@ def scan(site, site_dir, work, record, tools):
     res["core"] = (ok, (out.strip().splitlines() or [""])[-1][:200])
     ok, out = tools.cli(site, "plugin", "verify-checksums", "--all")
     res["plugins"] = (ok, (out.strip().splitlines() or [""])[-1][:200])
-    clam = tools.which("clamscan")
-    if clam:
-        targets = [str(work / "wp-content"), str(site_dir / "html/wp-content/uploads")]
-        ok, out = tools.call(clam, "-r", "--infected", "--no-summary", *[t for t in targets if os.path.isdir(t)])
-        res["clam"] = "clean" if ok else ("FOUND: " + out[-400:] if out else "FAILED to run")
-    else:
-        res["clam"] = "NOT RUN: ClamAV is not installed on this VM"
+    targets = [str(t) for t in (work / "wp-content", site_dir / "html/wp-content/uploads") if os.path.isdir(t)]
+    res["clam"] = tool_scan(tools, "wp-clamscan", targets, "clean")
+    res["vuln"] = tool_scan(tools, "wp-vulnfeed", ["check", site], "none known")
     return res
 
 
@@ -724,6 +741,7 @@ def build_report(site, record, steps, res, work):
               "  core checksums:   %s %s" % ("ok" if res["core"][0] else "FAILED", res["core"][1]),
               "  plugin checksums: %s %s" % ("ok" if res["plugins"][0] else "FAILED", res["plugins"][1]),
               "  ClamAV:           %s" % res["clam"],
+              "  known vulnerabilities: %s" % res["vuln"],
               "  PHP files under uploads/: %s" % (", ".join(res["uploads_php"][:10]) + (" ..." if len(res["uploads_php"]) > 10 else "") if res["uploads_php"] else "none"),
               "  suspicious patterns in the held code: %d file(s)" % res["held_total"]]
     lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["held_hits"]]
@@ -764,6 +782,9 @@ def unclean_reasons(record):
     clam = str(sc.get("clam", "FAILED: no result"))
     if clam.startswith(("FOUND", "FAILED")):
         why.append("ClamAV: " + clam[:60])
+    vuln = str(sc.get("vuln", "FAILED: no result"))
+    if vuln.startswith(("FOUND", "FAILED")):
+        why.append("known vulnerabilities: " + " ".join(vuln.split())[:80])
     for key, label in (("held_total", "held-back file(s)"), ("uploads_hits_total", "file(s) under uploads")):
         if sc.get(key, 1) != 0:
             why.append("%s %s match suspicious patterns" % (sc.get(key, "some"), label))
@@ -792,7 +813,7 @@ def notify_report(cfg, site, record, work, tools):
         held = held_items(record, work)
         body = "\n".join(["%s: %d steps, %d failed." % (site, len(record["steps"]), sum(1 for s in record["steps"] if not s["ok"])),
                           ("Held back for you: " + ", ".join("%s %s (%d files)" % i for i in held)) if held else "Nothing held back.",
-                          "ClamAV: " + str(record["scan"].get("clam", "?"))[:60]]
+                          "ClamAV: " + str(record["scan"].get("clam", "?"))[:60], "Vulnerabilities: " + " ".join(str(record["scan"].get("vuln", "?")).split())[:160]]
                          + (["NOT CLEAN: " + "; ".join(why) + ". Decide at the control page: wp_sites.py approve %s [--reject ...] [--accept-failures]." % site] if why
                             else ["Clean. Approve copies the held-back code in; the site stays on hold."]))
         (tools.post or ap.post_json)(url, sender, ap.build_message(url, ask_topic, a["reply_topic"], button, site, body, tokens))

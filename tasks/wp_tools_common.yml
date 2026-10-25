@@ -69,6 +69,7 @@
     - wp_wpress.py
     - wp_approvals.py
     - wp_site_import.py
+    - wp_vulnfeed.py
   delegate_to: localhost
   become: false
   check_mode: false
@@ -96,6 +97,9 @@
     - { src: wp_site_import.py.j2, dest: wp-site-import }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
+    - { src: wp_clamscan.sh.j2, dest: wp-clamscan }
+    - { src: wp_clamav_update.sh.j2, dest: wp-clamav-update }
+    - { src: wp_vulnfeed.py.j2, dest: wp-vulnfeed }
   loop_control:
     label: "{{ item.dest }}"
   delegate_to: localhost

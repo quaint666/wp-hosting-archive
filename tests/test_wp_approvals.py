@@ -280,7 +280,7 @@ class Notifying(Phone):
         self.archive()
         self.run_main(["wptest", "friend.wpress"])
         body = self.sent[0][2]["message"]
-        for needle in ("wptest:", "failed.", "Held back for you:", "plugin notorg", "mu-plugins", "ClamAV: NOT RUN", "Clean. Approve copies the held-back code in"):
+        for needle in ("wptest:", "failed.", "Held back for you:", "plugin notorg", "mu-plugins", "ClamAV: NOT RUN", "Vulnerabilities: NOT RUN", "Clean. Approve copies the held-back code in"):
             self.assertIn(needle, body)
 
     def test_each_reason_to_distrust_an_import_removes_the_approve_button(self):
@@ -294,13 +294,18 @@ class Notifying(Phone):
             host.fail["cli:plugin verify-checksums"] = (1, "Error: checksum mismatch")
 
         def clam_found(host):
-            host.clam = "/usr/bin/clamscan"
             host.fail["clam"] = (1, "/x/evil.php: Php.Trojan FOUND")
 
         def clam_broken(host):
-            host.clam = "/usr/bin/clamscan"
             host.fail["clam"] = (2, "")
-        for name, arrange in (("failed step", failed_step), ("core checksums", core_checksums), ("plugin checksums", plugin_checksums), ("clam find", clam_found), ("clam broken", clam_broken)):
+
+        def vuln_found(host):
+            host.fail["vuln"] = (1, "plugin elementor 4.2.3: Elementor <= 4.2.4 - Stored XSS (CVE-2026-1111, fixed in 4.2.5)")
+
+        def vuln_broken(host):
+            host.fail["vuln"] = (2, "the feed answered 429")
+        for name, arrange in (("failed step", failed_step), ("core checksums", core_checksums), ("plugin checksums", plugin_checksums), ("clam find", clam_found), ("clam broken", clam_broken),
+                              ("vulnerability found", vuln_found), ("vulnerability check broken", vuln_broken)):
             self.setUp()
             arrange(self.host)
             self.archive()
@@ -319,15 +324,17 @@ class Notifying(Phone):
         self.assertIn("1 held-back file(s) match suspicious patterns", self.sent[0][2]["message"])
 
     def test_the_rule_for_clean_read_from_a_record(self):
-        ok = {"steps": [{"name": "a", "ok": True}], "scan": {"core": [True, ""], "plugins": [True, ""], "clam": "NOT RUN: x", "held_total": 0, "uploads_hits_total": 0}}
+        ok = {"steps": [{"name": "a", "ok": True}], "scan": {"core": [True, ""], "plugins": [True, ""], "clam": "NOT RUN: x", "vuln": "NOT RUN: no key", "held_total": 0, "uploads_hits_total": 0}}
         self.assertEqual(imp.unclean_reasons(ok), [])
         self.assertEqual(imp.unclean_reasons(dict(ok, scan=dict(ok["scan"], core=(True, "")))), [], "a tuple, as it is in memory before the record is saved")
         self.assertEqual(imp.unclean_reasons(dict(ok, scan=dict(ok["scan"], clam="clean"))), [])
+        self.assertEqual(imp.unclean_reasons(dict(ok, scan=dict(ok["scan"], vuln="none known"))), [])
         bad = {"failed step": dict(ok, steps=[{"name": "a", "ok": False}]), "no scan": {k: v for k, v in ok.items() if k != "scan"}, "scan not a dict": dict(ok, scan="x"),
                "core": dict(ok, scan=dict(ok["scan"], core=[False, ""])), "core missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "core"}),
                "core empty": dict(ok, scan=dict(ok["scan"], core=[])), "core truthy but not True": dict(ok, scan=dict(ok["scan"], core=["yes", ""])),
                "plugins": dict(ok, scan=dict(ok["scan"], plugins=[False, ""])), "clam found": dict(ok, scan=dict(ok["scan"], clam="FOUND: x")),
-               "clam failed": dict(ok, scan=dict(ok["scan"], clam="FAILED to run")), "clam missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "clam"}),
+               "clam failed": dict(ok, scan=dict(ok["scan"], clam="FAILED to run")), "vuln found": dict(ok, scan=dict(ok["scan"], vuln="FOUND: plugin x 1.0: XSS")),
+               "vuln failed": dict(ok, scan=dict(ok["scan"], vuln="FAILED to run (exit 2): 429")), "vuln missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "vuln"}), "clam missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "clam"}),
                "held hits": dict(ok, scan=dict(ok["scan"], held_total=1)), "held missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "held_total"}),
                "uploads hits": dict(ok, scan=dict(ok["scan"], uploads_hits_total=2)), "uploads missing": dict(ok, scan={k: v for k, v in ok["scan"].items() if k != "uploads_hits_total"})}
         for name, record in bad.items():

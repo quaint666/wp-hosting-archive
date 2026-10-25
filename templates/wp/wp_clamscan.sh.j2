@@ -1,0 +1,40 @@
+#!/bin/bash
+# Managed by Ansible (templates/wp/wp_clamscan.sh.j2). Scan directories with ClamAV:   wp-clamscan <dir>...
+# Used by wp-site-import on the code it holds back and on the uploads it copied in. ClamAV runs in a one-shot container of {{ wp_image_clamav }} with NO network, a read-only root, no capabilities
+# but the one that lets root read what its owner made private, and every directory mounted read-only. The signatures are not in the image: they live in {{ wp_clamav_dir }}, refreshed daily by
+# wp-clamav-update, so a scan never needs the network and a VM that cannot reach the mirrors still scans with what it has. Only directories under {{ wp_data_mount }}/sites or {{ wp_intake_dir }} are
+# accepted (resolved first, so a link cannot lead elsewhere).
+# Exit codes: 0 clean, 1 something found (the lines say what), 3 not set up (no signatures yet, or the image is not on the VM: a state, never a pass), 2 anything else.
+set -u
+readonly DB='{{ wp_clamav_dir }}'
+readonly IMG='{{ wp_image_clamav }}'
+readonly MEM='{{ wp_clamav_mem_mb }}'
+readonly LIMIT='{{ wp_clamscan_timeout_s }}'
+readonly ROOTS=('{{ wp_data_mount }}/sites' '{{ wp_intake_dir }}')
+{% raw %}
+usage() { echo "usage: wp-clamscan <directory>..." >&2; exit 2; }
+[ "$#" -ge 1 ] || usage
+if ! ls "$DB"/main.c[vl]d >/dev/null 2>&1 || ! ls "$DB"/daily.c[vl]d >/dev/null 2>&1; then
+  echo "ClamAV has no signatures yet ($DB): run  systemctl start wp-clamav-update"; exit 3
+fi
+docker image inspect "$IMG" >/dev/null 2>&1 </dev/null || { echo "the ClamAV image $IMG is not on this VM: run  systemctl start wp-clamav-update"; exit 3; }
+mounts=(); i=0
+for d in "$@"; do
+  real=$(realpath -e -- "$d" 2>/dev/null) || { echo "wp-clamscan: $d does not exist" >&2; exit 2; }
+  [ -d "$real" ] || { echo "wp-clamscan: $d is not a directory" >&2; exit 2; }
+  ok=no
+  for r in "${ROOTS[@]}"; do case "$real/" in "$r"/*) ok=yes ;; esac; done
+  [ "$ok" = yes ] || { echo "wp-clamscan: $d is not under a place this tool scans" >&2; exit 2; }
+  i=$((i + 1)); mounts+=(-v "$real:/scan/$i:ro")
+done
+timeout "$LIMIT" docker run --rm --network none --read-only --tmpfs /tmp:size=64m --cap-drop ALL --cap-add DAC_READ_SEARCH --security-opt no-new-privileges:true \
+  --memory "${MEM}m" --memory-swap "${MEM}m" -v "$DB:/var/lib/clamav:ro" "${mounts[@]}" --entrypoint clamscan "$IMG" \
+  --recursive --infected --no-summary --database=/var/lib/clamav /scan </dev/null
+rc=$?
+case $rc in
+  0) exit 0 ;;
+  1) exit 1 ;;
+  124) echo "wp-clamscan: the scan did not finish in $LIMIT s" >&2; exit 2 ;;
+  *) echo "wp-clamscan: clamscan exited $rc" >&2; exit 2 ;;
+esac
+{% endraw %}

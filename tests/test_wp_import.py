@@ -138,8 +138,8 @@ class FakeHost:
                 shutil.copytree(self.stash, self.html / "wp-content", symlinks=True)
                 self.tables = self.stash_tables
             return Done(rc, text, "")
-        if name == "clamscan":
-            rc, text = self.fail.get("clam", (0, ""))
+        if name in ("wp-clamscan", "wp-vulnfeed"):      # exit 0 clean, 1 found, 3 not set up (the defaults: nothing is set up)
+            rc, text = self.fail.get("clam" if name == "wp-clamscan" else "vuln", (3, "ClamAV is not set up on this VM (no signatures)" if name == "wp-clamscan" else "no feed key"))
             return Done(rc, text, "")
         raise AssertionError("an unexpected command: %r" % (cmd,))
 
@@ -475,7 +475,7 @@ class Pipeline(Base):
 
     def test_the_report(self):
         text = self.import_ok()
-        for needle in ("IMPORT REPORT for wptest", "STEPS (", "CODE HELD BACK", "notorg", "mu-plugins", "SCAN (a heuristic", "NOT RUN: ClamAV is not installed", "wp-site-import approve wptest",
+        for needle in ("IMPORT REPORT for wptest", "STEPS (", "CODE HELD BACK", "notorg", "mu-plugins", "SCAN (a heuristic", "NOT RUN: ClamAV is not set up on this VM", "wp-site-import approve wptest",
                        "wp-site-import reset wptest"):
             self.assertIn(needle, text)
         r = self.intake / "work-wptest/REPORT.txt"
@@ -1058,19 +1058,64 @@ class Scan(Base):
         self.assertIn("PHP files under uploads/: none", text)
         self.assertNotIn("NOT COPIED because", text)
 
-    def test_clamav_runs_when_it_is_there_and_a_find_is_reported(self):
-        self.host.clam = "/usr/bin/clamscan"
+    def test_clamav_runs_through_its_tool_on_the_held_code_and_the_uploads(self):
+        self.host.fail["clam"] = (0, "")
         text = self.import_ok()
         self.assertIn("ClamAV:           clean", text)
-        clam = next(c for c in self.host.calls if os.path.basename(c[0]) == "clamscan")
-        self.assertIn(str(self.intake / "work-wptest/wp-content"), clam)
-        self.assertEqual(clam[1:4], ["-r", "--infected", "--no-summary"])
+        clam = next(c for c in self.host.calls if os.path.basename(c[0]) == "wp-clamscan")
+        self.assertEqual(clam[1:], [str(self.intake / "work-wptest/wp-content"), str(self.html / "wp-content/uploads")])
 
     def test_a_clamav_find_is_shown(self):
-        self.host.clam = "/usr/bin/clamscan"
         self.host.fail["clam"] = (1, "/x/evil.php: Php.Trojan FOUND")
         text = self.import_ok()
         self.assertIn("FOUND: /x/evil.php: Php.Trojan FOUND", text)
+
+    def test_a_clamav_that_is_not_set_up_is_not_run_and_is_not_clean(self):
+        text = self.import_ok()
+        self.assertIn("ClamAV:           NOT RUN: ClamAV is not set up on this VM", text)
+        self.assertNotIn("ClamAV:           clean", text)
+
+    def test_a_clamav_that_breaks_is_a_failure_with_its_exit_code(self):
+        self.host.fail["clam"] = (2, "ERROR: Can't open file")
+        text = self.import_ok()
+        self.assertIn("ClamAV:           FAILED to run (exit 2): ERROR: Can't open file", text)
+
+    def test_the_vulnerability_check_asks_the_tool_about_this_site(self):
+        self.host.fail["vuln"] = (0, "")
+        text = self.import_ok()
+        self.assertIn("known vulnerabilities: none known", text)
+        v = next(c for c in self.host.calls if os.path.basename(c[0]) == "wp-vulnfeed")
+        self.assertEqual(v[1:], ["check", "wptest"])
+
+    def test_a_known_vulnerability_is_shown_with_what_the_tool_said(self):
+        self.host.fail["vuln"] = (1, "plugin elementor 4.2.3: Elementor <= 4.2.4 - Stored XSS (CVE-2026-1111, CVSS 6.4, fixed in 4.2.5)")
+        text = self.import_ok()
+        self.assertIn("known vulnerabilities: FOUND: plugin elementor 4.2.3", text)
+        self.assertIn("CVE-2026-1111", text)
+
+    def test_a_feed_that_is_not_set_up_says_so(self):
+        text = self.import_ok()
+        self.assertIn("known vulnerabilities: NOT RUN: no feed key", text)
+
+    def test_a_feed_that_breaks_is_a_failure_with_its_exit_code(self):
+        self.host.fail["vuln"] = (2, "the feed answered 429")
+        text = self.import_ok()
+        self.assertIn("known vulnerabilities: FAILED to run (exit 2): the feed answered 429", text)
+
+    def test_a_scan_tool_that_hangs_or_is_missing_does_not_stop_the_import(self):
+        orig = self.host.run
+
+        def run(cmd, **kw):
+            n = os.path.basename(cmd[0])
+            if n == "wp-clamscan":
+                raise FileNotFoundError(cmd[0])
+            if n == "wp-vulnfeed":
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return orig(cmd, **kw)
+        self.host.run = run
+        text = self.import_ok()
+        self.assertIn("ClamAV:           NOT RUN: wp-clamscan is not installed", text)
+        self.assertIn("known vulnerabilities: FAILED to run (exit 124): timed out", text)
 
     def test_checksum_failures_are_shown(self):
         self.host.fail["cli:core verify-checksums"] = (1, "Error: File should not exist: wp-content/evil.php")
@@ -2084,7 +2129,7 @@ class Wrapper(unittest.TestCase):
             lib.mkdir(); intake.mkdir(parents=True); (d / "data/sites/wptest").mkdir(parents=True)
             text, _ = self.render(wp_sites=[{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "hold"}], wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
             deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the Python modules of wp-site-import" for i in t["loop"]]
-            self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_site_import.py", "wp_wpress.py"], "the play must copy every module the tool imports")
+            self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_site_import.py", "wp_vulnfeed.py", "wp_wpress.py"], "the play must copy every module the tool imports (wp_vulnfeed.py is wp-vulnfeed's, not its)")
             for m in deployed:
                 (lib / m).write_text((ROOT / "scripts" / m).read_text())
             tool = d / "wp-site-import"

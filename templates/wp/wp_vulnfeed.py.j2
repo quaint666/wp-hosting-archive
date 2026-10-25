@@ -1,0 +1,29 @@
+#!/usr/bin/python3 -I
+# Managed by Ansible (templates/wp/wp_vulnfeed.py.j2). The Wordfence Intelligence vulnerability feed against what the sites run:   sudo wp-vulnfeed update | check <site> | check-all
+# The logic is {{ wp_tools_lib }}/wp_vulnfeed.py (copied from scripts/ in the repo, where tests/test_wp_vulnfeed.py runs it); this file only carries the values from the repo. Root-only (0750), like the other
+# wp-site tools. Exit codes: 0 none known, 1 found, 3 NOT RUN (no key, no index, or an index older than {{ wp_vulnfeed_max_age_days }} days), 2 an error. The sites are those of the last run of
+# dellwp/wp_sites_dellwp.yml.
+import sys
+
+sys.path.insert(0, "{{ wp_tools_lib }}")
+import wp_vulnfeed  # noqa: E402
+
+CONFIG = {
+    "key_file": "{{ wp_vulnfeed_dir }}/key",
+    "index_file": "{{ wp_vulnfeed_state_dir }}/index.json",
+    "state_dir": "{{ wp_vulnfeed_state_dir }}",
+    "feed_url": "{{ wp_vulnfeed_url }}",
+    "max_age_days": {{ wp_vulnfeed_max_age_days }},
+    "tools_bin": "{{ wp_tools_bin }}",
+    "timeout_s": {{ wp_vulnfeed_cmd_timeout_s }},
+    "data_dir": "{{ wp_data_mount }}/sites",
+    "notify_cmd": "{{ wp_ntfy_notify_cmd }}",
+    "ntfy_topic": "{{ wp_ntfy_topic }}",
+    "host_name": "{{ inventory_hostname }}",
+    "sites": {
+{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}
+        "{{ s.name }}": {},
+{% endfor %}
+    },
+}
+sys.exit(wp_vulnfeed.main(CONFIG, sys.argv[1:]))
