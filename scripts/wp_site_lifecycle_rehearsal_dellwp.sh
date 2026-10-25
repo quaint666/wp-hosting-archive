@@ -9,6 +9,9 @@
 #   5. approve   with the phone's Approve button (or wp_sites.py approve with --no-phone): held code copied in root-owned, the intake file and the work directory gone, still on hold
 #   5b. replace  (only with --with-replace) a second import onto the site that now has data, with --replace: the old site is snapshotted, wiped and the archive imported; you type the site name when
 #                the VM asks; a Deny must put the old site back exactly (tables, files, snapshots); then replace again and approve, and the old site's snapshot must be re-tagged pre-update
+#   5c. harden   the hosting service's must-use plugins on the real site: our three are loaded and no other, the mount is read-only, ?author and the REST users listing are closed, a wrong user name
+#                and a wrong password read the same, an administrator without a second factor is sent to the profile page (the real Two Factor plugin), the password-reset mail goes through the mail
+#                plugin (log mode), and the eleventh wrong password for one user name is refused. Uses a throw-away administrator it removes again
 #   6. operate   the verifier (wp_site_verify_dellwp.sh), wp-site-update --check, a backup, a restore drill, the checksums
 #   7. live      (only with --with-live, and it asks its own question) public through the tunnel, answers, and back to hold
 #   8. stop      a final backup, containers down, the paused page; then start: back on hold with the data
@@ -16,13 +19,13 @@
 # It makes real commits to vars.yml (create, stop, start, delete: --commit) on your current branch, which must not be main, and leaves the site's tombstone there for good (a name is never reused).
 # The archive of the deleted site stays on the VM for 14 days. Options:  --site NAME (default rehearsal)  --existing (the site is already in wp_sites, empty and on hold: skip the create, e.g. after
 # a reset)  --file PATH (default wpress/*.wpress)  --no-phone  --with-live  --with-replace  --until PHASE
-# (create, import, deny, approve, replace, operate, live, stop, delete: stop after that phase, leaving the site as it is)  --yes (do not ask before starting).
+# (create, import, deny, approve, replace, harden, operate, live, stop, delete: stop after that phase, leaving the site as it is)  --yes (do not ask before starting).
 # It stops at the first phase that fails badly and says how to clean up. What it does not prove: that the real Elementor or WooCommerce commands behave like the discovered names (the report says
 # what ran), that a friend's own plugin is safe, anything about the public path unless --with-live, or the 02:00 update timer.
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SITE=rehearsal; FILE=""; PHONE=yes; LIVE=no; REPLACE=no; UNTIL=delete; YES=no; EXISTING=no
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case $1 in
     --site) SITE=${2:-}; shift 2 ;;
@@ -38,7 +41,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ $SITE =~ ^[a-z][a-z0-9-]{1,23}$ ]] || { echo "--site must be a site name: lowercase letters, digits and hyphens, 2 to 24 characters" >&2; exit 2; }
-case $UNTIL in create|import|deny|approve|replace|operate|live|stop|delete) ;; *) echo "--until must be one of: create import deny approve replace operate live stop delete" >&2; exit 2 ;; esac
+case $UNTIL in create|import|deny|approve|replace|harden|operate|live|stop|delete) ;; *) echo "--until must be one of: create import deny approve replace harden operate live stop delete" >&2; exit 2 ;; esac
 cd "$REPO" || exit 2
 if [ -z "$FILE" ]; then FILE=$(ls "$REPO"/wpress/*.wpress 2>/dev/null | head -n 1); fi
 [ -n "$FILE" ] && [ -f "$FILE" ] || { echo "no .wpress to import: give one with --file (wpress/*.wpress is where the practice file lives)" >&2; exit 2; }
@@ -348,6 +351,63 @@ EOF
   done
   stop_here replace
 fi
+
+PHASE=harden; say "5c. the hosting service's must-use plugins on the real site (login, two-factor, mail)"
+vmrun <<'EOF'
+mucount=$(wpr plugin list --status=must-use --field=name 2>/dev/null | grep -c 'wp-hosting' || true)
+check "our three must-use plugins are loaded" "$mucount" 3
+check "no other must-use plugin is loaded (a friend's mu-plugins folder is a separate, inert one)" "$(wpr plugin list --status=must-use --field=name 2>/dev/null | grep -vc 'wp-hosting' || true)" 0
+check "the php container mounts the must-use directory read-only" "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/www/wp-mu"}}{{.RW}}{{end}}{{end}}' "$UP" 2>/dev/null </dev/null)" false
+check "the login page answers" "$(code /wp-login.php)" 200
+check "?author=1 does not reveal a user name" "$(code '/?author=1')" 404
+check "the users listing of the REST API is gone" "$(code /wp-json/wp/v2/users)" 404
+check "xmlrpc.php is refused" "$(code /xmlrpc.php)" 403
+
+# one wrong user name and one wrong password for a real user read the same: the form does not say which user names exist
+login() { curl -s --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' -H 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --data-urlencode "log=$1" --data-urlencode "pwd=$2" -d 'wp-submit=Log+In' "http://127.0.0.1:$LISTEN/wp-login.php" </dev/null; }
+real_admin=$(wpr user list --role=administrator --field=user_login 2>/dev/null | head -n 1)
+if [ -n "$real_admin" ]; then
+  msg_a=$(login "no-such-user-$$" 'wrong-password-1' | grep -c 'The user name or the password is not correct')
+  msg_b=$(login "$real_admin" 'wrong-password-1' | grep -c 'The user name or the password is not correct')
+  check "a wrong user name and a wrong password for a real user ($real_admin) give the same message" "$msg_a$msg_b" 11
+else
+  bad "no administrator on the site to compare against"
+fi
+
+# an administrator with no second factor is sent to the profile page, and the profile page stays open (the real Two Factor plugin is loaded on this site)
+tmppw=$(openssl rand -hex 16); jar=$(mktemp); pwf=$(mktemp); chmod 600 "$jar" "$pwf"
+wpr user create wph-check wph-check@example.invalid --role=administrator "--user_pass=$tmppw" >/dev/null 2>&1 && ok "a throw-away administrator was made" || bad "could not make the throw-away administrator"
+printf 'log=wph-check&pwd=%s&wp-submit=Log+In&redirect_to=%%2Fwp-admin%%2F' "$tmppw" > "$pwf"
+unset tmppw
+curl -s -o /dev/null -c "$jar" -b "$jar" --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' -H 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --data-binary "@$pwf" "http://127.0.0.1:$LISTEN/wp-login.php" </dev/null
+admin_head=$(curl -s -o /dev/null -D - -b "$jar" --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$LISTEN/wp-admin/plugins.php" </dev/null | tr -d '\r')
+case "$admin_head" in *"profile.php?wph_2fa=required"*) ok "wp-admin sends an administrator without a second factor to the profile page" ;; *) bad "wp-admin did not send the administrator without a second factor to the profile page: $(printf '%s' "$admin_head" | head -n 3 | tr '\n' ' ')" ;; esac
+profile=$(curl -s -b "$jar" --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' "http://127.0.0.1:$LISTEN/wp-admin/profile.php" </dev/null)
+case "$profile" in *"two-factor-options"*) ok "the profile page stays open and offers the two-factor setup" ;; *) bad "the profile page does not show the two-factor options (is the Two Factor plugin loaded?)" ;; esac
+case "$profile" in *"Two-factor login is required for your role"*) ok "and says why" ;; *) bad "the profile page does not say that two-factor is required" ;; esac
+
+# mail: the password-reset mail of that user goes through the mail plugin, in log mode nothing leaves the site
+mailseen=$(curl -s --max-time 30 -H "Host: $HOST" -H 'X-Forwarded-Proto: https' -H 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --data-urlencode 'user_login=wph-check' -d 'wp-submit=Get+New+Password' "http://127.0.0.1:$LISTEN/wp-login.php?action=lostpassword" </dev/null | grep -c 'Check your email')
+check "the password reset says the mail was sent (log mode reports success)" "$mailseen" 1
+has "the mail plugin logged it instead of sending (container log)" "$(docker logs --since 3m "$UP" 2>&1 </dev/null | grep -c 'wp-hosting: mail (log mode, not sent)')"
+check "and recorded its mode" "$(stored wph_mail_status | grep -c '"log"')" 1
+
+# the throttle: ten wrong passwords for one user name, the eleventh is refused whatever it is (nginx lets six through at once and then one every six seconds)
+throttled=0
+for i in 1 2 3 4 5 6 7 8 9 10 11; do
+  [ "$i" -gt 6 ] && sleep 6.5
+  if login "throttle-test-user" "wrong-$i" | grep -q 'Too many failed logins'; then throttled=$i; break; fi
+done
+check "the eleventh try for one user name is refused as too many" "$throttled" 11
+
+wpr user delete wph-check --yes >/dev/null 2>&1 && ok "the throw-away administrator was removed" || bad "could not remove the throw-away administrator"
+rm -f "$jar" "$pwf"
+wpr transient delete --all >/dev/null 2>&1; wpr option delete wph_mail_status >/dev/null 2>&1
+ok "the throttle's counters and the mail status were cleared so the next steps start clean"
+hold_checks
+finish
+EOF
+stop_here harden
 
 PHASE=operate; say "6. operate the site"
 bash scripts/wp_site_verify_dellwp.sh "$SITE" | tail -n 4; bump "${PIPESTATUS[0]}" "the verifier ends with 0 failed checks" || true
