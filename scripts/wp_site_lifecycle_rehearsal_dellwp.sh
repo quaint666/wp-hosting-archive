@@ -86,6 +86,7 @@ tables() { db "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema
 PREFIX=$(sed -n "s/.*\$table_prefix *= *'\([A-Za-z0-9_]*\)'.*/\1/p" "$DIR/wp-config.php" 2>/dev/null | head -n 1)
 stored() { db "SELECT option_value FROM ${PREFIX:-wp_}options WHERE option_name='$1'"; }
 tree() { find "$DIR/html/wp-content" -printf '%P %u %m\n' 2>/dev/null | sort; }
+snaps() { find "$BDIR/$SITE" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex ".*/[0-9]{8}T[0-9]{6}Z" 2>/dev/null | wc -l; }
 ledger() { grep -P "\t$SITE\t" "$INTAKE/ledger.log" 2>/dev/null | cut -f3 | tr '\n' ' '; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null </dev/null)" = true ]; }
 finish() { [ "$FAIL" = 0 ] && echo "   (all ok)"; [ "$FAIL" -gt 100 ] && FAIL=100; exit "$FAIL"; }
@@ -133,7 +134,7 @@ PY
   hidden_check
   check "uploads belong to the php user" "$(find "$DIR/html/wp-content/uploads" ! -user 33 2>/dev/null | wc -l)" 0
   check "the plugins directory is root's (php cannot write code)" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
-  has "the first backup exists (snapshots)" "$(ls "$BDIR/$SITE" 2>/dev/null | grep -c '^[0-9]\{8\}T')"
+  has "the first backup exists (snapshots)" "$(snaps)"
   check "the ledger shows the unpack, the load and the report" "$(ledger | grep -c 'unpacked .*loaded .*reported')" 1
   has "tokens were issued for the phone (1 or 2)" "$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("tokens", {})))' "$WORK/PLAN.json" 2>/dev/null)"
   hold_checks
@@ -201,6 +202,7 @@ check "WordPress is not installed" "$(wpc core is-installed >/dev/null 2>&1 && e
 check "hold: the installer answers a request from the VM" "$(code /wp-admin/install.php)" 200
 check "hold: a request that carries a visitor address is refused" "$(code / -H 'CF-Connecting-IP: 203.0.113.9')" 403
 tree > "$BASE"; ok "the site's file tree was recorded ($(wc -l < "$BASE") entries) to compare after a deny"
+snaps > "$BASE.snaps"; ok "the site has $(cat "$BASE.snaps") snapshot(s) before the import"
 finish
 EOF
 stop_here create
@@ -226,6 +228,7 @@ fi
 vmrun <<'EOF'
 check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
 check "the database is empty again" "$(tables)" 0
+check "the snapshot the import took is gone again (the site's backups are as before)" "$(snaps)" "$(cat "$BASE.snaps")"
 check "the site's file tree is exactly what it was before the import" "$(tree | diff - "$BASE" >/dev/null && echo same || echo different)" same
 tree | diff - "$BASE" | head -n 20 | sed 's/^/   (diff, < now, > before) /' || true
 [ -f "$INTAKE/$FILENAME" ] && ok "the .wpress is still in the intake directory" || bad "the .wpress is gone from the intake directory"

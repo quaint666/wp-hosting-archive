@@ -77,6 +77,14 @@ class Syntax(unittest.TestCase):
         self.assertIn("(info) hidden file:", TEXT)
         self.assertIn("(diff, < now, > before)", TEXT)
 
+    def test_a_deny_is_checked_for_the_snapshot_the_import_took(self):
+        before, deny = TEXT.index('snaps > "$BASE.snaps"'), TEXT.index('check "the snapshot the import took is gone again')
+        self.assertLess(TEXT.index('PHASE=create') if 'PHASE=create' in TEXT else 0, before)
+        self.assertLess(before, TEXT.index('PHASE=deny'))
+        self.assertGreater(deny, TEXT.index('PHASE=deny'))
+        self.assertLess(deny, TEXT.index('PHASE=import2'))
+        self.assertIn('"$(snaps)" "$(cat "$BASE.snaps")"', TEXT)
+
     def test_nothing_secret_is_in_the_script_and_the_password_prompts_are_not_bypassed(self):
         self.assertNotRegex(TEXT, r"(?i)password\s*=\s*['\"]\w")
         self.assertIn("wp_sites.py delete", TEXT)

@@ -90,6 +90,8 @@ class FakeHost:
         self.table_names = ["wp_options", "wp_posts"]
         self.wait_times_out, self.killed, self.timeouts, self.cli_log, self.on_chown = False, False, set(), [], None
         self.stored_urls = None
+        self.runtime_files, self.runtime_done, self.stale_update_state, self.update_rows_absent = [], False, False, False
+        self.backups, self.backup_n = None, 0      # a directory: wp-site-backup then leaves a snapshot in it, as the real one does
 
     def which(self, name):
         return self.clam if name == "clamscan" else None
@@ -116,6 +118,14 @@ class FakeHost:
             return self.ext(cmd[2:])
         if name == "wp-site-backup":
             rc, text = self.fail.get("backup", (0, "snapshot taken"))
+            if rc == 0 and self.backups is not None:
+                self.backup_n += 1
+                stamp = "20261025T%06dZ" % (100000 + self.backup_n)
+                snap = self.backups / cmd[1] / stamp
+                snap.mkdir(parents=True)
+                (snap / "MANIFEST").write_text("site=%s\nstamp=%s\ncore=7.1.3\n" % (cmd[1], stamp))
+                (self.backups / cmd[1] / ".last-success").write_text(stamp + "\n")
+                text = "OK: snapshot %s of %s (12 KiB on disk, core 7.1.3)" % (stamp, cmd[1])
             return Done(rc, text, "")
         if name == "clamscan":
             rc, text = self.fail.get("clam", (0, ""))
@@ -146,10 +156,27 @@ class FakeHost:
         flags = [a for a in args if a in ("--skip-plugins", "--skip-themes")]
         args = [a for a in args if a not in ("--skip-plugins", "--skip-themes")]
         self.cli_log.append((args, flags))
-        key = "cli:" + " ".join(args[:2])
-        if key in self.fail:
-            rc, text = self.fail[key]
-            return Done(rc, "", text)
+        for key in ("cli:" + " ".join(args[:3]), "cli:" + " ".join(args[:2])):
+            if key in self.fail:
+                rc, text = self.fail[key]
+                return Done(rc, "", text)
+        if self.runtime_files and not self.runtime_done:
+            self.runtime_done = True
+            for rel in self.runtime_files:
+                target = self.html / "wp-content" / rel
+                if rel.endswith("/"):
+                    target.mkdir(parents=True, exist_ok=True)
+                elif rel.startswith("link:"):
+                    name, _, dest = rel[5:].partition("->")
+                    (self.html / "wp-content" / name).symlink_to(dest)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("made by a plugin")
+        if args[:3] == ["option", "delete", "_site_transient_update_plugins"]:
+            if self.stale_update_state:
+                self.stale_update_state = False
+                return Done(0, "Success: Deleted '_site_transient_update_plugins' option.")
+            return Done(1, "", "Error: Could not delete '_site_transient_update_plugins' option. Does it exist?") if self.update_rows_absent else Done(0, "Success: Deleted.")
         if args[:2] == ["plugin", "is-installed"]:
             return Done(0 if (self.html / "wp-content/plugins" / args[2]).exists() else 1)
         if args[:2] == ["theme", "is-installed"]:
@@ -164,6 +191,8 @@ class FakeHost:
 
     def ext(self, args):
         kind, slug = args[0], args[2]
+        if self.stale_update_state:       # the real tool's answer when WordPress core thinks the plugin is installed because the archive's update check says so
+            return Done(1, "", "Warning: %s: Plugin already installed.\nSuccess: Plugin already installed.\nWarning: The '%s' plugin could not be found.\nError: You need to specify either one or more plugin slugs to check" % (slug, slug))
         versioned = any(a.startswith("--version=") for a in args)
         for key in ("ext:%s:versioned" % slug if versioned else None, "ext:%s" % slug):
             if key and key in self.fail:
@@ -190,9 +219,11 @@ class Base(unittest.TestCase):
             p.mkdir(parents=True)
         (self.html / "wp-content/plugins/akismet").mkdir()
         (self.site_dir / "wp-config.php").write_text("<?php\n$table_prefix = 'wp_';\n")
-        self.cfg = {"data_mount": str(self.data), "intake_dir": str(self.intake), "intake_quota_mb": 3072, "image_pin": "wordpress:7.1.3-php8.5-fpm", "domain": "example.test",
+        self.cfg = {"data_mount": str(self.data), "intake_dir": str(self.intake), "backup_dir": str(self.tmp / "backups"), "intake_quota_mb": 3072, "image_pin": "wordpress:7.1.3-php8.5-fpm", "domain": "example.test",
                     "tools_bin": "/opt/bin", "php_uid": 33, "step_timeout_s": 3600, "sites": {"wptest": {"state": "hold", "quota_mb": 2048}, "livesite": {"state": "live", "quota_mb": 2048}}}
         self.host = FakeHost(self.html)
+        self.host.backups = self.tmp / "backups"
+        (self.host.backups / "wptest").mkdir(parents=True)
         self.out = []
 
     def tearDown(self):
@@ -441,6 +472,244 @@ class Pipeline(Base):
         self.assertFalse([c for c in self.host.calls if "live" in c])
 
 
+class StaleUpdateState(Base):
+    def test_the_archives_update_checks_are_dropped_before_any_install(self):
+        self.host.stale_update_state = True
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 0, text)
+        self.assertIn("archive's update checks dropped", text)
+        self.assertTrue((self.html / "wp-content/plugins/good").exists(), "with the stale rows gone the install really installs")
+        order = []
+        for c in self.host.calls:
+            n = os.path.basename(c[0])
+            if n == "wp-site-cli" and c[2:4] == ["option", "delete"] and c[4].startswith("_site_transient_"):
+                order.append("drop")
+            elif n == "wp-site-ext":
+                order.append("install")
+        self.assertEqual(order[:6], ["drop"] * 6)
+        self.assertLess(order.index("drop"), order.index("install"))
+
+    def test_without_the_drop_the_stand_in_reproduces_the_failure_seen_on_dellwp(self):
+        self.host.stale_update_state = True
+        self.host.update_rows_absent = False
+        # the drop is the only thing that clears the flag in the stand-in; skip it and the install is the silent no-op of 2026-10-25
+        real = imp.clear_update_state
+        imp.clear_update_state = lambda site, tools: []
+        try:
+            self.archive()
+            code, text = self.run_main(["wptest", "friend.wpress"])
+        finally:
+            imp.clear_update_state = real
+        self.assertEqual(code, 1)
+        self.assertIn("Plugin already installed", text)
+
+    def test_all_six_rows_are_named_and_a_missing_row_is_fine(self):
+        self.host.update_rows_absent = True
+        text = self.import_ok()
+        names = [c[4] for c in self.host.calls if os.path.basename(c[0]) == "wp-site-cli" and c[2:4] == ["option", "delete"] and c[4].startswith("_site_transient_")]
+        self.assertEqual(names, ["_site_transient_update_plugins", "_site_transient_timeout_update_plugins", "_site_transient_update_themes", "_site_transient_timeout_update_themes",
+                                 "_site_transient_update_core", "_site_transient_timeout_update_core"], "the literal names, not the constant compared with itself")
+        self.assertIn("rows were there", text)
+
+    def test_any_other_failure_to_drop_one_stops_the_run_with_a_way_back(self):
+        self.host.fail["cli:option delete _site_transient_update_themes"] = (1, "Error: database gone")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("could not drop _site_transient_update_themes before the installs", text)
+        self.assertIn("wp-site-import reset wptest", text)
+        self.assertFalse([c for c in self.host.calls if os.path.basename(c[0]) == "wp-site-ext"], "nothing was installed on top of stale rows")
+
+
+class OwnSnapshot(Base):
+    """The first backup the import takes is the import's own: a turned-down import takes it away, so the site's backups are as they were."""
+    def snaps(self, site="wptest"):
+        return sorted(p.name for p in (self.host.backups / site).iterdir() if p.is_dir())
+
+    def reset(self):
+        return self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+
+    def test_reset_removes_the_snapshot_the_import_took_and_the_marker_that_names_it(self):
+        self.import_ok()
+        self.assertEqual(len(self.snaps()), 1)
+        self.assertEqual(json.loads((self.intake / "work-wptest/PLAN.json").read_text())["snapshots"], self.snaps())
+        code, text = self.reset()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.snaps(), [])
+        self.assertFalse((self.host.backups / "wptest/.last-success").exists())
+        self.assertIn("removed the 1 snapshot(s) this import took", text)
+
+    def test_an_earlier_snapshot_stays_and_the_marker_goes_back_to_it(self):
+        old = self.host.backups / "wptest/20260101T000000Z"
+        old.mkdir()
+        (old / "MANIFEST").write_text("site=wptest\nstamp=20260101T000000Z\n")
+        self.import_ok()
+        self.assertEqual(len(self.snaps()), 2)
+        self.reset()
+        self.assertEqual(self.snaps(), ["20260101T000000Z"])
+        self.assertEqual((self.host.backups / "wptest/.last-success").read_text().strip(), "20260101T000000Z")
+
+    def test_a_marker_that_names_another_snapshot_is_left_alone(self):
+        old = self.host.backups / "wptest/20260101T000000Z"
+        old.mkdir()
+        (old / "MANIFEST").write_text("site=wptest\n")
+        self.import_ok()
+        (self.host.backups / "wptest/.last-success").write_text("20260101T000000Z\n")
+        self.reset()
+        self.assertEqual((self.host.backups / "wptest/.last-success").read_text().strip(), "20260101T000000Z")
+
+    def test_a_failed_backup_leaves_nothing_to_remove_and_no_record(self):
+        self.host.fail["backup"] = (1, "no space")
+        self.archive()
+        self.run_main(["wptest", "friend.wpress"])
+        self.assertNotIn("snapshots", json.loads((self.intake / "work-wptest/PLAN.json").read_text()))
+        code, text = self.reset()
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("snapshot(s) this import took", text)
+
+    def tamper(self, value):
+        self.import_ok()
+        p = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(p.read_text())
+        rec["snapshots"] = value
+        p.write_text(json.dumps(rec))
+
+    def test_a_record_cannot_name_a_path_outside_the_sites_backups(self):
+        victim = self.host.backups / "other"
+        victim.mkdir()
+        (victim / "MANIFEST").write_text("site=wptest\n")
+        self.tamper(["../other", "../../backups/wptest/..", "", None, 7, "20261025T100001Z/../.."])
+        code, text = self.reset()
+        self.assertEqual(code, 0, text)
+        self.assertTrue(victim.is_dir())
+        self.assertEqual(len(self.snaps()), 1)
+
+    def test_a_record_with_snapshots_that_is_not_a_list_is_ignored(self):
+        self.tamper("20261025T100001Z")
+        code, text = self.reset()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.snaps()), 1)
+
+    def test_a_snapshot_of_another_site_or_a_final_one_is_never_removed(self):
+        self.tamper([])
+        for name, manifest in (("20261025T200001Z", "site=other\n"), ("20261025T200002Z", "site=wptest\ntag=final\n"), ("20261025T200003Z", "site=wptest\ntag=pre-update\n"),
+                               ("20261025T200004Z", "")):
+            d = self.host.backups / "wptest" / name
+            d.mkdir()
+            if manifest:
+                (d / "MANIFEST").write_text(manifest)
+        p = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(p.read_text())
+        rec["snapshots"] = ["20261025T20000%dZ" % i for i in (1, 2, 3, 4)]
+        p.write_text(json.dumps(rec))
+        before = self.snaps()
+        self.reset()
+        self.assertEqual(self.snaps(), before)
+
+    def test_a_link_named_like_a_snapshot_is_not_followed(self):
+        target = self.tmp / "precious"
+        target.mkdir()
+        (target / "MANIFEST").write_text("site=wptest\n")
+        (self.host.backups / "wptest/20261025T100009Z").symlink_to(target)
+        self.tamper(["20261025T100009Z"])
+        self.reset()
+        self.assertTrue((target / "MANIFEST").exists())
+
+    def test_approve_keeps_the_snapshot_and_takes_another(self):
+        self.import_ok()
+        code, text = self.run_main(["approve", "wptest"])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.snaps()), 2)
+
+
+class TreeRestored(Base):
+    def run_and_reset(self, **kw):
+        before = self.tree(self.site_dir)
+        self.import_ok(**kw)
+        self.assertNotEqual(self.tree(self.site_dir), before)
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text)
+        return before, text
+
+    def test_what_plugins_make_when_they_first_run_goes_too(self):
+        self.host.runtime_files = ["uploads/elementor/css/global.css", "uploads/elementor/google-fonts/fonts/", "upgrade/", "uploads/.htaccess", "uploads/wpo/logs/index.php"]
+        before, text = self.run_and_reset()
+        self.assertEqual(self.tree(self.site_dir), before)
+        self.assertIn("swept", text)
+
+    def test_what_was_there_before_stays(self):
+        (self.html / "wp-content/uploads/mine").mkdir()
+        (self.html / "wp-content/uploads/mine/photo.jpg").write_bytes(b"keep")
+        (self.html / "wp-content/uploads/.htaccess").write_text("")
+        (self.html / "wp-content/upgrade").mkdir()
+        self.host.runtime_files = ["uploads/mine/new.txt", "uploads/elementor/x.css"]
+        before, _ = self.run_and_reset()
+        self.assertEqual(self.tree(self.site_dir), before)
+        self.assertEqual((self.html / "wp-content/uploads/mine/photo.jpg").read_bytes(), b"keep")
+        self.assertTrue((self.html / "wp-content/upgrade").is_dir())
+
+    def test_a_link_made_during_the_import_is_removed_and_never_followed(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (outside / "precious").write_text("keep")
+        self.host.runtime_files = ["link:uploads/evil->%s" % outside]
+        before, _ = self.run_and_reset()
+        self.assertEqual(self.tree(self.site_dir), before)
+        self.assertEqual((outside / "precious").read_text(), "keep")
+
+    def test_a_tree_too_big_to_snapshot_is_not_swept_and_says_so(self):
+        real = imp.TREE_LIMIT
+        imp.TREE_LIMIT = 3
+        try:
+            self.host.runtime_files = ["uploads/elementor/x.css"]
+            self.import_ok()
+            self.assertIsNone(json.loads((self.intake / "work-wptest/PLAN.json").read_text())["tree_before"])
+            code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        finally:
+            imp.TREE_LIMIT = real
+        self.assertEqual(code, 0, text)
+        self.assertIn("too big to snapshot", text)
+        self.assertTrue((self.html / "wp-content/uploads/elementor/x.css").exists(), "without a snapshot nothing is guessed at")
+        self.assertFalse((self.html / "wp-content/plugins/good").exists(), "the manifest part still ran")
+
+    def test_a_damaged_snapshot_in_the_record_is_ignored_not_trusted(self):
+        self.host.runtime_files = ["uploads/elementor/x.css"]
+        self.import_ok()
+        rp = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(rp.read_text())
+        rec["tree_before"] = [1, 2]            # not strings: the snapshot is not trusted, so nothing is swept
+        rp.write_text(json.dumps(rec))
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("swept", text)
+        self.assertTrue((self.html / "wp-content/uploads/elementor/x.css").exists())
+
+    def test_the_snapshot_is_taken_before_the_load_so_an_interrupted_load_can_be_swept(self):
+        self.host.runtime_files = ["uploads/elementor/x.css"]
+        before = self.tree(self.site_dir)
+        self.archive()
+        self.host.popen = lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt())
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIsInstance(json.loads((self.intake / "work-wptest/PLAN.json").read_text())["tree_before"], list)
+
+    def test_the_helpers_directly(self):
+        root = self.tmp / "tree"
+        (root / "a/b").mkdir(parents=True)
+        (root / "a/f").write_text("x")
+        (root / "l").symlink_to(self.tmp)
+        snap = imp.snapshot_tree(root)
+        self.assertEqual(snap, ["a/", "a/b/", "a/f", "l"], "directories end in a slash; a link to a directory is listed as a link")
+        (root / "a/b/new").write_text("n")
+        (root / "a/newdir").mkdir()
+        (root / "m").symlink_to(self.tmp)
+        self.assertEqual(imp.sweep_new(root, snap), 3)
+        self.assertEqual(imp.snapshot_tree(root), snap)
+        self.assertTrue(self.tmp.is_dir())
+        self.assertIsNone(imp.snapshot_tree(root, limit=2))
+
+
 class FailureDetails(Base):
     def test_the_whole_output_of_a_failed_install_is_in_the_report_and_the_record(self):
         diag = "Error: You need to specify\n--- diagnostics for 'good' (its checksum check failed):\nplugin list:\nname,status,version\nakismet,inactive,5.7.2\n--- end of diagnostics\nwp-site-ext: removed"
@@ -511,14 +780,14 @@ class RewriteRules(Base):
         self.assertRegex(text, r"ok\s+rewrite rules\s+deleted: WordPress builds them again on the first request")
 
     def test_no_stored_rules_is_not_a_failure(self):
-        self.host.fail["cli:option delete"] = (1, "Error: Could not delete 'rewrite_rules' option. Does it exist?")
+        self.host.fail["cli:option delete rewrite_rules"] = (1, "Error: Could not delete 'rewrite_rules' option. Does it exist?")
         self.archive()
         code, text = self.run_main(["wptest", "friend.wpress"])
         self.assertEqual(code, 0, text)
         self.assertRegex(text, r"ok\s+rewrite rules\s+none were stored")
 
     def test_any_other_failure_of_it_is_one(self):
-        self.host.fail["cli:option delete"] = (1, "Error: database gone")
+        self.host.fail["cli:option delete rewrite_rules"] = (1, "Error: database gone")
         self.archive()
         code, text = self.run_main(["wptest", "friend.wpress"])
         self.assertEqual(code, 1)
@@ -1175,10 +1444,10 @@ class Names(Base):
         self.assertEqual(self.tree(self.html), before)
 
     def test_a_tampered_record_cannot_make_reset_remove_outside_the_plugin_directory(self):
-        self.import_ok()
-        victim = self.html / "wp-content/precious"
+        victim = self.html / "wp-content/precious"        # it exists before the import: what is new since then is swept, which is not what this test is about
         victim.mkdir()
         (victim / "keep").write_text("k")
+        self.import_ok()
         rp = self.intake / "work-wptest/PLAN.json"
         rec = json.loads(rp.read_text())
         rec["installed"]["plugin"] += ["../precious", "..", "/etc"]
@@ -1555,8 +1824,8 @@ class Wrapper(unittest.TestCase):
         self.assertTrue(text.startswith("#!/usr/bin/python3 -I\n"))
         cfg = self.config(text)
         self.assertEqual(cfg["sites"], {"alpha": {"state": "hold", "quota_mb": 4096}, "beta": {"state": v["wp_site_defaults"]["state"], "quota_mb": v["wp_site_defaults"]["quota_mb"]}})
-        self.assertEqual((cfg["intake_dir"], cfg["intake_quota_mb"], cfg["image_pin"], cfg["data_mount"]), (v["wp_intake_dir"], v["wp_intake_quota_mb"], v["wp_image_php"], v["wp_data_mount"]))
-        self.assertEqual((cfg["domain"], cfg["tools_bin"], cfg["php_uid"], cfg["step_timeout_s"]), (v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"], v["wp_import_step_timeout_s"]))
+        self.assertEqual((cfg["intake_dir"], cfg["backup_dir"], cfg["intake_quota_mb"], cfg["image_pin"], cfg["data_mount"]), (v["wp_intake_dir"], v["wp_backup_dir"], v["wp_intake_quota_mb"], v["wp_image_php"], v["wp_data_mount"]))
+        self.assertEqual((cfg["backup_dir"], cfg["domain"], cfg["tools_bin"], cfg["php_uid"], cfg["step_timeout_s"]), (v["wp_backup_dir"], v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"], v["wp_import_step_timeout_s"]))
         self.assertEqual(cfg["approvals"], {"key_file": v["wp_approvals_dir"] + "/key", "approver_file": v["wp_approvals_dir"] + "/approver", "ntfy_conf": v["wp_ntfy_conf"], "netrc": v["wp_ntfy_netrc"],
                                             "reply_topic": v["wp_approvals_reply_topic"], "ttl_s": v["wp_approvals_ttl_s"]})
         self.assertIsInstance(cfg["php_uid"], int)

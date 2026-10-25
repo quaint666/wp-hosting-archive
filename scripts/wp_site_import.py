@@ -19,7 +19,8 @@ After the unpack the run goes on by itself: load the SQL (the migration plugin's
 wordpress.org offers (the archive's version if it is still offered, else the newest, and the report says so), run the WP-CLI steps (update-db, the URLs, Elementor, transients, rewrite rules),
 scan, write the report, take the first backup and stop. The site stays on hold. CODE THAT IS NOT FROM WORDPRESS.ORG (plugins and themes it does not offer, mu-plugins) STAYS IN THE WORK
 DIRECTORY until `approve` copies it in, so no step before your approval runs a line of it; `approve` also deletes the intake file and the work directory. `reset` undoes a run that is not
-approved yet, by the manifest in PLAN.json: it drops the tables and removes what the run copied or installed, nothing else.
+approved yet, by the manifest in PLAN.json and a snapshot of wp-content taken before the load: it drops the tables, removes what the run copied or installed, and sweeps whatever else appeared
+under wp-content meanwhile (what the plugins made when they first ran, WordPress's upgrade directory), so the site's tree is what it was before the import.
 Refuses (before anything is written): a site that is not in wp_sites or not on hold; a site with a database that is not empty; a file that is not a plain *.wpress directly inside the intake directory;
 an archive the reader rejects (wp_wpress.judge: core newer than ours, a plugin that needs a newer PHP, an unsafe path, a multisite, a truncated file); a work directory left by an earlier run; not enough
 room in the intake quota or in the site's quota. --plan does all of that and prints the plan, writing nothing.
@@ -63,6 +64,8 @@ SERVMASK = b"SERVMASK_PREFIX_"
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?\Z")
 PREFIX_RE = re.compile(r"\$table_prefix\s*=\s*'([A-Za-z0-9_]+)'")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
+STAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z\Z")
+SNAPSHOT_LINE = re.compile(r"^OK: snapshot ([0-9]{8}T[0-9]{6}Z) of ([a-z][a-z0-9-]{1,23}) ", re.M)
 # A plugin or theme folder name that comes out of the archive and goes into a path: a plain name, never "..", never a slash. (A wordpress.org slug is stricter: SLUG_RE.)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]*\Z")
@@ -77,6 +80,11 @@ UPLOADS_BLOCKED = "PHP or hidden file under uploads (code or server settings): n
 LANG_OK = (".mo", ".po", ".json")
 LANG_BLOCKED = "languages file that is not a translation (.mo, .po, .json; a .l10n.php file is code): not copied"
 HOST_MAX = 253
+TREE_LIMIT = 100000       # entries of wp-content recorded before the load; a bigger tree is not swept on undo (the manifest still is)
+# The archive's cached update checks. They describe the FRIEND's site (which plugins it had, which had an update waiting) and WordPress core reads them when it decides whether a plugin is
+# "already installed": with Elementor in there as "update available", `wp plugin install elementor` says "Plugin already installed.", installs nothing and exits 0 (dellwp 2026-10-25).
+UPDATE_STATE = ("_site_transient_update_plugins", "_site_transient_timeout_update_plugins", "_site_transient_update_themes", "_site_transient_timeout_update_themes",
+                "_site_transient_update_core", "_site_transient_timeout_update_core")
 
 
 class Refuse(Exception):
@@ -494,6 +502,49 @@ def sanitize_options(site, work, tools):
     return steps
 
 
+def clear_update_state(site, tools):
+    """Drop the archive's cached update checks before anything is installed. A row that is not there is fine; any other failure stops the run (a stale row would silently turn an install into a no-op)."""
+    gone, steps = 0, []
+    for name in UPDATE_STATE:
+        ok, out = tools.cli(site, "option", "delete", name)
+        if ok:
+            gone += 1
+        elif "does it exist" not in out.lower():
+            raise Refuse("could not drop %s before the installs (%s)" % (name, out[-200:]))
+    steps.append({"name": "archive's update checks dropped", "ok": True, "note": "%d of %d rows were there; plugin installs now decide from the disk, not from the friend's site" % (gone, len(UPDATE_STATE))})
+    return steps
+
+
+def snapshot_tree(root, limit=None):
+    """Every path under root as a relative string, directories with a trailing slash; None when there are more than `limit` (then nothing is swept later). Links are listed, never followed."""
+    limit = TREE_LIMIT if limit is None else limit
+    out = []
+    for cur, dirs, files in os.walk(root):
+        for n in dirs + files:
+            p = os.path.join(cur, n)
+            out.append(os.path.relpath(p, root) + ("/" if os.path.isdir(p) and not os.path.islink(p) else ""))
+            if len(out) > limit:
+                return None
+    return sorted(out)
+
+
+def sweep_new(root, before):
+    """Remove what appeared under root since the snapshot: files and links (a link is removed, never followed) and directories once they are empty. Returns how many paths went."""
+    known, removed = set(before), 0
+    for cur, dirs, files in os.walk(root, topdown=False):
+        for n in files + dirs:
+            p = os.path.join(cur, n)
+            is_dir = os.path.isdir(p) and not os.path.islink(p)
+            if os.path.relpath(p, root) + ("/" if is_dir else "") in known:
+                continue
+            try:
+                os.rmdir(p) if is_dir else os.unlink(p)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def wpcli_steps(cfg, site, work, record, tools):
     steps = []
     new_host = "%s.%s" % (site, cfg["domain"])
@@ -787,11 +838,14 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
     out("\nUNPACKED into %s. Loading the database ..." % work)
     try:
         record["db_loaded"] = True      # set BEFORE the load: a load that is interrupted has still put tables in, and reset must drop them
+        wc = site_dir / "html" / "wp-content"
+        record["tree_before"] = snapshot_tree(wc) if wc.is_dir() and not wc.is_symlink() else None      # what reset returns wp-content to
         save_record(work, record)
         tables = load_sql(site, work, prefix, tools)
         ledger(cfg, site, "loaded", digest, size, path.name)
         out("loaded %d tables. Resetting the options that name code, copying data, installing from wordpress.org, running WP-CLI ..." % tables)
         steps = sanitize_options(site, work, tools)
+        steps += clear_update_state(site, tools)
         copy_data(cfg, site_dir, work, record, tools)
         steps += install_from_org(site, record, work, tools)
         steps += wpcli_steps(cfg, site, work, record, tools)
@@ -801,6 +855,10 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
         raise Refuse("%s\nThe run stopped part way. Look at the site, then undo it with: wp-site-import reset %s" % (str(e) or "interrupted", site))
     ok, bout = tools.call(tools.bin("wp-site-backup"), site)
     steps.append({"name": "first backup", "ok": ok, "note": "taken" if ok else "FAILED: " + bout[-200:]})
+    m = SNAPSHOT_LINE.search(bout) if ok else None
+    if m and m.group(2) == site:
+        record["snapshots"] = [m.group(1)]       # the import's own snapshot: reset and Deny take it away again
+        save_record(work, record)
     record["steps"], record["stage"], record["scan"] = steps, "reported", {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}
     report = build_report(site, record, steps, res, work)
     fd = os.open(work / "REPORT.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -855,6 +913,38 @@ def run_approve(cfg, site, reject, accept_failures, tools, out):
     return 0
 
 
+def drop_own_snapshots(cfg, site, record, out):
+    """Remove the snapshot(s) this import took itself, so a turned-down import leaves the site's backups as they were. Only a stamp the record names, in this site's own backup directory, as a real
+    directory (never a link), whose MANIFEST says it is this site's and not a final snapshot. .last-success is moved back to the newest snapshot that is left, or removed."""
+    stamps = record.get("snapshots", [])
+    root = Path(cfg["backup_dir"]) / site
+    gone = 0
+    for stamp in stamps if isinstance(stamps, list) else []:
+        d = root / stamp if isinstance(stamp, str) and STAMP_RE.match(stamp) else None
+        if d is None or d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            lines = (d / "MANIFEST").read_text().splitlines()
+        except OSError:
+            continue
+        if "site=" + site not in lines or any(l.startswith("tag=") for l in lines):
+            continue
+        shutil.rmtree(d)
+        gone += 1
+    if gone:
+        marker = root / ".last-success"
+        left = sorted(x.name for x in root.iterdir() if STAMP_RE.match(x.name) and x.is_dir() and not x.is_symlink())
+        try:
+            if marker.is_file() and not marker.is_symlink() and not (root / marker.read_text().strip()).is_dir():
+                if left:
+                    marker.write_text(left[-1] + "\n")
+                else:
+                    marker.unlink()
+        except OSError:
+            pass
+        out("removed the %d snapshot(s) this import took" % gone)
+
+
 def undo(cfg, site, work, tools, out):
     """Put the site back as it was before the run: the tables, the copied files, the installed plugins and themes. Only what the record names."""
     record = read_record(work)
@@ -881,6 +971,13 @@ def undo(cfg, site, work, tools, out):
             if SLUG_RE.match(slug) and t.is_dir() and not t.is_symlink():
                 shutil.rmtree(t)
     out("removed %d copied files and %d installed plugins/themes" % (len(files), sum(len(v) for v in record.get("installed", {}).values())))
+    before, wc = record.get("tree_before"), html / "wp-content"
+    if isinstance(before, list) and all(isinstance(x, str) for x in before) and wc.is_dir() and not wc.is_symlink():
+        n = sweep_new(wc, before)
+        out("swept %d more path(s) that appeared under wp-content during the import (files the plugins made when they first ran, upgrade directories)" % n)
+    elif before is None and "tree_before" in record:
+        out("wp-content was too big to snapshot: only what this run copied or installed was removed")
+    drop_own_snapshots(cfg, site, record, out)
 
 
 def run_reset(cfg, site, ask, tools, out, confirmed=False):

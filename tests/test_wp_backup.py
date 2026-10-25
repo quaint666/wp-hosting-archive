@@ -28,7 +28,8 @@ DUMP_OK = "-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\nINSERT INTO `wp
 DOCKER_BACKUP = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 case "$1" in
-  exec) echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
+  exec) case "$*" in *information_schema*) [ -f "$SHIM/tables_fail" ] && exit 1; cat "$SHIM/tables" 2>/dev/null || echo 57; exit 0 ;; esac
+        echo "dump flag=$([ -e "$SITEDIR/maintenance.flag" ] && echo up || echo down)" >> "$SHIM/order"; [ -f "$SHIM/dump_fail" ] && exit 1; cat "$SHIM/dump.sql"; exit 0 ;;
 esac
 exit 0
 '''
@@ -202,6 +203,77 @@ class Backup(Base):
         self.assertNotEqual(r.returncode, 0); self.assertIn("wp_options", r.stderr)
         self.assertEqual(self.snapshots(), [])
         self.assertFalse((self.backups / "wptest/.last-success").exists())
+
+    # --- a site with no tables at all: only a FINAL backup, only if it never had a real snapshot
+    EMPTY_DUMP = "-- MariaDB dump\n-- Dump completed on 2026-10-24 20:15:00\n"
+
+    def empty_site(self, tables="0"):
+        self.put("dump.sql", self.EMPTY_DUMP)
+        self.put("tables", tables)
+
+    def test_a_site_that_never_had_data_can_take_an_empty_final_snapshot_and_says_so(self):
+        self.empty_site()
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("an empty final snapshot is taken (empty=yes)", r.stdout)
+        snap = self.backups / "wptest/20261024T201500Z"
+        man = dict(l.split("=", 1) for l in (snap / "MANIFEST").read_text().splitlines())
+        self.assertEqual((man["tag"], man["empty"]), ("final", "yes"))
+        with gzip.open(snap / "db.sql.gz", "rt") as f:
+            self.assertNotIn("CREATE TABLE", f.read())
+
+    def test_a_normal_snapshot_has_no_empty_mark(self):
+        self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotIn("empty", (self.backups / "wptest/20261024T201500Z/MANIFEST").read_text())
+
+    def test_every_other_way_of_taking_an_empty_backup_is_still_refused(self):
+        self.empty_site()
+        for args in ((), ("--tag=pre-update",), ("--force",)):
+            r = self.backup("20261024T20%02d00Z" % (len(args) + 1), *args)
+            self.assertNotEqual(r.returncode, 0, args)
+            self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_tables_without_wp_options_is_damage_not_emptiness(self):
+        self.put("dump.sql", "-- MariaDB dump\nCREATE TABLE `wp_posts` (id int);\n-- Dump completed on 2026-10-24 20:15:00\n")
+        self.put("tables", "12")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_a_site_that_ever_had_a_real_snapshot_never_gets_an_empty_final_one(self):
+        self.assertEqual(self.backup("20261023T201500Z").returncode, 0)
+        self.empty_site()
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), ["20261023T201500Z"], "the real backup is untouched")
+
+    def test_a_snapshot_without_a_manifest_counts_as_real_so_the_rule_errs_on_keeping_data(self):
+        d = self.backups / "wptest/20261023T201500Z"
+        (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x")
+        self.empty_site()
+        self.assertNotEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+
+    def test_an_earlier_empty_snapshot_does_not_count_as_real(self):
+        self.empty_site()
+        self.assertEqual(self.backup("20261023T201500Z", "--tag=final").returncode, 0)
+        self.assertEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+
+    def test_when_the_tables_cannot_be_counted_nothing_is_taken(self):
+        self.empty_site()
+        self.put("tables_fail", "")
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not count the tables", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
+    def test_a_count_that_is_not_zero_is_not_empty(self):
+        for answer in ("1", "57", "", "zero", "0 "):
+            self.empty_site(answer)
+            r = self.backup("20261024T201500Z", "--tag=final")
+            self.assertNotEqual(r.returncode, 0, repr(answer))
 
     def test_a_same_second_collision_is_refused_and_does_not_nest_a_snapshot(self):
         self.assertEqual(self.backup("20261024T201500Z").returncode, 0)
