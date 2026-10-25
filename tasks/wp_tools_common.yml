@@ -24,6 +24,24 @@
     group: root
     mode: "0755"
 
+# The WP-CLI download cache (templates/wp/wp_site_cli.sh.j2): root only, and emptied of files older than wp_cli_cache_days days by systemd-tmpfiles, so it cannot grow for ever.
+- name: Make the WP-CLI download cache directory
+  ansible.builtin.file:
+    path: "{{ wp_cli_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Age out the WP-CLI download cache
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/wp-cli-cache.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      d {{ wp_cli_cache_dir }} 0700 root root {{ wp_cli_cache_days }}d
+
 - name: Make the staging directory on the controller
   ansible.builtin.tempfile:
     state: directory

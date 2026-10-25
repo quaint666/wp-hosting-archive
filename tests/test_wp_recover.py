@@ -82,6 +82,8 @@ class Recover(Base):
         for name, body in (("docker", DOCKER), ("systemctl", SYSTEMCTL), ("curl", CURL), ("cp", CP), ("sleep", "#!/bin/bash\nexit 0\n")):
             self.shim(name, body)
         self.env["SITE"] = str(self.site)
+        (self.tmp / "wpcache").mkdir()
+        self.ctx["wp_cli_cache_dir"] = str(self.tmp / "wpcache")      # the cache the --code mode mounts: the real one is /var/cache/wp-cli on the VM
         self.install("wp_site_cli.sh.j2", "bin/wp-site-cli")
         self.script = self.install("wp_site_recover.sh.j2", "bin/wp-site-recover")
         self.flag = self.site / "maintenance.flag"

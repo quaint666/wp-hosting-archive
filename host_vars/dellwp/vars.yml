@@ -228,6 +228,11 @@ wp_mu_dir: "{{ wp_data_mount }}/mu"
 # Where the php container sees it. Named in three places that must agree: the compose mount, WPMU_PLUGIN_DIR in wp-config.php and open_basedir in php.ini (without it PHP may not read the
 # directory, is_dir() says no, and WordPress loads NO must-use plugin and says nothing: seen on dellwp 2026-10-25).
 wp_mu_mount: /var/www/wp-mu
+# The zips WP-CLI downloads from wordpress.org (a plugin or theme by slug and version, which never changes once published) are kept here between runs, so a second import of the same plugins
+# downloads nothing, and a bad minute on the link to wordpress.org costs only the first time (dellwp 2026-10-25: one import took 937 s, almost all of it stalled downloads). Only the --code
+# mode of wp-site-cli mounts it (root-only, 0700); every install is still checked against wordpress.org's checksums afterwards. Files older than wp_cli_cache_days days are removed by systemd-tmpfiles.
+wp_cli_cache_dir: /var/cache/wp-cli
+wp_cli_cache_days: 30
 wp_2fa_roles: "administrator,shop_manager"
 wp_login_limit_ip: 20
 wp_login_limit_user: 10

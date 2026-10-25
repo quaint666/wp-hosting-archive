@@ -57,9 +57,9 @@ class Tools(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wptools-"))
         self.v = base_vars()
         v = dict(self.v, wp_tools_bin=str(self.tmp / "bin"), wp_tools_lib=str(self.tmp / "lib"), wp_data_mount=str(self.tmp / "data"), wp_freeze_file=str(self.tmp / "freeze"),
-                 inventory_hostname="dellwp")
+                 inventory_hostname="dellwp", wp_cli_cache_dir=str(self.tmp / "cache"))
         self.ctx = v
-        for d in ("bin", "lib", "shim", "log", "data/sites/wptest"):
+        for d in ("bin", "lib", "shim", "log", "cache", "data/sites/wptest"):
             (self.tmp / d).mkdir(parents=True)
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
@@ -137,6 +137,37 @@ class Tools(unittest.TestCase):
         for flag in ("--allow-root", "--skip-plugins", "--skip-themes"):
             self.assertNotIn(flag, a)
         self.assertNotIn("/var/run/docker.sock", " ".join(a))
+
+    def test_only_code_mode_keeps_its_downloads_between_runs(self):
+        cache = str(self.tmp / "cache")
+        self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "install", "woocommerce")
+        a = self.argv()
+        self.assertIn("%s:/wp-cli-cache" % cache, a)
+        self.assertTrue(self.pair("-e", "WP_CLI_CACHE_DIR=/wp-cli-cache"))
+        self.assertEqual([x for x in a if x.startswith("WP_CLI_CACHE_DIR=")], ["WP_CLI_CACHE_DIR=/wp-cli-cache"], "one setting, not two that fight")
+        self.assertFalse([x for x in a if x.startswith(cache) and x.endswith(":ro")], "the cache is writable: that is how it fills")
+        (self.tmp / "log" / "docker.argv").unlink()
+        self.run_tool("wp-site-cli", "wptest", "core", "version")
+        a = self.argv()
+        self.assertNotIn("%s:/wp-cli-cache" % cache, a, "the web app's own uid never sees the cache")
+        self.assertEqual([x for x in a if x.startswith("WP_CLI_CACHE_DIR=")], ["WP_CLI_CACHE_DIR=/tmp/cache"])
+        self.assertFalse([x for x in a if "wp-cli-cache" in x])
+
+    def test_code_mode_without_the_cache_directory_stops_and_says_what_to_run_and_a_plain_read_does_not_need_it(self):
+        (self.tmp / "cache").rmdir()
+        r = self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "list")
+        self.assertEqual(r.returncode, 2); self.assertIn("is missing (run dellwp/wp_sites_dellwp.yml)", r.stderr)
+        self.assertNotIn("run", self.argv(), "no container was started")
+        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "core", "version").returncode, 0)
+
+    def test_the_cache_directory_is_made_root_only_and_aged_out(self):
+        tasks = {t["name"]: t for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())}
+        d = tasks["Make the WP-CLI download cache directory"]["ansible.builtin.file"]
+        self.assertEqual((d["path"], d["owner"], d["group"], d["mode"]), ("{{ wp_cli_cache_dir }}", "root", "root", "0700"))
+        c = tasks["Age out the WP-CLI download cache"]["ansible.builtin.copy"]
+        self.assertEqual(c["dest"], "/etc/tmpfiles.d/wp-cli-cache.conf")
+        self.assertEqual(c["content"].strip(), "d {{ wp_cli_cache_dir }} 0700 root root {{ wp_cli_cache_days }}d")
+        self.assertRegex(self.v["wp_cli_cache_dir"], r"^/var/cache/[a-z-]+$"); self.assertGreaterEqual(self.v["wp_cli_cache_days"], 7)
 
     def test_code_mode_is_root_without_capabilities_and_skips_plugins(self):
         r = self.run_tool("wp-site-cli", "wptest", "--code", "plugin", "update", "--all")
@@ -717,15 +748,23 @@ class Staging(unittest.TestCase):
     SENDS = {"Send the tools library and the Python modules": ("lib", "{{ wp_tools_lib }}/", "F0644"), "Send the tools": ("bin", "{{ wp_tools_bin }}/", "F0750"),
              "Send the WordPress units": ("units", "/etc/systemd/system/", "F0644")}
 
-    def test_nothing_is_written_on_the_vm_except_by_rsync_the_library_directory_and_the_enabled_timers(self):
+    # the only things written on the VM by a task of their own (everything else is rendered on the controller and sent by rsync): two directories and one tmpfiles rule
+    REMOTE_OWN = {"Make the tools library directory": "{{ wp_tools_lib }}", "Make the WP-CLI download cache directory": "{{ wp_cli_cache_dir }}", "Age out the WP-CLI download cache": "/etc/tmpfiles.d/wp-cli-cache.conf"}
+
+    def test_nothing_is_written_on_the_vm_except_by_rsync_two_directories_one_tmpfiles_rule_and_the_enabled_timers(self):
         for t in self.tasks:
             for mod in ("ansible.builtin.template", "ansible.builtin.copy"):
-                if mod in t:
+                if mod in t and t["name"] not in self.REMOTE_OWN:
                     self.assertEqual((t.get("delegate_to"), t.get("become"), t.get("check_mode")), ("localhost", False, False), t["name"] + ": rendering happens on the controller, in check mode too, without sudo")
                     self.assertTrue(t[mod]["dest"].startswith("{{ wp_stage.path }}/"), t["name"] + " must write into the staging directory")
                     self.assertTrue(t["name"].startswith("Stage ") or t["name"] == "Write the lists of the staged files", t["name"])
-            if "ansible.builtin.file" in t and t["name"] != "Make the tools library directory":
+            if "ansible.builtin.file" in t and t["name"] not in self.REMOTE_OWN:
                 self.assertEqual((t.get("delegate_to"), t.get("become")), ("localhost", False), t["name"])
+        for name, path in self.REMOTE_OWN.items():
+            t = self.by[name]
+            body = next(v for k, v in t.items() if k in ("ansible.builtin.file", "ansible.builtin.copy"))
+            self.assertEqual((body.get("path") or body.get("dest"), body["owner"], body["group"]), (path, "root", "root"), name)
+            self.assertNotIn("delegate_to", t, name + " is a task on the VM")
         self.assertEqual(self.by["Make the tools library directory"]["ansible.builtin.file"]["path"], "{{ wp_tools_lib }}")
 
     def test_staging_never_counts_as_a_change_and_never_prints_a_diff(self):
