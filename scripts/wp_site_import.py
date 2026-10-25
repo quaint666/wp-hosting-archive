@@ -2,7 +2,7 @@
 """wp-site-import: bring a .wpress archive into a WordPress site on dellwp, step by step. Runs on the VM as root (rendered wrapper: templates/wp/wp_site_import.py.j2; this module and
 wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
 
-    wp-site-import <site> <file.wpress> [--plan]     (the file must sit in the intake directory)
+    wp-site-import <site> <file.wpress> [--plan] [--replace]     (the file must sit in the intake directory; --replace: the site already has data, see below)
     wp-site-import reset <site>                      (asks for the site name; removes the unpacked copy)
 
     wp-site-import approve <site> [--reject a,b] [--accept-failures]
@@ -10,6 +10,10 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import receive <file.wpress>             (the file on standard input: how the laptop sends it; the intake directory is root-only)
     wp-site-import discard <file.wpress> [--if-present]   (removes a file from the intake directory, unless an import was made from it; --if-present: silent when it is not there)
     wp-site-import resolve <token>                   (what the phone's Approve and Deny buttons lead to, through the listener: scripts/wp_approval_listener.py)
+
+--replace (a friend sends a newer archive for a site that already has data): the site must be on hold and have tables; you type the site name; a snapshot of the old site is taken first
+(wp-site-backup --tag=pre-import, never pruned); then the database and wp-content are put back to an empty site's (the image's wp-content) and the import runs as usual. reset and a phone Deny
+put the old site back with wp-site-recover from that snapshot (and remove it); approve changes its tag to pre-update, so the normal retention ages it out. If wp-site-recover fails nothing is removed.
 
 When an import has finished, a notification goes to the phone (the independent ntfy) with a Deny button and, only if the import is clean (no failed step, checksums ok, no ClamAV find, no
 suspicious pattern), an Approve button. A token is signed, expires, is bound to the exact report and is used once; it can approve a clean import or deny, and nothing else: --accept-failures,
@@ -213,7 +217,15 @@ def check_db_empty(site, run):
     if not out.isdigit():
         raise Refuse("could not read the database of %s (answer: '%s'): is its stack up? systemctl status wp-%s" % (site, out[:80], site))
     if int(out) != 0:
-        raise Refuse("the database of %s is not empty (%s tables): an import needs an empty one. Nothing was changed" % (site, out))
+        raise Refuse("the database of %s is not empty (%s tables): an import needs an empty one. To replace what the site has with a newer archive: wp-site-import %s <file> --replace. Nothing was changed" % (site, out, site))
+
+
+def check_db_has_data(site, run):
+    out = db_query(site, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()", run)
+    if not out.isdigit():
+        raise Refuse("could not read the database of %s (answer: '%s'): is its stack up? systemctl status wp-%s" % (site, out[:80], site))
+    if int(out) == 0:
+        raise Refuse("%s has no data, so there is nothing to replace: import without --replace. Nothing was changed" % site)
 
 
 def locate(cfg, arg):
@@ -515,6 +527,37 @@ def clear_update_state(site, tools):
     return steps
 
 
+def reset_wp_content(cfg, site, site_dir, tools):
+    """wp-content as the image ships it and as site creation seeded it (tasks/wp_site_one_common.yml): root-owned, uploads the one directory PHP may write. Used by --replace after the safety snapshot."""
+    uid = int(cfg["php_uid"])
+    sh = ("rm -rf /var/www/html/wp-content && cp -a /usr/src/wordpress/wp-content /var/www/html/wp-content && chown -R 0:0 /var/www/html/wp-content && "
+          "mkdir -p /var/www/html/wp-content/uploads && chown %d:%d /var/www/html/wp-content/uploads" % (uid, uid))
+    ok, out = tools.call("docker", "run", "--rm", "--memory", "256m", "--memory-swap", "256m", "--entrypoint", "sh", "-v", "%s:/var/www/html" % (site_dir / "html"), cfg["image_pin"], "-c", sh)
+    if not ok:
+        raise Refuse("wp-content could not be reset to the image's (%s)" % w.printable(out[-200:], limit=200))
+
+
+def prepare_replace(cfg, site, site_dir, work, record, tools, out):
+    """--replace: the old site is kept as a snapshot tagged pre-import (never pruned), then the database and wp-content are put back to an empty site's. Each step is recorded BEFORE it
+    happens, so reset knows what there is to undo: no snapshot, nothing to put back; a snapshot and no wipe, only the snapshot to remove; a wipe, the old site comes back from the snapshot."""
+    rep = record["replace"] = {"snapshot": None, "wiped": False}
+    save_record(work, record)
+    ok, bout = tools.call(tools.bin("wp-site-backup"), site, "--tag=pre-import", "--force")
+    m = SNAPSHOT_LINE.search(bout) if ok else None
+    if not m or m.group(2) != site:
+        raise Refuse("the safety snapshot of %s could not be taken (%s): nothing was changed" % (site, w.printable(bout[-200:], limit=200) or "no answer"))
+    rep["snapshot"] = m.group(1)
+    save_record(work, record)
+    out("safety snapshot of the old %s: %s (tag pre-import, never pruned while this import waits)" % (site, m.group(1)))
+    record["notes"] = ["REPLACE: the old data of %s is in snapshot %s; a deny puts it back, an approve keeps it as a pre-update snapshot" % (site, m.group(1))] + list(record.get("notes", []))
+    rep["wiped"] = True
+    save_record(work, record)
+    drop_all_tables(site, tools)
+    reset_wp_content(cfg, site, site_dir, tools)
+    check_db_empty(site, tools.run)
+    out("the old data is wiped; the archive is imported next")
+
+
 def snapshot_tree(root, limit=None):
     """Every path under root as a relative string, directories with a trailing slash; None when there are more than `limit` (then nothing is swept later). Links are listed, never followed."""
     limit = TREE_LIMIT if limit is None else limit
@@ -799,19 +842,19 @@ def run_resolve(cfg, token, tools, out):
 
 # ---- the run
 
-def run_import(cfg, site, arg, plan_only, get, tools, out):
+def run_import(cfg, site, arg, plan_only, get, tools, out, replace=False, ask=None):
     site_dir = check_site(cfg, site)
     path = locate(cfg, arg)
     work = Path(cfg["intake_dir"]) / ("work-" + site)
     if work.exists() or work.is_symlink():
         raise Refuse("%s exists: an earlier import of %s left it. Look at it, then run: wp-site-import reset %s" % (work, site, site))
-    check_db_empty(site, tools.run)
+    (check_db_has_data if replace else check_db_empty)(site, tools.run)
     prefix = table_prefix(site_dir)
     with w.Archive(path) as a:
         plan = build_plan(a, cfg, get)
         need = plan["keep_bytes"]
         intake_free = int(cfg["intake_quota_mb"]) * MIB - tree_bytes(cfg["intake_dir"])
-        site_free = int(cfg["sites"][site]["quota_mb"]) * MIB - tree_bytes(site_dir)
+        site_free = int(cfg["sites"][site]["quota_mb"]) * MIB - (0 if replace else tree_bytes(site_dir))      # with --replace the old data is wiped first, so the whole quota is free
         site_need = need + 2 * plan["sql_bytes"]   # the database on disk is about three times its dump (a guess, so the check is a floor, not a promise)
         if need > intake_free:
             raise Refuse("the unpacked copy needs %.1f MB and the intake quota has %.1f MB free (the archive itself counts): remove files from %s or raise wp_intake_quota_mb. Nothing was changed"
@@ -822,6 +865,10 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
             show_plan(plan, site, path.name, "", path.stat().st_size, out)
             out("\nPLAN ONLY: nothing was written.")
             return 0
+        if replace:
+            if ask("This REPLACES everything of %s (database, uploads, plugins, themes) with this archive. The old site is kept as a snapshot until you decide; a deny puts it back.\n"
+                                  "Type the site name to go on: " % site).strip() != site:
+                raise Refuse("the name did not match: nothing was changed")
         digest = sha256(path)
         size = path.stat().st_size
         extract(a, plan["keep"], work)
@@ -837,6 +884,8 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
     show_plan(plan, site, path.name, digest, size, out)
     out("\nUNPACKED into %s. Loading the database ..." % work)
     try:
+        if replace:
+            prepare_replace(cfg, site, site_dir, work, record, tools, out)
         record["db_loaded"] = True      # set BEFORE the load: a load that is interrupted has still put tables in, and reset must drop them
         wc = site_dir / "html" / "wp-content"
         record["tree_before"] = snapshot_tree(wc) if wc.is_dir() and not wc.is_symlink() else None      # what reset returns wp-content to
@@ -902,6 +951,9 @@ def run_approve(cfg, site, reject, accept_failures, tools, out):
             copy_tree(work / "wp-content" / sub / name, html / "wp-content" / sub / name, 0, 0o755, 0o644, tools.chown, record["copied"], html, lambda: save_record(work, record))
         finally:
             save_record(work, record)
+    rep = record.get("replace")
+    if isinstance(rep, dict) and isinstance(rep.get("snapshot"), str):
+        out(retag_pre_import(cfg, site, rep["snapshot"]))
     f = Path(cfg["intake_dir"]) / record["file"]
     if FILE_RE.match(str(record["file"])) and f.is_file() and not f.is_symlink():
         f.unlink()
@@ -913,10 +965,10 @@ def run_approve(cfg, site, reject, accept_failures, tools, out):
     return 0
 
 
-def drop_own_snapshots(cfg, site, record, out):
-    """Remove the snapshot(s) this import took itself, so a turned-down import leaves the site's backups as they were. Only a stamp the record names, in this site's own backup directory, as a real
-    directory (never a link), whose MANIFEST says it is this site's and not a final snapshot. .last-success is moved back to the newest snapshot that is left, or removed."""
-    stamps = record.get("snapshots", [])
+def drop_snapshots(cfg, site, stamps, tag, out):
+    """Remove snapshots a record names, so a turned-down import leaves the site's backups as they were. Only a stamp in this site's own backup directory, as a real directory (never a link), whose
+    MANIFEST says it is this site's and carries exactly the tag asked for (tag None: no tag at all, so never a final or pre-update snapshot). .last-success is moved back to the newest snapshot that is
+    left, or removed."""
     root = Path(cfg["backup_dir"]) / site
     gone = 0
     for stamp in stamps if isinstance(stamps, list) else []:
@@ -927,7 +979,8 @@ def drop_own_snapshots(cfg, site, record, out):
             lines = (d / "MANIFEST").read_text().splitlines()
         except OSError:
             continue
-        if "site=" + site not in lines or any(l.startswith("tag=") for l in lines):
+        tags = [l for l in lines if l.startswith("tag=")]
+        if "site=" + site not in lines or tags != (["tag=" + tag] if tag else []):
             continue
         shutil.rmtree(d)
         gone += 1
@@ -945,10 +998,33 @@ def drop_own_snapshots(cfg, site, record, out):
         out("removed the %d snapshot(s) this import took" % gone)
 
 
+def drop_own_snapshots(cfg, site, record, out):
+    drop_snapshots(cfg, site, record.get("snapshots", []), None, out)
+
+
+def retag_pre_import(cfg, site, stamp):
+    """On an approve the old site's snapshot stops being protected: its tag becomes pre-update, so the normal retention ages it out. Never raises: a snapshot that stays pre-import is only kept longer."""
+    d = Path(cfg["backup_dir"]) / site / stamp if isinstance(stamp, str) and STAMP_RE.match(stamp) else None
+    try:
+        if d is None or d.is_symlink() or not d.is_dir() or (d / "MANIFEST").is_symlink():
+            return "the old site's snapshot %s was not found; nothing to re-tag" % w.printable(stamp, limit=20)
+        lines = (d / "MANIFEST").read_text().splitlines()
+        if "site=" + site not in lines or "tag=pre-import" not in lines:
+            return "the old site's snapshot %s is not a pre-import snapshot of %s; left as it is" % (stamp, site)
+        tmp = d / ".MANIFEST.new"
+        tmp.write_text("\n".join("tag=pre-update" if l == "tag=pre-import" else l for l in lines) + "\n")
+        os.replace(tmp, d / "MANIFEST")
+    except OSError as e:
+        return "the old site's snapshot %s could not be re-tagged (%s): it stays protected" % (stamp, e.strerror or e)
+    return "the old site's snapshot %s is now a pre-update snapshot: the normal retention ages it out" % stamp
+
+
 def undo(cfg, site, work, tools, out):
     """Put the site back as it was before the run: the tables, the copied files, the installed plugins and themes. Only what the record names."""
     record = read_record(work)
     html = Path(cfg["data_mount"]) / "sites" / site / "html"
+    if "replace" in record:      # present in any form: a falsy or damaged entry is refused there, never read as "no replace"
+        return undo_replace(cfg, site, record, tools, out)
     if record.get("db_loaded"):
         drop_all_tables(site, tools)
         out("dropped the tables of %s" % site)
@@ -977,6 +1053,28 @@ def undo(cfg, site, work, tools, out):
         out("swept %d more path(s) that appeared under wp-content during the import (files the plugins made when they first ran, upgrade directories)" % n)
     elif before is None and "tree_before" in record:
         out("wp-content was too big to snapshot: only what this run copied or installed was removed")
+    drop_own_snapshots(cfg, site, record, out)
+
+
+def undo_replace(cfg, site, record, tools, out):
+    """Undo an import made with --replace. The old site is in the pre-import snapshot, so there is nothing to undo by manifest: wp-site-recover puts the database and wp-content back from it (and
+    proves WordPress boots). Without a wipe, nothing of the old site was touched. If the recover fails, NOTHING is removed: the snapshot is the only copy, and the work directory stays."""
+    rep = record.get("replace")
+    stamp = rep.get("snapshot") if isinstance(rep, dict) else None
+    if (not isinstance(rep, dict) or set(rep) != {"snapshot", "wiped"} or not isinstance(rep["wiped"], bool)
+            or not (stamp is None or (isinstance(stamp, str) and STAMP_RE.match(stamp)))):
+        raise Refuse("the record's replace entry is damaged: it cannot be undone from here. Nothing was changed. The old site, if it was snapshotted, is under %s/%s" % (cfg["backup_dir"], site))
+    if rep.get("wiped") is True:
+        if stamp is None:
+            raise Refuse("the old site was wiped but no snapshot is recorded: it cannot be put back from here. Nothing was changed")
+        ok, rout = tools.call(tools.bin("wp-site-recover"), site, stamp, "--yes", "--no-undo")
+        if not ok:
+            raise Refuse("putting the old site back from snapshot %s failed (%s). The snapshot is untouched and the work directory stays; run by hand: wp-site-recover %s %s --yes --no-undo, then reset again"
+                         % (stamp, w.printable(rout[-300:], limit=300), site, stamp))
+        out("the old %s is back from snapshot %s" % (site, stamp))
+    else:
+        out("the old %s was not touched" % site)
+    drop_snapshots(cfg, site, [stamp] if stamp else [], "pre-import", out)
     drop_own_snapshots(cfg, site, record, out)
 
 
@@ -1072,20 +1170,20 @@ def tty_ask(prompt):
         return t.readline()
 
 
-USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
+USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan] [--replace]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
          "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress> [--if-present]\n"
          "       wp-site-import resolve <token>            (a signed token from the phone: approve a clean import, or deny)")
 
 
 def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which, stdin=None, clock=time.time, post=None):
-    flags = {"--plan", "--accept-failures", "--if-present"}
+    flags = {"--plan", "--accept-failures", "--if-present", "--replace"}
     args = [x for x in argv if x not in flags]
     reject = []
     if "--reject" in args:
         i = args.index("--reject")
         reject = [x for x in (args[i + 1] if i + 1 < len(args) else "").split(",") if x]
         args = args[:i] + args[i + 2:]
-    plan_only, accept, if_present = "--plan" in argv, "--accept-failures" in argv, "--if-present" in argv
+    plan_only, accept, if_present, replace = "--plan" in argv, "--accept-failures" in argv, "--if-present" in argv, "--replace" in argv
     tools = Tools(cfg, run, popen, chown, which, clock, post)
     raw_out = out
 
@@ -1099,7 +1197,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         except OSError:
             raise Refuse("another import is running")
         command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") else "import"
-        if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard"):
+        if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard") or (replace and command != "import"):
             out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped
             return 2
         if args[:1] == ["reset"] and len(args) == 2:
@@ -1117,7 +1215,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") or reject or accept:
             out(USAGE)
             return 2
-        return run_import(cfg, args[0], args[1], plan_only, get, tools, out)
+        return run_import(cfg, args[0], args[1], plan_only, get, tools, out, replace, ask)
     except Refuse as e:
         out("wp-site-import: %s" % e)
         return 2

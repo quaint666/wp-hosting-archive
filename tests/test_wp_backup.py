@@ -351,6 +351,25 @@ class Backup(Base):
         for stray in ("notes", "20260101", "20260101T000000Z.keep", "important.txt"):
             self.assertTrue((self.backups / "wptest" / stray).exists(), stray + " is not a snapshot and must never be deleted")
 
+    def test_a_pre_import_snapshot_is_tagged_and_is_never_pruned(self):
+        r = self.backup("20261001T020000Z", "--tag=pre-import")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("tag=pre-import", (self.backups / "wptest" / "20261001T020000Z" / "MANIFEST").read_text())
+        self.assertIn("OK: snapshot 20261001T020000Z of wptest", r.stdout, "wp-site-import reads the stamp from this line")
+        for day in range(2, 30):
+            self.backup("202610%02dT031500Z" % day)
+            self.backup("202610%02dT041500Z" % day, "--tag=pre-update")
+        snaps = self.snapshots()
+        self.assertIn("20261001T020000Z", snaps, "the old site of an import that is still waiting must survive any number of nightly runs and pre-update snapshots")
+        self.assertLess(len(snaps), 20, "the other snapshots are still pruned")
+
+    def test_a_pre_import_backup_of_an_empty_site_is_refused(self):
+        self.empty_site()
+        r = self.backup("20261024T200300Z", "--tag=pre-import")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no wp_options table", r.stderr)
+        self.assertEqual(self.snapshots(), [])
+
     def test_a_pre_update_snapshot_is_tagged_and_is_pruned_on_its_own(self):
         r = self.backup("20261024T020000Z", "--tag=pre-update")
         self.assertEqual(r.returncode, 0, r.stderr)

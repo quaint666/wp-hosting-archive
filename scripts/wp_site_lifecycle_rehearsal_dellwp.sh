@@ -7,26 +7,29 @@
 #   3. deny      the import is turned down (your phone's Deny button, or wp_sites.py reset with --no-phone) and the site must be exactly as it was before the import, tables and files
 #   4. import    again, which also proves the file left by the first try is replaced
 #   5. approve   with the phone's Approve button (or wp_sites.py approve with --no-phone): held code copied in root-owned, the intake file and the work directory gone, still on hold
+#   5b. replace  (only with --with-replace) a second import onto the site that now has data, with --replace: the old site is snapshotted, wiped and the archive imported; you type the site name when
+#                the VM asks; a Deny must put the old site back exactly (tables, files, snapshots); then replace again and approve, and the old site's snapshot must be re-tagged pre-update
 #   6. operate   the verifier (wp_site_verify_dellwp.sh), wp-site-update --check, a backup, a restore drill, the checksums
 #   7. live      (only with --with-live, and it asks its own question) public through the tunnel, answers, and back to hold
 #   8. stop      a final backup, containers down, the paused page; then start: back on hold with the data
 #   9. delete    wp_sites.py delete (you type the name twice): the site is gone, its archive is on the VM, the repo says closed
 # It makes real commits to vars.yml (create, stop, start, delete: --commit) on your current branch, which must not be main, and leaves the site's tombstone there for good (a name is never reused).
 # The archive of the deleted site stays on the VM for 14 days. Options:  --site NAME (default rehearsal)  --existing (the site is already in wp_sites, empty and on hold: skip the create, e.g. after
-# a reset)  --file PATH (default wpress/*.wpress)  --no-phone  --with-live  --until PHASE
-# (create, import, deny, approve, operate, live, stop, delete: stop after that phase, leaving the site as it is)  --yes (do not ask before starting).
+# a reset)  --file PATH (default wpress/*.wpress)  --no-phone  --with-live  --with-replace  --until PHASE
+# (create, import, deny, approve, replace, operate, live, stop, delete: stop after that phase, leaving the site as it is)  --yes (do not ask before starting).
 # It stops at the first phase that fails badly and says how to clean up. What it does not prove: that the real Elementor or WooCommerce commands behave like the discovered names (the report says
 # what ran), that a friend's own plugin is safe, anything about the public path unless --with-live, or the 02:00 update timer.
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SITE=rehearsal; FILE=""; PHONE=yes; LIVE=no; UNTIL=delete; YES=no; EXISTING=no
-usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+SITE=rehearsal; FILE=""; PHONE=yes; LIVE=no; REPLACE=no; UNTIL=delete; YES=no; EXISTING=no
+usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case $1 in
     --site) SITE=${2:-}; shift 2 ;;
     --file) FILE=${2:-}; shift 2 ;;
     --no-phone) PHONE=no; shift ;;
     --with-live) LIVE=yes; shift ;;
+    --with-replace) REPLACE=yes; shift ;;
     --until) UNTIL=${2:-}; shift 2 ;;
     --yes) YES=yes; shift ;;
     --existing) EXISTING=yes; shift ;;
@@ -35,7 +38,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ $SITE =~ ^[a-z][a-z0-9-]{1,23}$ ]] || { echo "--site must be a site name: lowercase letters, digits and hyphens, 2 to 24 characters" >&2; exit 2; }
-case $UNTIL in create|import|deny|approve|operate|live|stop|delete) ;; *) echo "--until must be one of: create import deny approve operate live stop delete" >&2; exit 2 ;; esac
+case $UNTIL in create|import|deny|approve|replace|operate|live|stop|delete) ;; *) echo "--until must be one of: create import deny approve replace operate live stop delete" >&2; exit 2 ;; esac
 cd "$REPO" || exit 2
 if [ -z "$FILE" ]; then FILE=$(ls "$REPO"/wpress/*.wpress 2>/dev/null | head -n 1); fi
 [ -n "$FILE" ] && [ -f "$FILE" ] || { echo "no .wpress to import: give one with --file (wpress/*.wpress is where the practice file lives)" >&2; exit 2; }
@@ -279,6 +282,69 @@ hold_checks
 finish
 EOF
 stop_here approve
+
+if [ "$REPLACE" = yes ]; then
+  PHASE=replace; say "5b. replace: a second import onto the site that has data"
+  vmrun <<'EOF'
+tree > "$BASE.replace"; tables > "$BASE.replace.tables"; snaps > "$BASE.replace.snaps"
+ok "the site as it is now was recorded ($(wc -l < "$BASE.replace") paths, $(cat "$BASE.replace.tables") tables, $(cat "$BASE.replace.snaps") snapshot(s)) to compare after a deny"
+finish
+EOF
+  for ROUND in deny approve; do
+    echo "   Round: $ROUND. The VM will ask you to type the site name ($SITE) before it wipes anything."
+    python3 scripts/wp_sites.py import "$SITE" "$FILE" --replace --yes; RC=$?
+    [ "$RC" = 0 ] && bump 0 "the replace import ($ROUND round) finished with the report" || fatal "the replace import exited $RC: read the report above"
+    [ "$PHONE" = no ] || echo "   (the notification is already on your phone: do NOT tap it yet; the checks read the import and a tap removes it. The script says when to tap.)"
+    vmrun <<'EOF'
+check "the work directory exists" "$([ -e "$WORK" ] && echo yes || echo no)" yes
+check "the old site's snapshot is tagged pre-import (exactly one)" "$(grep -lx 'tag=pre-import' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)" 1
+has "the archive's data is loaded (tables)" "$(tables)"
+check "the old site's files are gone from wp-content (the replaced tree differs)" "$(tree | diff - "$BASE.replace" >/dev/null && echo same || echo different)" different
+check "the record says the old site was wiped and names its snapshot" "$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))["replace"]; print(r["wiped"] is True and bool(r["snapshot"]))' "$WORK/PLAN.json" 2>/dev/null)" True
+hold_checks
+finish
+EOF
+    if [ "$ROUND" = deny ]; then
+      if [ "$PHONE" = yes ]; then
+        echo "   Tap DENY on the notification now (waiting up to 10 minutes)."
+        waitgone 600; bump $? "the work directory is gone after the tap" || fatal "no decision arrived"
+        confirmed "A message 'Phone decision done: ...' arrived on the phone after the replace Deny"
+      else
+        python3 scripts/wp_sites.py reset "$SITE"; bump $? "wp_sites.py reset (type the name when asked)" || fatal "reset failed"
+      fi
+      vmrun <<'EOF'
+check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
+check "the old site's tables are back" "$(tables)" "$(cat "$BASE.replace.tables")"
+check "the old site's files are back, exactly (paths, owners, modes)" "$(tree | diff - "$BASE.replace" >/dev/null && echo same || echo different)" same
+tree | diff - "$BASE.replace" | head -n 20 | sed 's/^/   (diff, < now, > before) /' || true
+check "the site's snapshots are as before (nothing left over)" "$(snaps)" "$(cat "$BASE.replace.snaps")"
+check "no pre-import snapshot is left" "$(grep -lx 'tag=pre-import' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)" 0
+check "the stored siteurl is this site's" "$(stored siteurl)" "https://$HOST"
+hold_checks
+finish
+EOF
+    else
+      if [ "$PHONE" = yes ]; then
+        echo "   Tap APPROVE now (waiting up to 10 minutes)."
+        waitgone 600; bump $? "the work directory is gone after the tap" || fatal "no decision arrived"
+        confirmed "A message 'Phone decision done: ...' arrived on the phone after the replace Approve"
+      else
+        python3 scripts/wp_sites.py approve "$SITE" --yes; bump $? "wp_sites.py approve" || fatal "approve failed"
+      fi
+      vmrun <<'EOF'
+check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
+has "the new data is loaded (tables)" "$(tables)"
+check "no pre-import snapshot is left (the old site's is a pre-update one now)" "$(grep -lx 'tag=pre-import' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)" 0
+has "the old site's snapshot is kept, tagged pre-update" "$(grep -lx 'tag=pre-update' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)"
+check "the plugins directory is root's" "$(stat -c %u "$DIR/html/wp-content/plugins")" 0
+check "no PHP file over 64 bytes under uploads" "$(find "$DIR/html/wp-content/uploads" -type f -iname '*.php*' -size +64c 2>/dev/null | wc -l)" 0
+hold_checks
+finish
+EOF
+    fi
+  done
+  stop_here replace
+fi
 
 PHASE=operate; say "6. operate the site"
 bash scripts/wp_site_verify_dellwp.sh "$SITE" | tail -n 4; bump "${PIPESTATUS[0]}" "the verifier ends with 0 failed checks" || true

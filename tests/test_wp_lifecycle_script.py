@@ -79,12 +79,23 @@ class Syntax(unittest.TestCase):
 
     def test_the_phone_is_told_not_to_tap_before_the_import_checks_have_read_the_import(self):
         line = "do NOT tap it yet"
-        self.assertEqual(TEXT.count(line), 2)
+        self.assertEqual(TEXT.count(line), 3, "after each import: the first, the second, and the replace rounds")
         for phase, nxt in (("PHASE=import1", "PHASE=deny"), ("PHASE=import2", "PHASE=approve")):
             a, b = TEXT.index(phase), TEXT.index(nxt)
             seg = TEXT[a:b]
             self.assertIn(line, seg, phase)
             self.assertLess(seg.index(line), seg.index("vmrun <<"), phase)
+
+    def test_the_replace_phase_sits_between_approve_and_operate_and_only_runs_when_asked(self):
+        a, b = TEXT.index("PHASE=approve"), TEXT.index("PHASE=operate")
+        self.assertTrue(a < TEXT.index("PHASE=replace") < b)
+        self.assertIn('if [ "$REPLACE" = yes ]; then', TEXT)
+        seg = TEXT[TEXT.index("PHASE=replace"):b]
+        self.assertIn('python3 scripts/wp_sites.py import "$SITE" "$FILE" --replace --yes', seg)
+        self.assertEqual(seg.count("do NOT tap it yet"), 1, "inside the loop: once per round")
+        self.assertLess(seg.index("do NOT tap it yet"), seg.index("vmrun <<'EOF'\ncheck \"the work directory exists\""))
+        for needle in ("tag=pre-import", "tag=pre-update", '"$(snaps)" "$(cat "$BASE.replace.snaps")"', '"$(tables)" "$(cat "$BASE.replace.tables")"', "paths, owners, modes", "stop_here replace"):
+            self.assertIn(needle, seg)
 
     def test_a_deny_is_checked_for_the_snapshot_the_import_took(self):
         before, deny = TEXT.index('snaps > "$BASE.snaps"'), TEXT.index('check "the snapshot the import took is gone again')
@@ -238,6 +249,19 @@ class Flow(Harness):
         # the stand-in cannot make the repo say closed, so that last check is the one that fails, and only it
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("FAIL: the repo says 'life' is closed", r.stdout)
+
+    def test_with_replace_it_imports_twice_more_denies_then_approves_in_that_order(self):
+        r = self.run_script("--yes", "--no-phone", "--with-replace", "--site", "life", "--until", "replace")
+        imp = "wp_sites.py import life %s/wpress/practice.wpress" % self.repo
+        self.assertEqual(self.sites_calls(), [
+            "wp_sites.py create --name life --no-install --policy notify --yes --commit", imp + " --yes", "wp_sites.py reset life", imp + " --yes", "wp_sites.py approve life --yes",
+            imp + " --replace --yes", "wp_sites.py reset life", imp + " --replace --yes", "wp_sites.py approve life --yes"])
+        self.assertIn("Stopped after 'replace' as asked", r.stdout)
+        self.assertIn("Round: deny", r.stdout); self.assertIn("Round: approve", r.stdout)
+
+    def test_without_with_replace_the_replace_phase_never_runs(self):
+        r = self.run_script("--yes", "--no-phone", "--site", "life", "--until", "approve")
+        self.assertNotIn("--replace", " ".join(self.sites_calls())); self.assertNotIn("5b.", r.stdout)
 
     def test_existing_skips_the_create_and_goes_on_with_the_import(self):
         vars_path = self.repo / "host_vars/dellwp/vars.yml"

@@ -11,6 +11,7 @@ import fcntl
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -92,6 +93,7 @@ class FakeHost:
         self.stored_urls = None
         self.runtime_files, self.runtime_done, self.stale_update_state, self.update_rows_absent = [], False, False, False
         self.backups, self.backup_n = None, 0      # a directory: wp-site-backup then leaves a snapshot in it, as the real one does
+        self.wipes, self.recovered, self.stash, self.stash_tables = 0, [], None, 0
 
     def which(self, name):
         return self.clam if name == "clamscan" else None
@@ -123,9 +125,18 @@ class FakeHost:
                 stamp = "20261025T%06dZ" % (100000 + self.backup_n)
                 snap = self.backups / cmd[1] / stamp
                 snap.mkdir(parents=True)
-                (snap / "MANIFEST").write_text("site=%s\nstamp=%s\ncore=7.1.3\n" % (cmd[1], stamp))
+                tag = "".join("tag=%s\n" % a[6:] for a in cmd[2:] if a.startswith("--tag="))
+                (snap / "MANIFEST").write_text("site=%s\nstamp=%s\ncore=7.1.3\n%s" % (cmd[1], stamp, tag))
                 (self.backups / cmd[1] / ".last-success").write_text(stamp + "\n")
                 text = "OK: snapshot %s of %s (12 KiB on disk, core 7.1.3)" % (stamp, cmd[1])
+            return Done(rc, text, "")
+        if name == "wp-site-recover":
+            rc, text = self.fail.get("recover", (0, "recovered"))
+            self.recovered.append(cmd[1:])
+            if rc == 0 and self.stash is not None:      # the old site comes back: its files and its tables
+                shutil.rmtree(self.html / "wp-content")
+                shutil.copytree(self.stash, self.html / "wp-content", symlinks=True)
+                self.tables = self.stash_tables
             return Done(rc, text, "")
         if name == "clamscan":
             rc, text = self.fail.get("clam", (0, ""))
@@ -133,7 +144,18 @@ class FakeHost:
         raise AssertionError("an unexpected command: %r" % (cmd,))
 
     def docker(self, cmd, kw):
+        if cmd[1] == "run":      # wp-content reset to the image's (--replace)
+            if "run" in self.fail:
+                return Done(*self.fail["run"])
+            self.wipes += 1
+            wc = self.html / "wp-content"
+            shutil.rmtree(wc)
+            for d in ("plugins/akismet", "themes", "languages", "uploads"):
+                (wc / d).mkdir(parents=True)
+            return Done(0)
         if "-i" in cmd:   # the drop of the tables
+            if "drop" in self.fail:
+                return Done(*self.fail["drop"])
             self.dropped = kw["input"]
             self.tables = 0
             return Done(0)
@@ -621,6 +643,222 @@ class OwnSnapshot(Base):
         code, text = self.run_main(["approve", "wptest"])
         self.assertEqual(code, 0, text)
         self.assertEqual(len(self.snaps()), 2)
+
+
+class ReplaceImport(Base):
+    """--replace: a newer archive onto a site that already has data. The old site is snapshotted first (tag pre-import), wiped, and the archive imported; a deny puts the old site back through
+    wp-site-recover; an approve keeps the snapshot as a pre-update one."""
+    def setUp(self):
+        super().setUp()
+        (self.html / "wp-content/uploads/old-photo.jpg").write_bytes(b"old")
+        (self.html / "wp-content/plugins/old-plugin").mkdir()
+        (self.html / "wp-content/plugins/old-plugin/old.php").write_text("<?php // old\n")
+        self.host.tables = 57
+        self.host.stash = self.tmp / "old-wp-content"      # what wp-site-recover (a stand-in) puts back
+        shutil.copytree(self.html / "wp-content", self.host.stash, symlinks=True)
+        self.host.stash_tables = 57
+        self.before = self.tree(self.html)
+
+    def replace(self, **kw):
+        self.archive(**kw)
+        return self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: "wptest\n")
+
+    def snaps(self):
+        return sorted(p.name for p in (self.host.backups / "wptest").iterdir() if p.is_dir())
+
+    def test_an_import_onto_a_site_with_data_is_refused_and_points_at_replace(self):
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2); self.assertIn("--replace", text); self.assertIn("is not empty", text)
+        self.assertEqual(self.tree(self.html), self.before)
+
+    def test_replace_on_a_site_without_data_is_refused(self):
+        self.host.tables = 0
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 2); self.assertIn("nothing to replace", text)
+        self.assertFalse((self.intake / "work-wptest").exists())
+
+    def test_the_site_name_must_be_typed_and_nothing_happens_without_it(self):
+        self.archive()
+        for answer in ("", "no\n", "WPTEST\n", "wptest2\n"):
+            code, text = self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p, a=answer: a)
+            self.assertEqual(code, 2, answer); self.assertIn("nothing was changed", text)
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace"])
+        self.assertEqual(code, 2, "no way to ask is a no")
+        self.assertEqual(self.tree(self.html), self.before)
+        self.assertFalse((self.intake / "work-wptest").exists()); self.assertEqual(self.host.wipes, 0); self.assertEqual(self.snaps(), [])
+
+    def test_the_prompt_says_what_will_happen(self):
+        self.archive()
+        seen = []
+        self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: seen.append(p) or "wptest\n")
+        self.assertEqual(len(seen), 1)
+        for word in ("REPLACES everything of wptest", "snapshot", "deny puts it back", "Type the site name"):
+            self.assertIn(word, seen[0])
+
+    def test_the_plan_alone_asks_nothing_and_writes_nothing(self):
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace", "--plan"], ask=lambda p: self.fail("asked"))
+        self.assertEqual(code, 0, text); self.assertIn("PLAN ONLY", text)
+        self.assertEqual(self.tree(self.html), self.before); self.assertEqual(self.snaps(), []); self.assertEqual(self.host.wipes, 0)
+
+    def test_the_old_site_is_snapshotted_before_anything_is_wiped_and_the_archive_replaces_it(self):
+        code, text = self.replace()
+        self.assertEqual(code, 0, text)
+        names = [os.path.basename(c[0]) for c in self.host.calls]
+        i_backup = next(i for i, c in enumerate(self.host.calls) if os.path.basename(c[0]) == "wp-site-backup")
+        self.assertEqual(self.host.calls[i_backup][1:], ["wptest", "--tag=pre-import", "--force"])
+        i_drop = next(i for i, c in enumerate(self.host.calls) if c[0] == "docker" and "-i" in c)
+        i_wipe = next(i for i, c in enumerate(self.host.calls) if c[0] == "docker" and c[1] == "run")
+        self.assertLess(i_backup, i_drop); self.assertLess(i_drop, i_wipe)
+        self.assertEqual(names.count("wp-site-backup"), 2, "the safety snapshot and the import's own first backup")
+        self.assertFalse((self.html / "wp-content/uploads/old-photo.jpg").exists()); self.assertFalse((self.html / "wp-content/plugins/old-plugin").exists())
+        self.assertEqual((self.html / "wp-content/uploads/2026/10/a.jpg").read_bytes(), b"J" * 300, "the archive's content is in")
+        self.assertEqual(self.host.tables, 57); self.assertIn(b"SERVMASK", b"SERVMASK" + self.host.sql)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertEqual(rec["replace"]["wiped"], True); self.assertRegex(rec["replace"]["snapshot"], r"^\d{8}T\d{6}Z$")
+        self.assertIn("REPLACE: the old data of wptest is in snapshot " + rec["replace"]["snapshot"], text)
+        manifest = (self.host.backups / "wptest" / rec["replace"]["snapshot"] / "MANIFEST").read_text()
+        self.assertIn("tag=pre-import", manifest)
+
+    def test_a_snapshot_that_cannot_be_taken_stops_before_anything_is_touched(self):
+        self.host.fail["backup"] = (1, "no space left")
+        code, text = self.replace()
+        self.assertEqual(code, 2); self.assertIn("safety snapshot", text); self.assertIn("nothing was changed", text)
+        self.assertEqual(self.host.wipes, 0); self.assertEqual(self.host.dropped, "")
+        self.assertEqual(self.tree(self.html), self.before)
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text); self.assertIn("was not touched", text); self.assertEqual(self.host.recovered, [])
+        self.assertFalse((self.intake / "work-wptest").exists())
+
+    def test_reset_after_a_replace_puts_the_old_site_back_and_removes_the_snapshots(self):
+        code, text = self.replace()
+        self.assertEqual(code, 0, text)
+        stamp = json.loads((self.intake / "work-wptest/PLAN.json").read_text())["replace"]["snapshot"]
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self.host.recovered, [["wptest", stamp, "--yes", "--no-undo"]])
+        self.assertEqual(self.tree(self.html), self.before, "the site is exactly as it was")
+        self.assertEqual(self.host.tables, 57)
+        self.assertEqual(self.snaps(), [], "the safety snapshot and the import's own first backup are both gone")
+        self.assertFalse((self.host.backups / "wptest/.last-success").exists())
+        self.assertFalse((self.intake / "work-wptest").exists())
+        self.assertIn("the old wptest is back from snapshot " + stamp, text)
+
+    def test_the_manifest_undo_is_not_used_for_a_replace(self):
+        self.replace()
+        before_calls = len(self.host.calls)
+        self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        later = self.host.calls[before_calls:]
+        self.assertFalse([c for c in later if c[0] == "docker" and "-i" in c], "no table is dropped by the reset: the recover replaces them")
+
+    def test_a_recover_that_fails_removes_nothing(self):
+        self.replace()
+        stamp = json.loads((self.intake / "work-wptest/PLAN.json").read_text())["replace"]["snapshot"]
+        self.host.fail["recover"] = (1, "database container is not healthy")
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 2); self.assertIn("failed", text); self.assertIn("wp-site-recover wptest %s --yes --no-undo" % stamp, text)
+        self.assertTrue((self.intake / "work-wptest").is_dir(), "the work directory stays so reset can be run again")
+        self.assertIn(stamp, self.snaps(), "the old site's snapshot is the only copy: it stays")
+        self.host.fail.pop("recover")
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text); self.assertEqual(self.tree(self.html), self.before)
+
+    def test_a_wipe_that_fails_half_way_is_undone_from_the_snapshot(self):
+        self.host.fail["run"] = (1, "docker: no space left on device")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 2); self.assertIn("could not be reset", text); self.assertIn("reset wptest", text)
+        self.assertEqual(self.host.tables, 0, "the tables were already dropped")
+        self.host.fail.pop("run")
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(self.host.recovered), 1)
+        self.assertEqual(self.tree(self.html), self.before); self.assertEqual(self.host.tables, 57); self.assertEqual(self.snaps(), [])
+
+    def test_approve_keeps_the_old_sites_snapshot_but_as_an_ordinary_pre_update_one(self):
+        self.replace()
+        stamp = json.loads((self.intake / "work-wptest/PLAN.json").read_text())["replace"]["snapshot"]
+        code, text = self.run_main(["approve", "wptest"])
+        self.assertEqual(code, 0, text)
+        manifest = (self.host.backups / "wptest" / stamp / "MANIFEST").read_text()
+        self.assertIn("tag=pre-update", manifest); self.assertNotIn("tag=pre-import", manifest)
+        self.assertIn("site=wptest", manifest)
+        self.assertIn("now a pre-update snapshot", text)
+        self.assertFalse((self.host.backups / "wptest" / stamp / ".MANIFEST.new").exists())
+
+    def test_a_record_that_has_been_tampered_with_cannot_make_the_tool_touch_other_paths(self):
+        self.replace()
+        victim = self.host.backups / "other"
+        victim.mkdir()
+        (victim / "MANIFEST").write_text("site=wptest\ntag=pre-import\n")
+        p = self.intake / "work-wptest/PLAN.json"
+        for bad in ({"snapshot": "../other", "wiped": True}, {"snapshot": "20261025T1Z", "wiped": True}, "yes", ["x"], {"snapshot": 7, "wiped": True}, {"snapshot": None, "wiped": True},
+                    None, {}, "", 0, [], {"snapshot": None}, {"wiped": True}, {"snapshot": None, "wiped": "yes"}, {"snapshot": None, "wiped": False, "extra": 1}):
+            rec = json.loads(p.read_text()); rec["replace"] = bad; p.write_text(json.dumps(rec))
+            n = len(self.host.recovered)
+            code, text = self.run_main(["reset", "wptest"], ask=lambda q: "wptest\n")
+            self.assertEqual(code, 2, bad); self.assertEqual(len(self.host.recovered), n, bad)
+            self.assertTrue((victim / "MANIFEST").exists(), bad); self.assertTrue(p.exists(), bad)
+
+    def test_a_drop_that_fails_after_the_wipe_began_is_undone_from_the_snapshot(self):
+        self.host.fail["drop"] = (1, "ERROR 1051: could not drop")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 2)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertTrue(rec["replace"]["wiped"], "the wipe is recorded before it starts")
+        self.host.fail.pop("drop")
+        code, text = self.run_main(["reset", "wptest"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 0, text); self.assertEqual(len(self.host.recovered), 1); self.assertEqual(self.tree(self.html), self.before)
+
+    def test_the_intent_is_on_disk_before_the_snapshot_is_taken(self):
+        orig = self.host.run
+
+        def boom(cmd, **kw):
+            if os.path.basename(cmd[0]) == "wp-site-backup":
+                raise OSError("the machine went away")
+            return orig(cmd, **kw)
+        self.host.run = boom
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress", "--replace"], ask=lambda p: "wptest\n")
+        self.assertEqual(code, 2)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertEqual(rec["replace"], {"snapshot": None, "wiped": False})
+
+    def test_approve_leaves_a_snapshot_that_is_not_pre_import_exactly_as_it_is(self):
+        self.replace()
+        p = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(p.read_text())
+        mf = self.host.backups / "wptest" / rec["replace"]["snapshot"] / "MANIFEST"
+        mf.write_text("site=wptest\nstamp=x\ntag=final\n")
+        code, text = self.run_main(["approve", "wptest"])
+        self.assertEqual(code, 0, text); self.assertIn("is not a pre-import snapshot", text)
+        self.assertEqual(mf.read_text(), "site=wptest\nstamp=x\ntag=final\n")
+
+    def test_the_old_data_does_not_count_against_the_quota_because_it_is_wiped_first(self):
+        (self.html / "wp-content/uploads/big-old.bin").write_bytes(b"x" * (3 << 20))
+        shutil.rmtree(self.host.stash)
+        shutil.copytree(self.html / "wp-content", self.host.stash, symlinks=True)
+        self.cfg["sites"]["wptest"]["quota_mb"] = 2
+        code, text = self.replace()
+        self.assertEqual(code, 0, text)
+
+    def test_replace_belongs_to_the_import_command_only(self):
+        for argv in (["reset", "wptest", "--replace"], ["approve", "wptest", "--replace"], ["discard", "friend.wpress", "--replace"], ["report", "wptest", "--replace"]):
+            code, text = self.run_main(argv)
+            self.assertEqual(code, 2, argv); self.assertIn("usage:", text)
+
+    def test_a_second_replace_after_the_first_was_approved_works_again(self):
+        self.assertEqual(self.replace()[0], 0)
+        self.assertEqual(self.run_main(["approve", "wptest"])[0], 0)
+        self.host.tables = 57
+        (self.html / "wp-content/uploads/second.jpg").write_bytes(b"2")
+        code, text = self.replace()
+        self.assertEqual(code, 0, text)
+        self.assertFalse((self.html / "wp-content/uploads/second.jpg").exists())
+        self.assertEqual(sum(1 for n in self.snaps() if (self.host.backups / "wptest" / n / "MANIFEST").read_text().count("tag=pre-import")), 1)
 
 
 class TreeRestored(Base):

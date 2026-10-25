@@ -929,6 +929,29 @@ class Importing(Base):
         self.assertIn("approve wptest", self.text())
         self.assertEqual(self.vars.read_text(), self.original, "an import edits no file")
 
+    def test_replace_passes_the_flag_to_the_vm_and_asks_its_own_question(self):
+        rc = self.sites().import_site("wptest", str(self.f), yes=True, replace=True)
+        self.assertEqual(rc, 0, self.text())
+        self.assertEqual([c for c in self.calls if c[0] == "ssh"][2], ["ssh", "-t", "dellwp", "sudo wp-site-import wptest friend.wpress --replace"])
+        self.answers = ["n"]
+        self.calls.clear()
+        rc = self.sites().import_site("wptest", str(self.f), replace=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("REPLACE everything of wptest", self.text()); self.assertIn("a deny puts it back", self.text()); self.assertIn("type the name", self.text())
+        self.assertFalse(self.ssh(), "nothing is sent when the answer is no")
+
+    def test_the_flag_is_absent_without_replace(self):
+        self.sites().import_site("wptest", str(self.f), yes=True)
+        self.assertNotIn("--replace", " ".join(self.ssh()))
+
+    def test_the_command_line_has_replace_on_import_only(self):
+        parser = w.build_parser()
+        self.assertTrue(parser.parse_args(["import", "wptest", "f.wpress", "--replace"]).replace)
+        self.assertFalse(parser.parse_args(["import", "wptest", "f.wpress"]).replace)
+        for cmd in (["approve", "wptest", "--replace"], ["reset", "wptest", "--replace"]):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(cmd)
+
     def test_the_preflight_is_shown_and_asked_before_anything_is_copied(self):
         self.answers = ["n"]
         rc = self.sites().import_site("wptest", str(self.f))

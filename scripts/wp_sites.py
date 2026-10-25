@@ -564,7 +564,7 @@ class Sites:
             raise Refuse("%s is closed (a tombstone); there is nothing to import into" % site)
         return cur
 
-    def import_site(self, site, file, yes=False):
+    def import_site(self, site, file, yes=False, replace=False):
         """Check the archive here, send it to the VM's intake directory (over ssh, hash compared), then run wp-site-import there. Edits no file; nothing is public."""
         cur = self.live_site(site)
         if cur["state"] != "hold":
@@ -585,7 +585,10 @@ class Sites:
         if nogo:
             raise Refuse("the preflight says NO-GO; nothing was copied")
         size = f.stat().st_size
-        if not yes and not self.confirm("Copy %s (%d MB) to the VM and import it into %s? The site stays on hold; nothing becomes public." % (f.name, size // (1 << 20), site)):
+        question = ("Copy %s (%d MB) to the VM and import it into %s? The site stays on hold; nothing becomes public." % (f.name, size // (1 << 20), site) if not replace else
+                    "Copy %s (%d MB) to the VM and use it to REPLACE everything of %s (the old site is snapshotted first, and a deny puts it back)? The VM asks you to type the name before it wipes anything."
+                    % (f.name, size // (1 << 20), site))
+        if not yes and not self.confirm(question):
             self.out("Nothing was copied.")
             return 1
         h = hashlib.sha256()
@@ -607,7 +610,7 @@ class Sites:
             raise Refuse("the copy on the VM does not match the file here (here %s, %d bytes; the VM said %s). It was removed from the intake directory; run this again."
                          % (digest[:16], size, (m.group(0)[:90] if m else "nothing I could read")))
         self.out("Copied and verified (sha256 %s..., %d bytes). Importing on the VM ..." % (digest[:16], size))
-        rc, _ = self.run(["ssh", "-t", HOST, "sudo wp-site-import " + " ".join(shlex.quote(x) for x in (site, f.name))])
+        rc, _ = self.run(["ssh", "-t", HOST, "sudo wp-site-import " + " ".join(shlex.quote(x) for x in (site, f.name) + (("--replace",) if replace else ()))])
         if rc == 0:
             self.out("\nThe report is above. If you accept it: python3 scripts/wp_sites.py approve %s     to undo it: python3 scripts/wp_sites.py reset %s" % (site, site))
         elif rc == 1:
@@ -825,6 +828,8 @@ def build_parser():
     im.add_argument("site", help="the site's name, as in wp_sites; it must be on hold")
     im.add_argument("file", help="the .wpress file on this machine (letters, digits, . _ - in its name)")
     im.add_argument("--yes", action="store_true", help="do not ask before copying the file to the VM")
+    im.add_argument("--replace", action="store_true", help="the site already has data (an earlier import, approved): snapshot it, wipe it and import this archive instead. The VM asks you to type the site name; "
+                                                            "reset or a Deny puts the old site back from the snapshot; approve keeps the snapshot as a pre-update one")
     rp = sub.add_parser("report", formatter_class=fmt, help="show the report of an import that is waiting for approval", description="Print the report of the import waiting for approval on a site.")
     rp.add_argument("site", help="the site's name, as in wp_sites")
     ap2 = sub.add_parser("approve", formatter_class=fmt, help="approve an import: copy the held-back code in and delete the intake file",
@@ -857,7 +862,7 @@ def main(argv=None, repo=REPO, ask=input, run=None, out=print):
         if a.cmd == "create":
             return s.create(a.name, a.state, a.policy, a.title, a.user, a.email, a.set, a.yes, a.yes_public, a.no_run, a.commit, install=not a.no_install)
         if a.cmd == "import":
-            return s.import_site(a.site, a.file, a.yes)
+            return s.import_site(a.site, a.file, a.yes, a.replace)
         if a.cmd == "report":
             return s.report(a.site)
         if a.cmd == "approve":
