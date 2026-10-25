@@ -1093,6 +1093,13 @@ class Scan(Base):
         self.assertIn("known vulnerabilities: FOUND: plugin elementor 4.2.3", text)
         self.assertIn("CVE-2026-1111", text)
 
+    def test_several_findings_become_one_line_with_a_count_and_the_start_of_each(self):
+        self.host.fail["vuln"] = (1, "\n".join("plugin woocommerce 11.0.1: Finding number %d - %s (CVE-2026-%04d, CVSS 7.5, fixed in 11.2.0)" % (i, "x" * 200, i) for i in range(1, 6)))
+        text = self.import_ok()
+        line = next(l for l in text.splitlines() if l.startswith("  known vulnerabilities:"))
+        self.assertIn("FOUND: 5 finding(s): plugin woocommerce 11.0.1: Finding number 1", line)
+        self.assertIn("| plugin woocommerce 11.0.1: Finding number 3", line); self.assertNotIn("Finding number 4", line); self.assertIn("... 2 more", line)
+
     def test_a_feed_that_is_not_set_up_says_so(self):
         text = self.import_ok()
         self.assertIn("known vulnerabilities: NOT RUN: no feed key", text)

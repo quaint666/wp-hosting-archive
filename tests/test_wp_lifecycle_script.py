@@ -392,7 +392,7 @@ class Flow(Harness):
 
     def test_no_approve_button_on_a_clean_import_is_a_failure_and_falls_back_to_the_terminal(self):
         # answers: go on; a notification arrived; Deny's message arrived; no Approve button
-        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\nn\n")
+        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\nn\n", env=dict(self.env, SSH_FAIL_ON="known vulnerabilities: FOUND"))     # the report has none
         verbs = [c.split()[1] for c in self.sites_calls()]
         self.assertEqual(verbs, ["create", "import", "import", "approve"], r.stdout)
         self.assertIn("FAIL: no Approve button on a clean import", r.stdout)
@@ -400,8 +400,19 @@ class Flow(Harness):
         self.assertNotIn("Tap APPROVE now", r.stdout)
         self.assertNotEqual(r.returncode, 0)
 
+    def test_known_vulnerabilities_in_the_report_mean_no_button_by_design_and_no_failure(self):
+        # the stand-in ssh says yes to every check, including "does the report list known vulnerabilities"
+        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\n")
+        verbs = [c.split()[1] for c in self.sites_calls()]
+        self.assertEqual(verbs, ["create", "import", "import", "approve"], r.stdout)
+        self.assertIn("so the notification has Deny only: that is the rule, not a fault", r.stdout)
+        self.assertIn("n/a: the report has known vulnerabilities", r.stdout)
+        self.assertNotIn("FAIL: no Approve button", r.stdout); self.assertNotIn("Tap APPROVE now", r.stdout)
+        self.assertNotIn("Did the second notification arrive with an Approve button", r.stdout, "it does not ask a question whose answer is known")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_an_approve_button_that_is_there_is_waited_for_and_never_pressed_for_you(self):
-        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\ny\ny\n")
+        r = self.run_script("--site", "life", "--until", "approve", stdin="y\ny\ny\ny\ny\n", env=dict(self.env, SSH_FAIL_ON="known vulnerabilities: FOUND"))
         verbs = [c.split()[1] for c in self.sites_calls()]
         self.assertEqual(verbs, ["create", "import", "import"], "with the button there, the tap does the approving")
         self.assertIn("Tap APPROVE now", r.stdout)

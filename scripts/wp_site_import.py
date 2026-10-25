@@ -690,7 +690,11 @@ def tool_scan(tools, name, args, clean_word):
     if rc == 0:
         return clean_word
     if rc == 1:
-        return "FOUND: " + out[-400:]
+        # one line for the report and the phone: how many, then the first few, each cut at its end (cutting the whole text from the front lost the start of the first one)
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        if len(lines) <= 1:
+            return "FOUND: " + (lines[0][:300] if lines else out[:300])
+        return "FOUND: %d finding(s): %s%s" % (len(lines), " | ".join(l[:120] for l in lines[:3]), " | ... %d more" % (len(lines) - 3) if len(lines) > 3 else "")
     if rc == 3 or rc == 127:
         return "NOT RUN: " + last[:200]
     return "FAILED to run (exit %d): %s" % (rc, last[:200])

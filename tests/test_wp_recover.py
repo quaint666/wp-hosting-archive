@@ -45,7 +45,12 @@ case "$1" in
         echo reseed >> "$SHIM/order"; [ -f "$SHIM/reseed_fail" ] && exit 1
         mkdir -p "$SITE/html/wp-includes"; printf "<?php\n\$wp_version = '%s';\n" "${IMAGE_CORE:-7.1.3}" > "$SITE/html/wp-includes/version.php"; exit 0 ;;
       *" core is-installed "*) [ -f "$SHIM/wp_not_installed" ] && exit 1; exit 0 ;;
-      *" user list "*) echo "${SHIM_USERS:-2}"; exit 0 ;;
+      *" user list "*)
+        echo "$args" >> "$SHIM/userlist.calls"
+        [ -n "${SHIM_NOISE:-}" ] && printf 'PHP Deprecated:  Creation of dynamic property\n#0: Elementor\\Core\\Logger\\Manager -> shutdown()\n'"'"',\n )]\n'
+        echo "${SHIM_USERS:-2}"
+        [ -n "${SHIM_NOISE_AFTER:-}" ] && printf 'Deprecated: after the answer\n'
+        exit 0 ;;
       *" core verify-checksums "*) echo verify >> "$SHIM/order"; [ -f "$SHIM/verify_fail" ] && exit 1; [ -f "$SHIM/verify_warn" ] && echo "Warning: File should not exist: x.php"; exit 0 ;;
       *" core download "*)
         echo "download $(echo "$args" | sed -n 's/.*--version=\([0-9.]*\).*/\1/p') root=$(case "$args" in *"--user 0:0"*) echo yes;; *) echo no;; esac)" >> "$SHIM/order"
@@ -215,6 +220,19 @@ class Recover(Base):
         (self.tmp / "shim" / "wp_not_installed").unlink()
         r = self.recover("--yes", SHIM_USERS="0")
         self.assertEqual(r.returncode, 1); self.assertIn("no users", r.stderr); self.assert_untouched()
+
+    def test_notices_a_plugin_prints_around_the_user_count_do_not_fail_the_restore(self):
+        for env in ({"SHIM_NOISE": "1"}, {"SHIM_NOISE_AFTER": "1"}, {"SHIM_NOISE": "1", "SHIM_NOISE_AFTER": "1"}):
+            r = self.recover("--yes", **env)
+            self.assertEqual(r.returncode, 0, "%s: %s" % (env, r.stderr))
+            self.assertNotIn("integer expression expected", r.stderr)
+
+    def test_the_user_count_is_read_without_plugins_or_themes_and_noise_cannot_hide_an_empty_site(self):
+        self.recover("--yes")
+        calls = self.log("userlist.calls")
+        self.assertIn("--skip-plugins", calls); self.assertIn("--skip-themes", calls)
+        r = self.recover("--yes", SHIM_USERS="0", SHIM_NOISE="1")
+        self.assertEqual(r.returncode, 1); self.assertIn("no users", r.stderr)
 
     def test_when_the_undo_fails_too_the_site_stays_in_maintenance_and_says_where_the_material_is(self):
         self.put("load_fail", "")

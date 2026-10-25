@@ -152,6 +152,11 @@ LIB
 vmtest() {      # the snippet's exit status is the answer
   { printf '%s\n' "$REMOTE_LIB"; cat; } | ssh dellwp "sudo -n env SITE=$SITE DOMAIN=$DOMAIN BIN=$BIN SITES=$SITES INTAKE=$INTAKE LISTEN=$LISTEN PROBE=$PROBE BDIR=$BDIR ARCH=$ARCH ADIR=$ADIR FILENAME=$FILENAME bash -s"
 }
+has_vulns() {    # does the waiting import's report list known vulnerabilities? Then the phone gets no Approve button, by design (unclean_reasons)
+  vmtest <<'EOF' >/dev/null 2>&1
+grep -q '^  known vulnerabilities: FOUND' "$WORK/REPORT.txt"
+EOF
+}
 vmrun() {       # the snippet's failures are added to the count
   vmtest
   local rc=$?; FAIL=$((FAIL + rc)); return 0
@@ -261,7 +266,12 @@ finish
 EOF
 
 PHASE=approve; say "5. approve"
-if [ "$PHONE" = yes ] && yn "Did the second notification arrive with an Approve button?"; then
+if has_vulns; then
+  echo "   The report lists known vulnerabilities (the practice archive carries old plugin versions), so the notification has Deny only: that is the rule, not a fault. Approving in the terminal."
+  echo "   (The phone's Approve path needs an archive without findings; this one cannot exercise it.)"
+  MANUAL+=("n/a: the report has known vulnerabilities, so no Approve button was expected; approved in the terminal")
+  python3 scripts/wp_sites.py approve "$SITE" --yes; bump $? "wp_sites.py approve" || fatal "approve failed"
+elif [ "$PHONE" = yes ] && yn "Did the second notification arrive with an Approve button?"; then
   MANUAL+=("yes: the second notification had an Approve button")
   echo "   Tap APPROVE now (waiting up to 10 minutes)."
   waitgone 600; bump $? "the work directory is gone after the tap" || fatal "no decision arrived"
@@ -330,11 +340,12 @@ hold_checks
 finish
 EOF
     else
-      if [ "$PHONE" = yes ]; then
+      if [ "$PHONE" = yes ] && ! has_vulns; then
         echo "   Tap APPROVE now (waiting up to 10 minutes)."
         waitgone 600; bump $? "the work directory is gone after the tap" || fatal "no decision arrived"
         confirmed "A message 'Phone decision done: ...' arrived on the phone after the replace Approve"
       else
+        has_vulns && echo "   (known vulnerabilities in the report: Deny only on the phone, by design; approving in the terminal)"
         python3 scripts/wp_sites.py approve "$SITE" --yes; bump $? "wp_sites.py approve" || fatal "approve failed"
       fi
       vmrun <<'EOF'
