@@ -10,7 +10,7 @@ error_log = /proc/self/stderr
 allow_url_include = Off
 ; The session upload-progress feature is the entry point of the PHP2Shell flaws (docs/handoff_wp_hosting_temp.md section 5); WordPress does not use it.
 session.upload_progress.enabled = 0
-open_basedir = /var/www/html:/tmp
+open_basedir = /var/www/html:{{ wp_mu_mount }}:/tmp
 ; sort: Ansible's difference filter returns a set operation's result, whose order changes from run to run; unsorted, this file would differ on every run.
 disable_functions = {{ wp_php_disable_functions | difference(wp_s.php_allow_functions) | sort | join(',') }}
 opcache.memory_consumption = {{ wp_s.opcache_mb }}

@@ -220,6 +220,9 @@ wp_vulnfeed_calendar: "*-*-* 04:20:00"
 #   two-factor: the Two Factor plugin (pinned in vars/wp.yml), required of the roles in wp_2fa_roles
 #   mail: mail_mode log (default; nothing leaves the site) or send (the provider's HTTPS API); the sender is <site>@wp_mail_sender_domain, the key is dellwp_wp_resend_key in host_vars/dellwp/vault_wp.yml
 wp_mu_dir: "{{ wp_data_mount }}/mu"
+# Where the php container sees it. Named in three places that must agree: the compose mount, WPMU_PLUGIN_DIR in wp-config.php and open_basedir in php.ini (without it PHP may not read the
+# directory, is_dir() says no, and WordPress loads NO must-use plugin and says nothing: seen on dellwp 2026-10-25).
+wp_mu_mount: /var/www/wp-mu
 wp_2fa_roles: "administrator,shop_manager"
 wp_login_limit_ip: 20
 wp_login_limit_user: 10

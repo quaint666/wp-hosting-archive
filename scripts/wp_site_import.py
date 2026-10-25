@@ -332,6 +332,7 @@ class Tools:
         self.cfg, self.popen, self.chown, self.which, self.clock, self.post = cfg, popen, chown, which, clock, post
         self.timeout = int(cfg["step_timeout_s"])
         self.run = lambda cmd, **kw: run(cmd, timeout=self.timeout, **kw)
+        self.timeline = []       # (seconds, short name) of every command the run asked for, for the report: a slow import should say where the time went
 
     def bin(self, name):
         return os.path.join(self.cfg["tools_bin"], name)
@@ -342,12 +343,15 @@ class Tools:
 
     def call_rc(self, *cmd):
         """(exit code, output). A command that is not there is 127, one that does not answer in time is 124."""
+        t0 = self.clock()
         try:
             p = self.run(list(cmd), capture_output=True, text=True, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return 124, "timed out after %d s" % self.timeout
         except FileNotFoundError:
             return 127, "%s is not installed" % os.path.basename(str(cmd[0]))
+        finally:
+            self.timeline.append((self.clock() - t0, (os.path.basename(str(cmd[0])) + " " + " ".join(str(a) for a in cmd[1:5]))[:80]))
         return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
 
     def cli(self, site, *args, plugins=False):
@@ -537,8 +541,14 @@ def clear_update_state(site, tools):
 def reset_wp_content(cfg, site, site_dir, tools):
     """wp-content as the image ships it and as site creation seeded it (tasks/wp_site_one_common.yml): root-owned, uploads the one directory PHP may write. Used by --replace after the safety snapshot."""
     uid = int(cfg["php_uid"])
-    sh = ("rm -rf /var/www/html/wp-content && cp -a /usr/src/wordpress/wp-content /var/www/html/wp-content && chown -R 0:0 /var/www/html/wp-content && "
-          "mkdir -p /var/www/html/wp-content/uploads && chown %d:%d /var/www/html/wp-content/uploads" % (uid, uid))
+    # The contents are emptied IN PLACE: uploads is a bind mount of its own in the compose file (./html/wp-content/uploads), and a running container keeps the directory it was started with. Removing and
+    # recreating that directory left the php container writing into a deleted one ("php can write to uploads" failed, dellwp 2026-10-25). Nothing here replaces the wp-content or uploads directory itself.
+    sh = ("cd /var/www/html/wp-content && "
+          "find . -mindepth 1 -maxdepth 1 ! -name uploads -exec rm -rf -- {} + && "
+          "{ [ ! -d uploads ] || find uploads -mindepth 1 -delete; } && "
+          "cp -a /usr/src/wordpress/wp-content/. . && "
+          "find . -mindepth 1 -maxdepth 1 ! -name uploads -exec chown -R 0:0 -- {} + && "
+          "mkdir -p uploads && chown %d:%d uploads" % (uid, uid))
     ok, out = tools.call("docker", "run", "--rm", "--memory", "256m", "--memory-swap", "256m", "--entrypoint", "sh", "-v", "%s:/var/www/html" % (site_dir / "html"), cfg["image_pin"], "-c", sh)
     if not ok:
         raise Refuse("wp-content could not be reset to the image's (%s)" % w.printable(out[-200:], limit=200))
@@ -762,6 +772,10 @@ def build_report(site, record, steps, res, work):
     if record["notes"]:
         lines += ["", "NOTES"] + ["  " + n for n in record["notes"]]
     failed = [s for s in steps if not s["ok"]] + ([{"name": "core checksums"}] if not res["core"][0] else [])
+    tm = record.get("timing")
+    if isinstance(tm, dict) and tm.get("slowest"):
+        lines += ["", "TIMING (seconds): total %s; unpack %s; database load %s; everything after the load %s. The slowest commands:" % (tm.get("total"), tm.get("unpack"), tm.get("load"), tm.get("after_load"))]
+        lines += ["  %6.1f  %s" % (sec, name) for sec, name in tm["slowest"]]
     lines += ["", "NEXT  wp-site-import approve %s [--reject slug,...]    (copies the held code in, deletes the intake file)" % site,
               "      wp-site-import reset %s                         (undoes this run)" % site]
     if failed:
@@ -896,7 +910,9 @@ def run_import(cfg, site, arg, plan_only, get, tools, out, replace=False, ask=No
                 raise Refuse("the name did not match: nothing was changed")
         digest = sha256(path)
         size = path.stat().st_size
+        t_start = tools.clock()
         extract(a, plan["keep"], work)
+        t_unpacked = tools.clock()
         written = tree_bytes(work)
         if written != need:
             shutil.rmtree(work, ignore_errors=True)
@@ -915,7 +931,9 @@ def run_import(cfg, site, arg, plan_only, get, tools, out, replace=False, ask=No
         wc = site_dir / "html" / "wp-content"
         record["tree_before"] = snapshot_tree(wc) if wc.is_dir() and not wc.is_symlink() else None      # what reset returns wp-content to
         save_record(work, record)
+        t_before_load = tools.clock()
         tables = load_sql(site, work, prefix, tools)
+        t_loaded = tools.clock()
         ledger(cfg, site, "loaded", digest, size, path.name)
         out("loaded %d tables. Resetting the options that name code, copying data, installing from wordpress.org, running WP-CLI ..." % tables)
         steps = sanitize_options(site, work, tools)
@@ -927,12 +945,15 @@ def run_import(cfg, site, arg, plan_only, get, tools, out, replace=False, ask=No
     except (Refuse, KeyboardInterrupt) as e:
         save_record(work, record)
         raise Refuse("%s\nThe run stopped part way. Look at the site, then undo it with: wp-site-import reset %s" % (str(e) or "interrupted", site))
+    t_end = tools.clock()
     ok, bout = tools.call(tools.bin("wp-site-backup"), site)
     steps.append({"name": "first backup", "ok": ok, "note": "taken" if ok else "FAILED: " + bout[-200:]})
     m = SNAPSHOT_LINE.search(bout) if ok else None
     if m and m.group(2) == site:
         record["snapshots"] = [m.group(1)]       # the import's own snapshot: reset and Deny take it away again
         save_record(work, record)
+    record["timing"] = {"unpack": round(t_unpacked - t_start, 1), "load": round(t_loaded - t_before_load, 1), "after_load": round(t_end - t_loaded, 1), "total": round(tools.clock() - t_start, 1),
+                        "slowest": [[round(sec, 1), name] for sec, name in sorted(tools.timeline, reverse=True)[:8]]}
     record["steps"], record["stage"], record["scan"] = steps, "reported", {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}
     report = build_report(site, record, steps, res, work)
     fd = os.open(work / "REPORT.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

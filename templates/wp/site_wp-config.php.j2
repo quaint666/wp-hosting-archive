@@ -29,7 +29,7 @@ define( 'DISALLOW_FILE_MODS', true );
 define( 'AUTOMATIC_UPDATER_DISABLED', true );
 
 // The must-use plugins of the hosting service (templates/wp/mu/) live outside wp-content, in a root-owned directory mounted read-only; a friend's own mu-plugins folder is not loaded.
-define( 'WPMU_PLUGIN_DIR', '/var/www/wp-mu' );
+define( 'WPMU_PLUGIN_DIR', '{{ wp_mu_mount }}' );
 define( 'WPMU_PLUGIN_URL', 'https://{{ wp_host }}/wp-mu' );
 define( 'WP_HOSTING_LOGIN_LIMIT_IP', {{ wp_login_limit_ip | int }} );
 define( 'WP_HOSTING_LOGIN_LIMIT_USER', {{ wp_login_limit_user | int }} );

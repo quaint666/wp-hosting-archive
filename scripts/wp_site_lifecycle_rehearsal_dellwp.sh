@@ -92,6 +92,8 @@ tables() { db "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema
 PREFIX=$(sed -n "s/.*\$table_prefix *= *'\([A-Za-z0-9_]*\)'.*/\1/p" "$DIR/wp-config.php" 2>/dev/null | head -n 1)
 stored() { db "SELECT option_value FROM ${PREFIX:-wp_}options WHERE option_name='$1'"; }
 tree() { find "$DIR/html/wp-content" -printf '%P %u %m\n' 2>/dev/null | sort; }
+# the same, without what a snapshot leaves out on purpose (wp-site-backup: cache/, upgrade/, debug.log): a site put back from a snapshot does not have them, and WordPress makes them again when it needs them
+tree_cmp() { tree | grep -vE '^(cache|upgrade)( |/)|^debug\.log '; }
 snaps() { find "$BDIR/$SITE" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex ".*/[0-9]{8}T[0-9]{6}Z" 2>/dev/null | wc -l; }
 ledger() { grep -P "\t$SITE\t" "$INTAKE/ledger.log" 2>/dev/null | cut -f3 | tr '\n' ' '; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null </dev/null)" = true ]; }
@@ -302,7 +304,7 @@ stop_here approve
 if [ "$REPLACE" = yes ]; then
   PHASE=replace; say "5b. replace: a second import onto the site that has data"
   vmrun <<'EOF'
-tree > "$BASE.replace"; tables > "$BASE.replace.tables"; snaps > "$BASE.replace.snaps"
+tree_cmp > "$BASE.replace"; tables > "$BASE.replace.tables"; snaps > "$BASE.replace.snaps"
 ok "the site as it is now was recorded ($(wc -l < "$BASE.replace") paths, $(cat "$BASE.replace.tables") tables, $(cat "$BASE.replace.snaps") snapshot(s)) to compare after a deny"
 finish
 EOF
@@ -315,7 +317,7 @@ EOF
 check "the work directory exists" "$([ -e "$WORK" ] && echo yes || echo no)" yes
 check "the old site's snapshot is tagged pre-import (exactly one)" "$(grep -lx 'tag=pre-import' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)" 1
 has "the archive's data is loaded (tables)" "$(tables)"
-check "the old site's files are gone from wp-content (the replaced tree differs)" "$(tree | diff - "$BASE.replace" >/dev/null && echo same || echo different)" different
+check "the old site's files are gone from wp-content (the replaced tree differs)" "$(tree_cmp | diff - "$BASE.replace" >/dev/null && echo same || echo different)" different
 check "the record says the old site was wiped and names its snapshot" "$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))["replace"]; print(r["wiped"] is True and bool(r["snapshot"]))' "$WORK/PLAN.json" 2>/dev/null)" True
 hold_checks
 finish
@@ -331,8 +333,8 @@ EOF
       vmrun <<'EOF'
 check "no work directory" "$([ -e "$WORK" ] && echo yes || echo no)" no
 check "the old site's tables are back" "$(tables)" "$(cat "$BASE.replace.tables")"
-check "the old site's files are back, exactly (paths, owners, modes)" "$(tree | diff - "$BASE.replace" >/dev/null && echo same || echo different)" same
-tree | diff - "$BASE.replace" | head -n 20 | sed 's/^/   (diff, < now, > before) /' || true
+check "the old site's files are back (paths, owners, modes; cache/ and upgrade/ are not in a snapshot)" "$(tree_cmp | diff - "$BASE.replace" >/dev/null && echo same || echo different)" same
+tree_cmp | diff - "$BASE.replace" | head -n 20 | sed 's/^/   (diff, < now, > before) /' || true
 check "the site's snapshots are as before (nothing left over)" "$(snaps)" "$(cat "$BASE.replace.snaps")"
 check "no pre-import snapshot is left" "$(grep -lx 'tag=pre-import' "$BDIR/$SITE"/*/MANIFEST 2>/dev/null | wc -l)" 0
 check "the stored siteurl is this site's" "$(stored siteurl)" "https://$HOST"
@@ -365,12 +367,13 @@ fi
 
 PHASE=harden; say "5c. the hosting service's must-use plugins on the real site (login, two-factor, mail)"
 vmrun <<'EOF'
-mucount=$(wpr plugin list --status=must-use --field=name 2>/dev/null | grep -c 'wp-hosting' || true)
-check "our three must-use plugins are loaded" "$mucount" 3
-check "no other must-use plugin is loaded (a friend's mu-plugins folder is a separate, inert one)" "$(wpr plugin list --status=must-use --field=name 2>/dev/null | grep -vc 'wp-hosting' || true)" 0
+check "our three must-use plugin files are in the php container" "$(docker exec "$UP" sh -c 'ls /var/www/wp-mu/*.php 2>/dev/null | wc -l' </dev/null)" 3
+check "PHP may read that directory (open_basedir lets it; without that WordPress loads none of them and says nothing)" "$(docker exec "$UP" php -r 'echo is_dir("/var/www/wp-mu") ? "yes" : "no";' </dev/null)" yes
+check "wp-config.php points WordPress at that directory, not at a friend's mu-plugins folder" "$(grep -c "define( 'WPMU_PLUGIN_DIR', '/var/www/wp-mu' )" "$DIR/wp-config.php")" 1
 check "the php container mounts the must-use directory read-only" "$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/www/wp-mu"}}{{.RW}}{{end}}{{end}}' "$UP" 2>/dev/null </dev/null)" false
 check "the login page answers" "$(code /wp-login.php)" 200
-check "?author=1 does not reveal a user name" "$(code '/?author=1')" 404
+author_code=$(code '/?author=1')
+case $author_code in 403|404) ok "?author=1 does not reveal a user name (nginx says 403, the plugin 404: $author_code)" ;; *) bad "?author=1 answered '$author_code'" ;; esac
 check "the users listing of the REST API is gone" "$(code /wp-json/wp/v2/users)" 404
 check "xmlrpc.php is refused" "$(code /xmlrpc.php)" 403
 

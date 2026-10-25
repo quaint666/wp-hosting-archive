@@ -11,6 +11,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -148,10 +149,15 @@ class FakeHost:
             if "run" in self.fail:
                 return Done(*self.fail["run"])
             self.wipes += 1
+            self.wipe_script = cmd[-1]
             wc = self.html / "wp-content"
-            shutil.rmtree(wc)
+            for p in list(wc.iterdir()):
+                if p.name != "uploads":
+                    shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
+            for p in list((wc / "uploads").iterdir()) if (wc / "uploads").is_dir() else []:
+                shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
             for d in ("plugins/akismet", "themes", "languages", "uploads"):
-                (wc / d).mkdir(parents=True)
+                (wc / d).mkdir(parents=True, exist_ok=True)
             return Done(0)
         if "-i" in cmd:   # the drop of the tables
             if "drop" in self.fail:
@@ -259,10 +265,11 @@ class Base(unittest.TestCase):
     def archive(self, **kw):
         return self.put(build(kw.pop("files", None) or files(), **kw))
 
-    def run_main(self, argv, get=None, ask=None, cfg=None, stdin=None):
+    def run_main(self, argv, get=None, ask=None, cfg=None, stdin=None, clock=None):
         self.out.clear()
         h = self.host
-        code = imp.main(cfg or self.cfg, argv, get=get or get_from(ANSWERS), run=h.run, ask=ask or (lambda prompt: ""), out=self.out.append, popen=h.popen, chown=h.chown, which=h.which, stdin=stdin)
+        code = imp.main(cfg or self.cfg, argv, get=get or get_from(ANSWERS), run=h.run, ask=ask or (lambda prompt: ""), out=self.out.append, popen=h.popen, chown=h.chown, which=h.which, stdin=stdin,
+                        **({"clock": clock} if clock else {}))
         return code, "\n".join(self.out)
 
     def tree(self, root=None):
@@ -722,6 +729,20 @@ class ReplaceImport(Base):
         manifest = (self.host.backups / "wptest" / rec["replace"]["snapshot"] / "MANIFEST").read_text()
         self.assertIn("tag=pre-import", manifest)
 
+    def test_the_wipe_never_replaces_the_uploads_directory_a_running_container_has_mounted(self):
+        uploads = self.html / "wp-content/uploads"
+        before = uploads.stat().st_ino
+        code, text = self.replace()
+        self.assertEqual(code, 0, text)
+        self.assertEqual(uploads.stat().st_ino, before, "the same directory: the php container's bind mount still points at it")
+        sh = self.host.wipe_script
+        self.assertNotIn("rm -rf /var/www/html/wp-content", sh); self.assertNotIn("rm -rf -- /var/www/html/wp-content", sh); self.assertNotRegex(sh, r"rmdir|mv ")
+        self.assertIn("-mindepth 1 -maxdepth 1 ! -name uploads -exec rm -rf -- {} +", sh)
+        self.assertIn("find uploads -mindepth 1 -delete", sh)
+        self.assertIn("chown %d:%d uploads" % (self.cfg["php_uid"], self.cfg["php_uid"]), sh)
+        self.assertIn("! -name uploads -exec chown -R 0:0", sh, "code is root's, uploads stays the php user's")
+        self.assertFalse((uploads / "old-photo.jpg").exists(), "and it was emptied")
+
     def test_a_snapshot_that_cannot_be_taken_stops_before_anything_is_touched(self):
         self.host.fail["backup"] = (1, "no space left")
         code, text = self.replace()
@@ -1099,6 +1120,28 @@ class Scan(Base):
         line = next(l for l in text.splitlines() if l.startswith("  known vulnerabilities:"))
         self.assertIn("FOUND: 5 finding(s): plugin woocommerce 11.0.1: Finding number 1", line)
         self.assertIn("| plugin woocommerce 11.0.1: Finding number 3", line); self.assertNotIn("Finding number 4", line); self.assertIn("... 2 more", line)
+
+    def test_the_report_says_where_the_time_went(self):
+        ticks = iter(range(0, 100000, 1))
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"], clock=lambda: next(ticks))
+        self.assertEqual(code, 0, text)
+        tm = json.loads((self.intake / "work-wptest/PLAN.json").read_text())["timing"]
+        self.assertEqual(set(tm), {"unpack", "load", "after_load", "total", "slowest"})
+        self.assertGreater(tm["total"], 0); self.assertEqual(len(tm["slowest"]), 8, "an import runs far more than eight commands: the eight slowest are kept")
+        self.assertEqual((tm["unpack"], tm["load"]), (1.0, 1.0), "with a clock that ticks once per reading, a span with no command inside it lasts one tick: each is measured over its own span only")
+        self.assertEqual(tm["slowest"], sorted(tm["slowest"], reverse=True), "slowest first")
+        line = next(l for l in text.splitlines() if l.startswith("TIMING (seconds)"))
+        self.assertIn("total %s" % tm["total"], line); self.assertIn("unpack %s" % tm["unpack"], line); self.assertIn("database load %s" % tm["load"], line)
+        rows = text.split(line, 1)[1].split("\n\n", 1)[0].strip().splitlines()
+        self.assertEqual(len(rows), len(tm["slowest"]))
+        self.assertTrue(all(re.match(r"^\s*\d+\.\d  \S", r) for r in rows), rows)
+
+    def test_the_timing_does_not_change_what_a_command_returns_or_when_it_fails(self):
+        self.host.fail["backup"] = (1, "no space")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"], clock=iter(range(0, 100000)).__next__)
+        self.assertEqual(code, 1); self.assertRegex(text, r"FAILED\s+first backup"); self.assertIn("TIMING (seconds)", text)
 
     def test_a_feed_that_is_not_set_up_says_so(self):
         text = self.import_ok()

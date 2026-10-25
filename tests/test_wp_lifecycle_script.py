@@ -90,13 +90,22 @@ class Syntax(unittest.TestCase):
         a, b = TEXT.index("PHASE=harden"), TEXT.index("PHASE=operate")
         self.assertGreater(a, TEXT.index("PHASE=approve")); self.assertLess(a, b)
         seg = TEXT[a:b]
-        for needle in ("our three must-use plugins are loaded", "no other must-use plugin is loaded", "mounts the must-use directory read-only", "?author=1 does not reveal a user name",
+        for needle in ("our three must-use plugin files are in the php container", "PHP may read that directory", "points WordPress at that directory", "mounts the must-use directory read-only", "?author=1 does not reveal a user name",
                        "the users listing of the REST API is gone", "give the same message", "profile.php?wph_2fa=required", "two-factor-options", "log mode, not sent", "the eleventh try for one user name is refused",
                        "wph-check", "user delete wph-check", "transient delete --all", "stop_here harden"):
             self.assertIn(needle, seg)
         self.assertNotIn("if [ \"$REPLACE\"", seg, "the phase is not optional")
         self.assertLess(seg.index("wph-check@example.invalid"), seg.index("user delete wph-check"), "the throw-away administrator is made before and removed after")
         self.assertLess(seg.index("profile.php?wph_2fa=required"), seg.index("the eleventh try"), "the gate is tested before the throttle can lock the address")
+
+    def test_the_replace_deny_compares_trees_without_what_a_snapshot_leaves_out(self):
+        self.assertIn("tree_cmp() { tree | grep -vE '^(cache|upgrade)( |/)|^debug\\.log '; }", TEXT)
+        seg = TEXT[TEXT.index("PHASE=replace"):TEXT.index("PHASE=harden")]
+        self.assertIn('tree_cmp > "$BASE.replace"', seg)
+        self.assertNotIn('tree | diff - "$BASE.replace"', seg); self.assertNotIn('tree > "$BASE.replace"', seg)
+        self.assertEqual(seg.count("tree_cmp | diff"), 3)
+        phase3 = TEXT[TEXT.index("PHASE=deny"):TEXT.index("PHASE=import2")]
+        self.assertIn('tree | diff - "$BASE"', phase3, "the first deny is compared in full: nothing was ever snapshotted there")
 
     def test_the_harden_phase_never_prints_or_passes_the_throwaway_password_as_an_argument_to_curl(self):
         seg = TEXT[TEXT.index("PHASE=harden"):TEXT.index("PHASE=operate")]

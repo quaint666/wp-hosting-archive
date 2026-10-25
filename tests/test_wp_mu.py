@@ -133,7 +133,7 @@ class WpConfigAndCompose(unittest.TestCase):
     def test_the_mu_directory_is_named_outside_wp_content_and_the_constants_follow_the_variables(self):
         t = self.cfg()
         v = self.v
-        self.assertIn("define( 'WPMU_PLUGIN_DIR', '/var/www/wp-mu' );", t)
+        self.assertIn("define( 'WPMU_PLUGIN_DIR', '%s' );" % v["wp_mu_mount"], t)
         for name, want in (("WP_HOSTING_LOGIN_LIMIT_IP", v["wp_login_limit_ip"]), ("WP_HOSTING_LOGIN_LIMIT_USER", v["wp_login_limit_user"]), ("WP_HOSTING_LOGIN_WINDOW_S", v["wp_login_window_s"]),
                            ("WP_HOSTING_MAIL_PER_HOUR", v["wp_mail_per_hour"]), ("WP_HOSTING_MAIL_PER_DAY", v["wp_mail_per_day"])):
             self.assertIn("define( '%s', %d );" % (name, want), t)
@@ -167,10 +167,25 @@ class WpConfigAndCompose(unittest.TestCase):
     def test_the_compose_file_mounts_the_directory_read_only_and_nothing_else_changed(self):
         doc = yaml.safe_load(env().get_template("wp/site_compose.yml.j2").render(**self.ctx))
         vols = doc["services"]["php"]["volumes"]
-        self.assertIn("%s:/var/www/wp-mu:ro" % self.v["wp_mu_dir"], vols)
+        self.assertIn("%s:%s:ro" % (self.v["wp_mu_dir"], self.v["wp_mu_mount"]), vols)
         self.assertEqual(len([x for x in vols if "wp-mu" in x]), 1)
         self.assertNotIn("wp-mu", " ".join(doc["services"]["db"].get("volumes", [])))
         self.assertTrue(all(x.endswith(":ro") or "uploads" in x for x in vols), "the only writable mount stays uploads")
+
+    def test_php_may_read_the_directory_wordpress_loads_the_plugins_from(self):
+        # dellwp 2026-10-25: open_basedir was /var/www/html:/tmp, is_dir() on the mount said no, and WordPress loaded none of the must-use plugins without a word
+        ini = env().get_template("wp/site_php.ini.j2").render(**self.ctx)
+        allowed = re.search(r"^open_basedir = (.+)$", ini, re.M).group(1).split(":")
+        mount = self.v["wp_mu_mount"]
+        self.assertIn(mount, allowed)
+        cfg_dir = re.search(r"define\( 'WPMU_PLUGIN_DIR', '([^']+)' \);", self.cfg()).group(1)
+        compose = yaml.safe_load(env().get_template("wp/site_compose.yml.j2").render(**self.ctx))["services"]["php"]["volumes"]
+        mounted = [v.split(":")[1] for v in compose if v.split(":")[0] == self.v["wp_mu_dir"]]
+        self.assertEqual((cfg_dir, mounted), (mount, [mount]), "wp-config, the mount and open_basedir name the same directory")
+        self.assertTrue(any(cfg_dir == a or cfg_dir.startswith(a.rstrip("/") + "/") for a in allowed))
+        for broad in ("/", "/var", "/var/www", "/etc", "/usr"):
+            self.assertNotIn(broad, allowed, "open_basedir stays narrow")
+        self.assertEqual(sorted(allowed), sorted(["/var/www/html", mount, "/tmp"]))
 
     def test_the_mu_directory_is_not_inside_a_site_or_a_wp_content(self):
         self.assertTrue(self.v["wp_mu_dir"].startswith(self.v["wp_data_mount"]))
