@@ -663,7 +663,7 @@ class Committing(Base):
         self.assertIn("The verifier reported 1 failed check(s) for", said)
         self.assertIn("  FAIL: php can write to uploads", said); self.assertIn("  FAIL: hold: local request did not get 200", said)
         self.assertNotIn("  ok:   php active", said)
-        self.assertIn(("bash scripts/wp_site_verify_dellwp.sh wptest", True), self.tee_log, "its output is captured (and still shown as it comes) so the failing lines can be repeated")
+        self.assertIn(("bash scripts/wp_site_verify_dellwp.sh alpha", True), self.tee_log, "its output is captured (and still shown as it comes) so the failing lines can be repeated")
 
     def test_a_verifier_that_fails_without_a_fail_line_says_how_to_read_it(self):
         self.rc = {"bash": 3}
