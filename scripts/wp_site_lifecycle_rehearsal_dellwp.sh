@@ -210,6 +210,7 @@ stop_here create
 PHASE=import1; say "2. import the practice file"
 python3 scripts/wp_sites.py import "$SITE" "$FILE" --yes; RC=$?
 [ "$RC" = 0 ] && bump 0 "wp_sites.py import finished with the report" || fatal "import exited $RC (1 = a step failed, 2 = refused): read the report above"
+[ "$PHONE" = no ] || echo "   (the notification is already on your phone: do NOT tap it yet; the checks read the import and a tap removes it. The script says when to tap.)"
 vmrun <<'EOF'
 imported_checks
 finish
@@ -241,6 +242,7 @@ stop_here deny
 PHASE=import2; say "4. import again (the file left by the first try is replaced)"
 python3 scripts/wp_sites.py import "$SITE" "$FILE" --yes; RC=$?
 [ "$RC" = 0 ] && bump 0 "the second import finished with the report" || fatal "second import exited $RC"
+[ "$PHONE" = no ] || echo "   (the notification is already on your phone: do NOT tap it yet; the checks read the import and a tap removes it. The script says when to tap.)"
 vmrun <<'EOF'
 imported_checks
 finish

@@ -77,6 +77,15 @@ class Syntax(unittest.TestCase):
         self.assertIn("(info) hidden file:", TEXT)
         self.assertIn("(diff, < now, > before)", TEXT)
 
+    def test_the_phone_is_told_not_to_tap_before_the_import_checks_have_read_the_import(self):
+        line = "do NOT tap it yet"
+        self.assertEqual(TEXT.count(line), 2)
+        for phase, nxt in (("PHASE=import1", "PHASE=deny"), ("PHASE=import2", "PHASE=approve")):
+            a, b = TEXT.index(phase), TEXT.index(nxt)
+            seg = TEXT[a:b]
+            self.assertIn(line, seg, phase)
+            self.assertLess(seg.index(line), seg.index("vmrun <<"), phase)
+
     def test_a_deny_is_checked_for_the_snapshot_the_import_took(self):
         before, deny = TEXT.index('snaps > "$BASE.snaps"'), TEXT.index('check "the snapshot the import took is gone again')
         self.assertLess(TEXT.index('PHASE=create') if 'PHASE=create' in TEXT else 0, before)

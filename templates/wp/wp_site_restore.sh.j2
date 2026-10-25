@@ -96,10 +96,13 @@ wpq() {
 need "WordPress does not boot on the restored database and files"
 wpq core is-installed
 need "WP-CLI could not read the restored site"
-url=$(wpq option get siteurl); users=$(wpq user list --format=count); posts=$(wpq post list --post_type=any --post_status=any --format=count); plugins=$(wpq plugin list --status=active --format=count)
-live_users=$("$WP_BIN/wp-site-cli" "$site" user list --format=count 2>/dev/null || echo "?")
-live_posts=$("$WP_BIN/wp-site-cli" "$site" post list --post_type=any --post_status=any --format=count 2>/dev/null || echo "?")
-live_plugins=$("$WP_BIN/wp-site-cli" "$site" plugin list --status=active --format=count 2>/dev/null || echo "?")
+# A plugin that loads with WP-CLI may print notices (PHP deprecations) to stdout before the answer, so the answer is the last line, and a count the last line made only of digits.
+last() { tail -n 1; }
+count() { grep -E '^[0-9]+$' | tail -n 1; }
+url=$(wpq option get siteurl | last); users=$(wpq user list --format=count | count); posts=$(wpq post list --post_type=any --post_status=any --format=count | count); plugins=$(wpq plugin list --status=active --format=count | count)
+live_users=$("$WP_BIN/wp-site-cli" "$site" user list --format=count 2>/dev/null | count || echo "?")
+live_posts=$("$WP_BIN/wp-site-cli" "$site" post list --post_type=any --post_status=any --format=count 2>/dev/null | count || echo "?")
+live_plugins=$("$WP_BIN/wp-site-cli" "$site" plugin list --status=active --format=count 2>/dev/null | count || echo "?")
 need "the restored site has no users: the dump is empty of content"
 [ "$users" -ge 1 ]
 summary="$url; users $users (live $live_users), posts $posts (live $live_posts), active plugins $plugins (live $live_plugins)"

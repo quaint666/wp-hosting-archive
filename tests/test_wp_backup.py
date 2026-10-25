@@ -40,6 +40,8 @@ NTFY = '#!/bin/bash\necho "$*" >> "$SHIM/ntfy.log"\n'
 DOCKER_RESTORE = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 args=" $* "
+# SHIM_NOISE: a plugin that prints PHP notices to stdout before WP-CLI's answer (Elementor does, on PHP 8.5)
+say() { [ -z "${SHIM_NOISE:-}" ] || printf 'PHP Deprecated:  Creation of dynamic property in /var/www/html/x.php on line 3\nDeprecated: 12 items skipped\n99\n'; echo "$1"; }
 case "$1" in
   network) exit 0 ;;
   rm) exit 0 ;;
@@ -55,10 +57,10 @@ case "$1" in
       *" --entrypoint wp "*)
         case "$args" in
           *" is-installed "*) [ -f "$SHIM/wp_not_installed" ] && exit 1; exit 0 ;;
-          *" siteurl "*) echo "https://wptest.example.com"; exit 0 ;;
-          *" user "*) echo "${SHIM_USERS:-2}"; exit 0 ;;
-          *" post "*) echo 7; exit 0 ;;
-          *" plugin "*) echo 1; exit 0 ;;
+          *" siteurl "*) say "https://wptest.example.com"; exit 0 ;;
+          *" user "*) say "${SHIM_USERS:-2}"; exit 0 ;;
+          *" post "*) say 7; exit 0 ;;
+          *" plugin "*) say 1; exit 0 ;;
         esac ;;
     esac ;;
 esac
@@ -652,6 +654,16 @@ class Restore(Base):
         self.assertIn("dellwp restore drill of wptest", self.log("ntfy.log"))
         self.assertIn("CREATE TABLE `wp_options`", self.log("loaded.sql"), "the dump must be loaded into the scratch database")
         self.assertFalse(self.scratch.exists(), "the scratch copy is removed")
+
+    def test_notices_a_plugin_prints_before_the_answers_do_not_break_the_comparison(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOISE="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("OK (https://wptest.example.com; users 2 (live 2), posts 7 (live 7), active plugins 1 (live 1))", r.stdout)
+
+    def test_notices_do_not_hide_an_empty_restore(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOISE="1", SHIM_USERS="0")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("no users", r.stdout)
 
     def test_the_scratch_database_and_checks_are_as_locked_down_as_the_site(self):
         self.run_script(self.script, "wptest")
