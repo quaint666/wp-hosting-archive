@@ -41,7 +41,9 @@ DOCKER_RESTORE = r'''#!/bin/bash
 echo "$*" >> "$SHIM/docker.calls"
 args=" $* "
 # SHIM_NOISE: a plugin that prints PHP notices to stdout before WP-CLI's answer (Elementor does, on PHP 8.5)
-say() { [ -z "${SHIM_NOISE:-}" ] || printf 'PHP Deprecated:  Creation of dynamic property in /var/www/html/x.php on line 3\nDeprecated: 12 items skipped\n99\n'; echo "$1"; }
+say() { if [ -n "${SHIM_WPFAIL:-}" ] && [[ " $args " == *" $SHIM_WPFAIL "* ]]; then echo "partial output"; echo "Error: Database connection error" >&2; exit 3; fi
+  if [ -n "${SHIM_NOANSWER:-}" ] && [[ " $args " == *" $SHIM_NOANSWER "* ]]; then printf 'Deprecated: only a notice\n'; return 0; fi
+  [ -z "${SHIM_NOISE:-}" ] || printf 'PHP Deprecated:  Creation of dynamic property in /var/www/html/x.php on line 3\nDeprecated: 12 items skipped\n99\n'; echo "$1"; }
 case "$1" in
   network) exit 0 ;;
   rm) exit 0 ;;
@@ -664,6 +666,24 @@ class Restore(Base):
         r = self.run_script(self.script, "wptest", SHIM_NOISE="1", SHIM_USERS="0")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("no users", r.stdout)
+
+    def test_a_wp_cli_command_that_fails_is_named_with_what_it_printed(self):
+        r = self.run_script(self.script, "wptest", SHIM_WPFAIL="post")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAILED: WP-CLI 'post list --post_type=any --post_status=any --format=count' exited 3; it printed: partial output|", r.stdout)
+        self.assertIn("stderr: Error: Database connection error|", r.stdout)
+        self.assertFalse(self.scratch.exists())
+
+    def test_an_answer_that_is_not_there_is_named_with_what_was_printed_instead(self):
+        r = self.run_script(self.script, "wptest", SHIM_NOANSWER="plugin")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAILED: WP-CLI 'plugin list --status=active --format=count' printed no usable answer; it printed: Deprecated: only a notice|", r.stdout)
+
+    def test_a_live_site_that_cannot_answer_is_only_a_question_mark(self):
+        (self.tmp / "bin" / "wp-site-cli").write_text("#!/bin/bash\nexit 1\n")
+        r = self.run_script(self.script, "wptest")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("users 2 (live ?), posts 7 (live ?), active plugins 1 (live ?)", r.stdout)
 
     def test_the_scratch_database_and_checks_are_as_locked_down_as_the_site(self):
         self.run_script(self.script, "wptest")

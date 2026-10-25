@@ -149,13 +149,16 @@ vmrun() {       # the snippet's failures are added to the count
 }
 
 # ---- the ThinkPad side
-say() { echo; echo "== $*"; }
+TIMES=(); T0=""; CUR=""
+tick() { [ -z "$T0" ] || { echo "   ($CUR took $((SECONDS - T0)) s, your waiting for taps and typing included)"; TIMES+=("$CUR: $((SECONDS - T0)) s"); T0=""; }; }
+say() { tick; echo; echo "== $*"; CUR=$PHASE; T0=$SECONDS; }
 bump() { local rc=$1; shift; if [ "$rc" != 0 ]; then echo "FAIL: $* (exit $rc)"; FAIL=$((FAIL+1)); return 1; fi; echo "ok: $*"; return 0; }
 yn() { local a; read -r -p "$1 [y/N] " a; [ "$a" = y ]; }
 confirmed() { if yn "$1"; then MANUAL+=("yes: $1"); echo "ok: $1"; else MANUAL+=("NO: $1"); echo "FAIL: $1"; FAIL=$((FAIL+1)); fi; }
 stop_here() { [ "$UNTIL" = "$1" ] && { echo; echo "Stopped after '$1' as asked (--until). The site $SITE is left as it is."; summary; exit "$FAIL"; }; }
 summary() {
-  echo; echo "== summary"; printf '   %s\n' "${MANUAL[@]:-nothing was asked of you}"
+  tick
+  echo; echo "== summary"; [ "${#TIMES[@]}" = 0 ] || { printf '   took %s\n' "${TIMES[@]}"; echo "   total: $SECONDS s"; }; printf '   %s\n' "${MANUAL[@]:-nothing was asked of you}"
   [ "$FAIL" = 0 ] && echo "All checks passed ($PHASE)." || echo "$FAIL check(s) failed (last phase: $PHASE)."
 }
 cleanup_hint() {

@@ -269,6 +269,13 @@ class Flow(Harness):
                 self.assertEqual(verbs[-1], last, until)
             self.assertIn("Stopped after '%s' as asked" % until, r.stdout)
 
+    def test_every_phase_says_how_long_it_took_and_the_summary_adds_them_up(self):
+        r = self.run_script("--yes", "--no-phone", "--site", "life", "--until", "approve")
+        for phase in ("preflight", "create", "import1", "deny", "import2"):
+            self.assertRegex(r.stdout, r"\(%s took \d+ s, your waiting" % phase)
+        self.assertRegex(r.stdout, r"\(approve took \d+ s")
+        self.assertRegex(r.stdout, r"== summary\n\s+took preflight: \d+ s\n(\s+took [a-z0-9]+: \d+ s\n)+\s+total: \d+ s")
+
     def test_with_live_asks_its_own_question_and_goes_back_to_hold(self):
         r = self.run_script("--yes", "--no-phone", "--with-live", "--site", "life", "--until", "live")
         calls = self.sites_calls()
