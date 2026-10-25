@@ -72,7 +72,7 @@ wp_sites:
   - name: rehearsal3
     port: 9105
     quota_id: 1005
-    state: stopped
+    state: closed
     update_policy: notify
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
