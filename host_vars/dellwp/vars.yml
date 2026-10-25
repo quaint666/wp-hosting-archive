@@ -77,7 +77,7 @@ wp_sites:
   - name: rehearsal4
     port: 9106
     quota_id: 1006
-    state: hold
+    state: stopped
     update_policy: notify
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
