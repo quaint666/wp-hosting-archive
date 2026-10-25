@@ -40,7 +40,15 @@ fail() { said "result=FAILED"; die "$*"; }
 
 verify_plugin() {   # exit 0 only if wordpress.org's checksums match and the tool says so
   local out; out=$(cli plugin verify-checksums "$1" 2>&1 </dev/null) && printf '%s' "$out" | grep -q '^Success' && { printf '%s\n' "$out"; return 0; }
-  printf '%s\n' "$out" >&2; return 1
+  printf '%s\n' "$out" >&2
+  # Why it failed, printed before the caller removes the plugin: the same check with --debug, the list WP-CLI sees, the plugin's directory. wp plugin verify-checksums <slug> said "You need to specify
+  # either one or more plugin slugs" for a plugin that had just been installed (dellwp 2026-10-25, twice), which means its plugin lookup found nothing; this is what to look at.
+  { echo "--- diagnostics for '$1' (its checksum check failed):"
+    echo "plugin list:"; cli plugin list --fields=name,status,version --format=csv 2>&1 </dev/null | head -n 20
+    echo "debug lines of the same check:"; cli plugin verify-checksums "$1" --debug 2>&1 </dev/null | grep -i -E 'plugin|fetch|found|error|warning' | tail -n 15
+    echo "the plugin's directory:"; ls -ld "$dir/html/wp-content/plugins/$1" 2>&1; ls -A "$dir/html/wp-content/plugins/$1" 2>&1 | head -n 5
+    echo "--- end of diagnostics"; } >&2
+  return 1
 }
 
 case $action in

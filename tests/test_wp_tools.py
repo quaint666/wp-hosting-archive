@@ -461,6 +461,25 @@ class Tools(unittest.TestCase):
         self.assertNotIn("activate", [c[1][1] for c in calls if len(c[1]) > 1])
         self.assertIn("result=FAILED", self.log("logger.log"))
 
+    def test_ext_explains_a_failed_checksum_check_before_it_removes_the_plugin(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "shady-plugin", verify_fails=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--- diagnostics for 'shady-plugin' (its checksum check failed):", r.stderr)
+        for needle in ("plugin list:", "debug lines of the same check:", "the plugin's directory:", "--- end of diagnostics"):
+            self.assertIn(needle, r.stderr)
+        calls = self.wp_calls()
+        self.assertIn((False, ["plugin", "list", "--fields=name,status,version", "--format=csv"]), calls)
+        self.assertIn((False, ["plugin", "verify-checksums", "shady-plugin", "--debug"]), calls)
+        order = [c[1][:2] for c in calls]
+        self.assertLess(order.index(["plugin", "list"]), len(order) - 1 - order[::-1].index(["plugin", "delete"]), "the diagnostics come before the plugin is removed")
+        self.assertTrue(all(not root for root, args in calls if args[:2] in (["plugin", "list"], ["plugin", "verify-checksums"])), "the diagnostics run as the web app, not as root")
+
+    def test_ext_prints_no_diagnostics_when_the_check_passes(self):
+        r = self.run_tool("wp-site-ext", "wptest", "plugin", "install", "woocommerce")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("diagnostics", r.stderr + r.stdout)
+        self.assertEqual(len(self.wp_calls()), 2)
+
     def test_ext_installs_a_theme_by_slug_and_says_it_cannot_verify_it(self):
         r = self.run_tool("wp-site-ext", "wptest", "theme", "install", "twentytwentysix")
         self.assertEqual(r.returncode, 0, r.stderr)

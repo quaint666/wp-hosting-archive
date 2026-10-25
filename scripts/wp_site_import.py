@@ -453,7 +453,7 @@ def install_from_org(site, record, work, tools):
         if ok:
             record["installed"][kind].append(slug)
             save_record(work, record)
-        steps.append({"name": "%s %s" % (kind, slug), "ok": ok, "note": note if ok else "FAILED: " + out[-200:]})
+        steps.append({"name": "%s %s" % (kind, slug), "ok": ok, "note": note if ok else "FAILED: " + out[-200:], **({} if ok else {"detail": out[-2500:]})})
     return steps
 
 
@@ -498,7 +498,7 @@ def wpcli_steps(cfg, site, work, record, tools):
 
     def step(name, *args, plugins=False):
         ok, out = tools.cli(site, *args, plugins=plugins)
-        steps.append({"name": name, "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:]})
+        steps.append({"name": name, "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:], **({} if ok else {"detail": out[-1500:]})})
         return ok, out
 
     step("core update-db", "core", "update-db")
@@ -632,6 +632,11 @@ def build_report(site, record, steps, res, work):
     lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["held_hits"]]
     lines += ["  suspicious patterns in uploads/: %d file(s)" % res["uploads_hits_total"]]
     lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["uploads_hits"]]
+    details = [s for s in steps if not s["ok"] and s.get("detail")]
+    if details:
+        lines += ["", "DETAILS OF THE FAILED STEPS (the end of what each command printed)"]
+        for s_ in details:
+            lines += ["  %s:" % s_["name"]] + ["    " + l for l in str(s_["detail"]).strip().splitlines()[-40:]]
     blocked = [(k, v) for k, v in record["tally"].items() if k in (UPLOADS_BLOCKED, LANG_BLOCKED)]
     if blocked:
         lines += ["", "NOT COPIED because PHP or the web server would act on it:"] + ["  %d file(s)  %s" % (v[0], k) for k, v in blocked]

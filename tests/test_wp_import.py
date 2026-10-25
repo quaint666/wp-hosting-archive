@@ -441,6 +441,40 @@ class Pipeline(Base):
         self.assertFalse([c for c in self.host.calls if "live" in c])
 
 
+class FailureDetails(Base):
+    def test_the_whole_output_of_a_failed_install_is_in_the_report_and_the_record(self):
+        diag = "Error: You need to specify\n--- diagnostics for 'good' (its checksum check failed):\nplugin list:\nname,status,version\nakismet,inactive,5.7.2\n--- end of diagnostics\nwp-site-ext: removed"
+        self.host.fail["ext:good"] = (1, diag)
+        self.host.fail["ext:good:versioned"] = (1, diag)
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1)
+        self.assertIn("DETAILS OF THE FAILED STEPS", text)
+        self.assertIn("    akismet,inactive,5.7.2", text)
+        self.assertIn("    --- diagnostics for 'good' (its checksum check failed):", text)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertIn("akismet,inactive,5.7.2", [s for s in rec["steps"] if s["name"] == "plugin good"][0]["detail"])
+        self.assertEqual(text.count("DETAILS OF THE FAILED STEPS"), 1)
+
+    def test_a_wpcli_step_that_fails_keeps_its_output_too(self):
+        self.host.fail["cli:core update-db"] = (1, "Error: one\nError: two\nError: three")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertIn("    Error: three", text)
+
+    def test_nothing_is_added_when_nothing_failed(self):
+        self.assertNotIn("DETAILS OF THE FAILED STEPS", self.import_ok())
+
+    def test_the_details_pass_the_terminal_filter(self):
+        self.host.fail["ext:good"] = (1, "boom \x1b[2J \u202e end")
+        self.host.fail["ext:good:versioned"] = (1, "boom \x1b[2J \u202e end")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        for bad in ("\x1b", "\u202e"):
+            self.assertNotIn(bad, text)
+            self.assertNotIn(bad, (self.intake / "work-wptest/REPORT.txt").read_text())
+
+
 class StoredUrls(Base):
     def test_the_stored_rows_are_read_from_the_database_and_must_be_the_new_name(self):
         text = self.import_ok()
