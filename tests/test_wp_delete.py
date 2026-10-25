@@ -312,9 +312,10 @@ class Delete(Base):
 
     def test_the_file_never_calls_delete_data_outside_and_is_deployed_root_only(self):
         tasks = load("tasks/wp_tools_common.yml")
-        deploy = [t for t in tasks if t.get("name") == "Deploy the tools"][0]
+        deploy = [t for t in tasks if t.get("name") == "Stage the tools"][0]
         self.assertIn({"src": "wp_site_delete.sh.j2", "dest": "wp-site-delete"}, deploy["loop"]); self.assertIn({"src": "wp_archive_purge.sh.j2", "dest": "wp-archive-purge"}, deploy["loop"])
-        self.assertEqual((deploy["ansible.builtin.template"]["owner"], deploy["ansible.builtin.template"]["mode"]), ("root", "0750"))
+        send = [t for t in tasks if t.get("name") == "Send the tools"][0]["ansible.posix.synchronize"]
+        self.assertIn("--chown=root:root", send["rsync_opts"]); self.assertIn("--chmod=F0750", send["rsync_opts"]); self.assertEqual(send["dest"], "{{ wp_tools_bin }}/")
         code = "\n".join(l for l in (ROOT / "templates/wp/wp_site_delete.sh.j2").read_text().splitlines() if not l.lstrip().startswith("#"))
         for bad in ("git ", "ansible", "rm -rf /", "docker restart"):
             self.assertNotIn(bad, code)
@@ -372,7 +373,7 @@ class Purge(Base):
 
     def test_the_unit_and_the_timer_alert_on_failure_and_run_daily(self):
         tasks = load("tasks/wp_tools_common.yml"); by = {t["name"]: t for t in tasks}
-        svc = by["Deploy the archive purge service"]["ansible.builtin.copy"]["content"]; tim = by["Deploy the archive purge timer"]["ansible.builtin.copy"]["content"]
+        svc = by["Stage the archive purge service"]["ansible.builtin.copy"]["content"]; tim = by["Stage the archive purge timer"]["ansible.builtin.copy"]["content"]
         self.assertIn("OnFailure=wp-job-failed@%N.service", svc); self.assertIn("ExecStart={{ wp_tools_bin }}/wp-archive-purge", svc)
         self.assertIn("OnCalendar={{ wp_archive_purge_calendar }}", tim); self.assertIn("Persistent=true", tim)
         self.assertEqual(by["Enable the archive purge timer"]["ansible.builtin.systemd"]["name"], "wp-archive-purge.timer")

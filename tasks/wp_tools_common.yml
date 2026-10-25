@@ -5,6 +5,11 @@
 # the paths and the limits come from the variables and exist in one place. Root-only (0750 root:root): no sudoers entry, no setuid. The site names are the allowlist, so
 # adding a site means running this play again before the tools accept it. tests/test_wp_tools.py runs the rendered scripts against stand-ins for docker and curl.
 # Check mode cannot show: the image pull, or whether a tool works once installed.
+#
+# HOW THE FILES GET THERE. Every task on the VM costs a round trip (1.3 s with pipelining), and this file used to make one per tool, unit and module (44 s of a 66 s run). The tasks named "Stage ..."
+# now render into a temporary directory ON THE CONTROLLER (delegate_to localhost, become false, check_mode false: rendering is harmless and must happen in check mode too), and three
+# synchronize tasks send the staged files with rsync: the tools, the library with the Python modules, and the units. The owner and the modes are rsync options (--chown, --chmod), and each
+# sync names its files with --files-from, so rsync never touches the destination directory itself (/usr/local/sbin is root:staff and is not ours). Nothing is deleted on the VM.
 
 - name: Pull the WP-CLI image
   community.docker.docker_image_pull:
@@ -19,35 +24,54 @@
     group: root
     mode: "0755"
 
-- name: Deploy the tools library
+- name: Make the staging directory on the controller
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: wp-stage-
+  register: wp_stage
+  delegate_to: localhost
+  become: false
+  check_mode: false
+
+- name: Make the staging subdirectories
+  ansible.builtin.file:
+    path: "{{ wp_stage.path }}/{{ item }}"
+    state: directory
+    mode: "0700"
+  loop: [bin, lib, units, lists]
+  delegate_to: localhost
+  become: false
+  check_mode: false
+
+- name: Stage the tools library
   ansible.builtin.template:
     src: "{{ wp_template_dir }}/wp_tools_common.sh.j2"
-    dest: "{{ wp_tools_lib }}/common.sh"
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/lib/common.sh"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  check_mode: false
 
 # wp-site-import is Python: the logic, the archive reader and the approval tokens are the tested modules in scripts/ (tests/test_wp_import.py, test_wp_wpress.py, test_wp_approvals.py), copied as they are; the wrapper below only
 # carries the repo's values. wp_scripts_dir is set by the wrapper play.
-- name: Deploy the Python modules of wp-site-import
+- name: Stage the Python modules of wp-site-import
   ansible.builtin.copy:
     src: "{{ wp_scripts_dir }}/{{ item }}"
-    dest: "{{ wp_tools_lib }}/{{ item }}"
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/lib/{{ item }}"
+    mode: "0600"
   loop:
     - wp_wpress.py
     - wp_approvals.py
     - wp_site_import.py
+  delegate_to: localhost
+  become: false
+  check_mode: false
 
-- name: Deploy the tools
+- name: Stage the tools
   ansible.builtin.template:
     src: "{{ wp_template_dir }}/{{ item.src }}"
-    dest: "{{ wp_tools_bin }}/{{ item.dest }}"
-    owner: root
-    group: root
-    mode: "0750"
+    dest: "{{ wp_stage.path }}/bin/{{ item.dest }}"
+    mode: "0600"
   loop:
     - { src: wp_site_cli.sh.j2, dest: wp-site-cli }
     - { src: wp_site_install.sh.j2, dest: wp-site-install }
@@ -66,19 +90,20 @@
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
   loop_control:
     label: "{{ item.dest }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
   vars:
     wp_update_policies: >-
       {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
 
 # The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
 # ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
-- name: Deploy the WordPress job units
+- name: Stage the WordPress job units
   ansible.builtin.template:
     src: "{{ wp_template_dir }}/{{ item.src }}"
-    dest: "/etc/systemd/system/{{ item.dest }}"
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/{{ item.dest }}"
+    mode: "0600"
   loop:
     - { src: wp_cron.service.j2, dest: "wp-cron@.service" }
     - { src: wp_cron.timer.j2, dest: "wp-cron@.timer" }
@@ -89,19 +114,18 @@
     - { src: wp_update.timer.j2, dest: "wp-update@.timer" }
   loop_control:
     label: "{{ item.dest }}"
-  notify: Reload systemd
-
-# The site tasks enable timers next, and systemd must know the units first.
-- name: Reload systemd now if a unit changed
-  ansible.builtin.meta: flush_handlers
+  delegate_to: localhost
+  become: false
+  check_mode: false
 
 # One check for all sites, not an instance per site: is every site still being backed up? (templates/wp/wp_backup_check.sh.j2)
-- name: Deploy the backup freshness check service
+- name: Stage the backup freshness check service
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-backup-check.service
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-backup-check.service"
+    mode: "0600"
     content: |
       [Unit]
       Description=Check that every WordPress site has a recent backup
@@ -111,12 +135,13 @@
       Type=oneshot
       ExecStart={{ wp_tools_bin }}/wp-backup-check
 
-- name: Deploy the backup freshness check timer
+- name: Stage the backup freshness check timer
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-backup-check.timer
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-backup-check.timer"
+    mode: "0600"
     content: |
       [Unit]
       Description=Check the WordPress backups are recent
@@ -128,20 +153,14 @@
       [Install]
       WantedBy=timers.target
 
-- name: Enable the backup freshness check timer
-  ansible.builtin.systemd:
-    daemon_reload: true
-    name: wp-backup-check.timer
-    enabled: true
-    state: started
-
 # The monthly restore drill: one random site with a good backup, restored into scratch and booted, the result sent to ntfy (templates/wp/wp_restore_drill.sh.j2).
-- name: Deploy the monthly restore drill service
+- name: Stage the monthly restore drill service
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-restore-drill.service
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-restore-drill.service"
+    mode: "0600"
     content: |
       [Unit]
       Description=Monthly WordPress restore drill (one random site, restored into scratch)
@@ -155,12 +174,13 @@
       Nice=10
       IOSchedulingClass=idle
 
-- name: Deploy the monthly restore drill timer
+- name: Stage the monthly restore drill timer
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-restore-drill.timer
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-restore-drill.timer"
+    mode: "0600"
     content: |
       [Unit]
       Description=Monthly WordPress restore drill
@@ -173,20 +193,14 @@
       [Install]
       WantedBy=timers.target
 
-- name: Enable the monthly restore drill timer
-  ansible.builtin.systemd:
-    daemon_reload: true
-    name: wp-restore-drill.timer
-    enabled: true
-    state: started
-
 # The archive purge: once a day, the archives of deleted sites whose time is up are removed (templates/wp/wp_archive_purge.sh.j2).
-- name: Deploy the archive purge service
+- name: Stage the archive purge service
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-archive-purge.service
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-archive-purge.service"
+    mode: "0600"
     content: |
       [Unit]
       Description=Remove the archives of deleted WordPress sites whose time is up
@@ -198,12 +212,13 @@
       Nice=10
       IOSchedulingClass=idle
 
-- name: Deploy the archive purge timer
+- name: Stage the archive purge timer
+  delegate_to: localhost
+  become: false
+  check_mode: false
   ansible.builtin.copy:
-    dest: /etc/systemd/system/wp-archive-purge.timer
-    owner: root
-    group: root
-    mode: "0644"
+    dest: "{{ wp_stage.path }}/units/wp-archive-purge.timer"
+    mode: "0600"
     content: |
       [Unit]
       Description=Daily purge of expired WordPress site archives
@@ -214,6 +229,103 @@
 
       [Install]
       WantedBy=timers.target
+
+# What is staged is what is sent: the lists name the staged files (rsync --files-from), so a file that is not staged is never touched on the VM and the destination directories are left alone.
+- name: Find the staged files
+  ansible.builtin.find:
+    paths: "{{ wp_stage.path }}/{{ item }}"
+    file_type: file
+  loop: [bin, lib, units]
+  register: wp_staged
+  delegate_to: localhost
+  become: false
+  check_mode: false
+
+- name: Write the lists of the staged files
+  ansible.builtin.copy:
+    dest: "{{ wp_stage.path }}/lists/{{ item.item }}.list"
+    content: "{{ item.files | map(attribute='path') | map('basename') | sort | join('\n') }}\n"
+    mode: "0600"
+  loop: "{{ wp_staged.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+
+# --checksum: compare content, not times (the staged copies are new every run). --chown and --chmod make the owner and the mode part of what is compared, so a file whose mode drifted is sent
+# again and the run says changed. Check mode is an rsync dry run: it lists what would be sent.
+- name: Send the tools library and the Python modules
+  ansible.posix.synchronize:
+    src: "{{ wp_stage.path }}/lib/"
+    dest: "{{ wp_tools_lib }}/"
+    archive: false
+    checksum: true
+    perms: true
+    owner: true
+    group: true
+    use_ssh_args: true
+    rsync_opts:
+      - "--files-from={{ wp_stage.path }}/lists/lib.list"
+      - "--chown=root:root"
+      - "--chmod=F0644"
+
+- name: Send the tools
+  ansible.posix.synchronize:
+    src: "{{ wp_stage.path }}/bin/"
+    dest: "{{ wp_tools_bin }}/"
+    archive: false
+    checksum: true
+    perms: true
+    owner: true
+    group: true
+    use_ssh_args: true
+    rsync_opts:
+      - "--files-from={{ wp_stage.path }}/lists/bin.list"
+      - "--chown=root:root"
+      - "--chmod=F0750"
+
+- name: Send the WordPress units
+  ansible.posix.synchronize:
+    src: "{{ wp_stage.path }}/units/"
+    dest: /etc/systemd/system/
+    archive: false
+    checksum: true
+    perms: true
+    owner: true
+    group: true
+    use_ssh_args: true
+    rsync_opts:
+      - "--files-from={{ wp_stage.path }}/lists/units.list"
+      - "--chown=root:root"
+      - "--chmod=F0644"
+  notify: Reload systemd
+
+# The site tasks enable timers next, and systemd must know the units first.
+- name: Reload systemd now if a unit changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Remove the staging directory
+  ansible.builtin.file:
+    path: "{{ wp_stage.path }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  check_mode: false
+
+- name: Enable the backup freshness check timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-backup-check.timer
+    enabled: true
+    state: started
+
+- name: Enable the monthly restore drill timer
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: wp-restore-drill.timer
+    enabled: true
+    state: started
 
 - name: Enable the archive purge timer
   ansible.builtin.systemd:

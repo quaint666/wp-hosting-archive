@@ -1845,7 +1845,7 @@ class Wrapper(unittest.TestCase):
             lib, intake = d / "lib", d / "data/intake"
             lib.mkdir(); intake.mkdir(parents=True); (d / "data/sites/wptest").mkdir(parents=True)
             text, _ = self.render(wp_sites=[{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "hold"}], wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
-            deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the Python modules of wp-site-import" for i in t["loop"]]
+            deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the Python modules of wp-site-import" for i in t["loop"]]
             self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_site_import.py", "wp_wpress.py"], "the play must copy every module the tool imports")
             for m in deployed:
                 (lib / m).write_text((ROOT / "scripts" / m).read_text())

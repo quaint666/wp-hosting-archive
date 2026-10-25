@@ -556,8 +556,8 @@ class BackupCheck(Base):
     def test_the_hourly_unit_alerts_on_failure(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         by = {t.get("name"): t for t in tasks}
-        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Deploy the backup freshness check service"]["ansible.builtin.copy"]["content"])
-        self.assertIn("OnCalendar={{ wp_backup_check_calendar }}", by["Deploy the backup freshness check timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Stage the backup freshness check service"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnCalendar={{ wp_backup_check_calendar }}", by["Stage the backup freshness check timer"]["ansible.builtin.copy"]["content"])
         self.assertEqual(self.v["wp_backup_check_calendar"], "hourly")
 
 
@@ -623,9 +623,9 @@ class Drill(Base):
 
     def test_it_is_a_monthly_timer_after_the_proxmox_job_and_a_failure_alerts(self):
         by = {t.get("name"): t for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())}
-        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Deploy the monthly restore drill service"]["ansible.builtin.copy"]["content"])
-        self.assertIn("OnCalendar={{ wp_drill_calendar }}", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
-        self.assertIn("Persistent=true", by["Deploy the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnFailure=wp-job-failed@%N.service", by["Stage the monthly restore drill service"]["ansible.builtin.copy"]["content"])
+        self.assertIn("OnCalendar={{ wp_drill_calendar }}", by["Stage the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
+        self.assertIn("Persistent=true", by["Stage the monthly restore drill timer"]["ansible.builtin.copy"]["content"])
         self.assertEqual(self.v["wp_drill_calendar"], "*-*-01 05:30:00")
         self.assertGreater(self.v["wp_drill_timeout_s"], 600)
 

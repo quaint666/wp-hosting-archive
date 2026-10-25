@@ -396,9 +396,9 @@ class Update(Base):
     def test_the_tool_the_units_and_the_timer_are_deployed_and_the_policies_come_from_the_sites(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         by = {t["name"]: t for t in tasks}
-        tool = by["Deploy the tools"]
+        tool = by["Stage the tools"]
         self.assertIn({"src": "wp_site_update.sh.j2", "dest": "wp-site-update"}, tool["loop"])
-        units = {i["dest"] for i in by["Deploy the WordPress job units"]["loop"]}
+        units = {i["dest"] for i in by["Stage the WordPress job units"]["loop"]}
         self.assertTrue({"wp-update@.service", "wp-update@.timer"} <= units)
         sites = [{"name": "a", "update_policy": "auto"}, {"name": "b"}, {"name": "c", "update_policy": "freeze"}]
         got = jinja2.Environment().from_string(tool["vars"]["wp_update_policies"]).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()

@@ -417,7 +417,7 @@ class Help(Base):
         self.assertIn("wp-site-import", top)
 
     def test_the_import_tool_the_help_names_is_deployed_and_prints_a_usage_line(self):
-        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
+        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the tools" for i in t["loop"]}
         self.assertIn("wp-site-import", deployed)
         import wp_site_import
         self.assertIn("usage: wp-site-import", wp_site_import.USAGE)
@@ -425,7 +425,7 @@ class Help(Base):
             self.assertIn("wp-site-import %s" % sub, wp_site_import.USAGE)
 
     def test_the_tools_the_help_names_exist_and_print_a_usage_line(self):
-        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Deploy the tools" for i in t["loop"]}
+        deployed = {i["dest"] for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the tools" for i in t["loop"]}
         top = self.help_text()
         for tool in ("wp-site-update", "wp-site-recover", "wp-site-backup", "wp-site-restore", "wp-site-install", "wp-site-password", "wp-site-ext", "wp-site-cli"):
             self.assertIn(tool, deployed, tool + " is not deployed"); self.assertIn(tool, top)
