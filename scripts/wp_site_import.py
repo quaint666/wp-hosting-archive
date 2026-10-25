@@ -543,10 +543,12 @@ def reset_wp_content(cfg, site, site_dir, tools):
     uid = int(cfg["php_uid"])
     # The contents are emptied IN PLACE: uploads is a bind mount of its own in the compose file (./html/wp-content/uploads), and a running container keeps the directory it was started with. Removing and
     # recreating that directory left the php container writing into a deleted one ("php can write to uploads" failed, dellwp 2026-10-25). Nothing here replaces the wp-content or uploads directory itself.
+    # The image's files are copied with /* and never with /. : `cp -a dir/. .` also copies the image directory's own owner and mode onto wp-content, which the image gives to www-data, and the install
+    # container (root, no capabilities) could then no longer create wp-content/upgrade ("Could not create directory", every install of the next import failed, dellwp 2026-10-25).
     sh = ("cd /var/www/html/wp-content && "
           "find . -mindepth 1 -maxdepth 1 ! -name uploads -exec rm -rf -- {} + && "
           "{ [ ! -d uploads ] || find uploads -mindepth 1 -delete; } && "
-          "cp -a /usr/src/wordpress/wp-content/. . && "
+          "cp -a /usr/src/wordpress/wp-content/* . && "
           "find . -mindepth 1 -maxdepth 1 ! -name uploads -exec chown -R 0:0 -- {} + && "
           "mkdir -p uploads && chown %d:%d uploads" % (uid, uid))
     ok, out = tools.call("docker", "run", "--rm", "--memory", "256m", "--memory-swap", "256m", "--entrypoint", "sh", "-v", "%s:/var/www/html" % (site_dir / "html"), cfg["image_pin"], "-c", sh)
