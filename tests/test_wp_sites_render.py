@@ -6,6 +6,7 @@ stub secrets, then evaluates the play's own assertion expressions against the re
 see what Ansible does to a value (an empty string turned into None, the real `hash` filter, template trimming), so a pass here is not a pass of the play:
 it catches a broken template, a wrong expression and a limit that no longer fits. Run: python3 tests/test_wp_sites_render.py
 """
+import ast
 import copy
 import hashlib
 import random
@@ -262,6 +263,91 @@ class Render(unittest.TestCase):
         self.assertIn("zone=%s:" % zone, base)
 
 
+class ClosedSites(unittest.TestCase):
+    """The tombstone checks run as two commands for all closed sites. These run the real command lines the tasks render, on a throwaway tree with a stand-in systemctl."""
+    def setUp(self):
+        import subprocess
+        import tempfile
+        self.sp = subprocess
+        self.d = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.d.name)
+        for n in ("sites", "backups", "units", "vhosts", "bin", "state"):
+            (self.tmp / n).mkdir()
+        # systemctl: is-enabled / is-active answer from files named <unit>.enabled / <unit>.active
+        (self.tmp / "bin/systemctl").write_text('#!/bin/bash\n[ "$1" = is-enabled ] && f=enabled || f=active\n[ -e "%s/state/${@: -1}.$f" ]\n' % self.tmp)
+        (self.tmp / "bin/systemctl").chmod(0o755)
+        self.tasks = load("tasks/wp_sites_common.yml")
+        self.env = jinja2.Environment()
+        self.env.filters["regex_replace"] = lambda v, pat, rep: re.sub(pat, rep, v)
+
+    def tearDown(self):
+        self.d.cleanup()
+
+    def task(self, name):
+        return next(t for t in self.tasks if t.get("name") == name)
+
+    def render(self, task, sites):
+        ctx = {"wp_sites_merged": sites, "wp_data_mount": str(self.tmp), "wp_backup_dir": str(self.tmp / "backups"), "wp_unit_dir": str(self.tmp / "units"),
+               "wp_vhost_dir": str(self.tmp / "vhosts")}
+        for k, v in (task.get("vars") or {}).items():
+            ctx[k] = ast.literal_eval(self.env.from_string(v).render(**ctx)) if isinstance(v, str) and v.lstrip().startswith("{{") else v   # Ansible keeps a list a list
+        return ast.literal_eval(self.env.from_string(task["ansible.builtin.command"]["argv"]).render(**ctx))
+
+    def run_probe(self, sites):
+        argv = self.render(self.task("Look for what is left of the closed sites in the places the play owns"), sites)
+        r = self.sp.run(argv, capture_output=True, text=True, env={"PATH": "%s:/usr/bin:/bin" % (self.tmp / "bin")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.split()
+
+    def run_left(self, sites):
+        argv = self.render(self.task("Look for what the closed sites left on the VM"), sites)
+        r = self.sp.run(argv, capture_output=True, text=True)
+        return r.returncode, r.stdout.split()
+
+    SITES = [{"name": "alive", "state": "live"}, {"name": "gone-one", "state": "closed"}, {"name": "gone2", "state": "closed"}]
+
+    def test_clean_tombstones_print_nothing(self):
+        self.assertEqual(self.run_probe(self.SITES), [])
+
+    def test_each_kind_of_leftover_names_its_site_and_only_its_site(self):
+        for label, make in (("unit file", "units/wp-gone2.service"), ("vhost", "vhosts/wp_site_gone2.conf"), ("enabled timer", "state/wp-backup@gone2.timer.enabled"),
+                            ("running timer", "state/wp-update@gone2.timer.active"), ("cron timer", "state/wp-cron@gone2.timer.enabled")):
+            f = self.tmp / make
+            f.write_text("")
+            self.assertEqual(self.run_probe(self.SITES), ["gone2"], label)
+            f.unlink()
+        (self.tmp / "units/wp-alive.service").write_text("")
+        self.assertEqual(self.run_probe(self.SITES), [], "a live site is never the probe's business")
+
+    def test_two_dirty_sites_are_both_named_in_order(self):
+        (self.tmp / "units/wp-gone-one.service").write_text("")
+        (self.tmp / "vhosts/wp_site_gone2.conf").write_text("")
+        self.assertEqual(self.run_probe(self.SITES), ["gone-one", "gone2"])
+
+    def test_a_site_name_is_a_plain_argument_and_never_part_of_a_shell_line(self):
+        evil = [{"name": "x; touch %s/pwned" % self.tmp, "state": "closed"}]
+        self.assertEqual(self.run_probe(evil), [])
+        self.assertFalse((self.tmp / "pwned").exists())
+
+    def test_data_left_on_the_vm_is_listed_and_a_clean_vm_says_nothing(self):
+        rc, out = self.run_left(self.SITES)
+        self.assertEqual((rc, out), (2, []), "ls exits 2 when the paths are missing, and the task accepts that")
+        (self.tmp / "sites/gone2").mkdir()
+        (self.tmp / "backups/gone-one").mkdir()
+        rc, out = self.run_left(self.SITES)
+        self.assertEqual((rc, sorted(out)), (2, sorted([str(self.tmp / "sites/gone2"), str(self.tmp / "backups/gone-one")])))
+        (self.tmp / "sites/alive").mkdir()
+        self.assertEqual(len(self.run_left(self.SITES)[1]), 2, "a live site's directory is not reported")
+
+    def test_only_the_missing_path_exit_code_of_ls_is_accepted(self):
+        self.assertEqual(self.task("Look for what the closed sites left on the VM")["failed_when"].split("#")[0].strip(), "wp_closed_left.rc not in [0, 2]")
+        self.assertEqual(self.sp.run(["ls", "-1d", "--", str(self.tmp / "nothing")], capture_output=True).returncode, 2, "this is the code ls gives for a missing path")
+
+    def test_with_no_closed_site_neither_command_runs(self):
+        for n in ("Look for what the closed sites left on the VM", "Look for what is left of the closed sites in the places the play owns"):
+            self.assertIn("selectattr('state', 'eq', 'closed') | list | length > 0", self.task(n)["when"])
+
+
 class Wiring(unittest.TestCase):
     def test_every_template_the_tasks_name_exists(self):
         text = (ROOT / "tasks/wp_site_one_common.yml").read_text()
@@ -309,17 +395,17 @@ class Assertions(unittest.TestCase):
         tasks = load("tasks/wp_sites_common.yml")
         names = [t.get("name", "") for t in tasks]
         first_deploy = names.index("Deploy each site that exists (tasks/wp_site_one_common.yml)")
-        for n in ("Look for the site directories of the closed sites", "Look for the backup directories of the closed sites", "Stop if a closed site still has its data on the VM"):
+        for n in ("Look for what the closed sites left on the VM", "Stop if a closed site still has its data on the VM", "Look for what is left of the closed sites in the places the play owns"):
             self.assertLess(names.index(n), first_deploy, n + " must come before anything is deployed")
-        stat_dirs = tasks[names.index("Look for the site directories of the closed sites")]; stat_bk = tasks[names.index("Look for the backup directories of the closed sites")]
-        self.assertEqual(stat_dirs["ansible.builtin.stat"]["path"], "{{ wp_data_mount }}/sites/{{ item.name }}"); self.assertEqual(stat_bk["ansible.builtin.stat"]["path"], "{{ wp_backup_dir }}/{{ item.name }}")
-        for t in (stat_dirs, stat_bk):
-            self.assertIs(t["check_mode"], False, "stat is read-only: it must also run in check mode"); self.assertIn("'closed'", t["loop"])
+        look = tasks[names.index("Look for what the closed sites left on the VM")]
+        self.assertIs(look["check_mode"], False, "ls is read-only: it must also run in check mode")
+        self.assertIs(look["changed_when"], False)
+        self.assertEqual(look["failed_when"].split("#")[0].strip(), "wp_closed_left.rc not in [0, 2]")
         stop = tasks[names.index("Stop if a closed site still has its data on the VM")]
-        self.assertEqual(stop["ansible.builtin.assert"]["that"], ["not item.stat.exists"]); self.assertIn("never deletes data", stop["ansible.builtin.assert"]["fail_msg"])
-        self.assertIn("wp_closed_dirs.results + wp_closed_backups.results", stop["loop"])
+        self.assertEqual(stop["ansible.builtin.assert"]["that"], ["wp_closed_left.stdout_lines | default([]) | length == 0"]); self.assertIn("never deletes data", stop["ansible.builtin.assert"]["fail_msg"])
         deploy = tasks[first_deploy]; tomb = tasks[names.index("Remove what a closed site left behind (tasks/wp_site_closed_common.yml)")]
         self.assertIn("rejectattr('state', 'eq', 'closed')", deploy["loop"]); self.assertIn("selectattr('state', 'eq', 'closed')", tomb["loop"])
+        self.assertIn("selectattr('name', 'in', wp_closed_dirty.stdout_lines | default([]))", tomb["loop"], "only the closed sites the probe found something of are cleaned")
         # the tombstone tasks delete no data: only the stack's unit, the vhost and the timers
         closed = load("tasks/wp_site_closed_common.yml")
         text = (ROOT / "tasks/wp_site_closed_common.yml").read_text()
