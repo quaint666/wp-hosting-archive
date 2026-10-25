@@ -129,6 +129,8 @@ wp_archive_purge_calendar: "*-*-* 05:15:00"
 wp_intake_dir: "{{ wp_data_mount }}/intake"
 wp_intake_quota_id: 3000003
 wp_intake_quota_mb: 3072
+# The longest any one command of wp-site-import (a docker exec, a WP-CLI call, wp-site-ext, the SQL load) may run before the tool stops it: a hung container must not hold the import lock for ever.
+wp_import_step_timeout_s: 3600
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.

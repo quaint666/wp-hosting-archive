@@ -60,6 +60,13 @@ VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]*$")
 SCAN_PATTERNS = ((rb"\beval\s*\(", "eval()"), (rb"\bbase64_decode\s*\(", "base64_decode()"), (rb"\bgzinflate\s*\(|\bgzuncompress\s*\(|\bstr_rot13\s*\(", "gzinflate/str_rot13"),
                  (rb"\b(?:shell_exec|passthru|proc_open|popen|pcntl_exec)\s*\(", "shell execution"), (rb"\b(?:system|exec)\s*\(", "system()/exec()"), (rb"\bassert\s*\(\s*\$", "assert($var)"))
 SCAN_EXT = (".php", ".phtml", ".phar", ".php3", ".php4", ".php5", ".php7", ".inc", ".pht")
+SCAN_BYTES = 8 * MIB        # a file is read this far for the pattern scan, so one huge file cannot take the VM's memory
+# A name that PHP or the web server would act on. Under uploads/ nothing of the kind is copied: the archive's PHP there would be code that can be included by a database option.
+EXEC_NAME = re.compile(r"\.(php\d?|phtml|phar|pht|inc)(\.|$)", re.I)
+UPLOADS_BLOCKED = "PHP or hidden file under uploads (code or server settings): not copied"
+LANG_OK = (".mo", ".po", ".json")
+LANG_BLOCKED = "languages file that is not a translation (.mo, .po, .json; a .l10n.php file is code): not copied"
+HOST_MAX = 253
 
 
 class Refuse(Exception):
@@ -94,9 +101,15 @@ def classify(name, path, plugins, themes):
         if decision == "dropped":
             return "skip", "%s %s: not carried over" % (kind, slug)
         return "skip", "%s %s: inactive" % (kind, slug)
+    if top == "uploads":
+        if name.startswith(".") or any(x.startswith(".") for x in parts[1:]) or EXEC_NAME.search(name):
+            return "skip", UPLOADS_BLOCKED
+        return "keep", "wp-content/" + rel(name, path)
+    if top == "languages":
+        return ("keep", "wp-content/" + rel(name, path)) if name.lower().endswith(LANG_OK) and not name.startswith(".") else ("skip", LANG_BLOCKED)
     if top in KEEP_DIRS:
         return "keep", "wp-content/" + rel(name, path)
-    return "skip", "unknown directory '%s': not copied" % top
+    return "skip", "unknown directory '%s': not copied" % w.printable(top, limit=40)
 
 
 def build_plan(a, cfg, get):
@@ -125,7 +138,8 @@ def build_plan(a, cfg, get):
             t = tally.setdefault(what, [0, 0])
             t[0] += 1
             t[1] += size
-    return {"facts": facts, "rows": rows, "notes": notes, "plugins": plugins, "themes": themes, "keep": keep, "keep_bytes": keep_bytes, "tally": tally}
+    sql_bytes = sum(k[2] for k in keep if k[4] == "database.sql")
+    return {"facts": facts, "rows": rows, "notes": notes, "plugins": plugins, "themes": themes, "keep": keep, "keep_bytes": keep_bytes, "tally": tally, "sql_bytes": sql_bytes}
 
 
 def tree_bytes(path):
@@ -277,17 +291,23 @@ def save_record(work, record):
 class Tools:
     """The things the run asks of the host, in one place so that the tests can stand in for them."""
     def __init__(self, cfg, run, popen, chown, which):
-        self.cfg, self.run, self.popen, self.chown, self.which = cfg, run, popen, chown, which
+        self.cfg, self.popen, self.chown, self.which = cfg, popen, chown, which
+        self.timeout = int(cfg["step_timeout_s"])
+        self.run = lambda cmd, **kw: run(cmd, timeout=self.timeout, **kw)
 
     def bin(self, name):
         return os.path.join(self.cfg["tools_bin"], name)
 
     def call(self, *cmd):
-        p = self.run(list(cmd), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        try:
+            p = self.run(list(cmd), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "timed out after %d s" % self.timeout
         return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
 
-    def cli(self, site, *args):
-        return self.call(self.bin("wp-site-cli"), site, *args)
+    def cli(self, site, *args, plugins=False):
+        """WP-CLI as the web app, with no theme code loaded and, unless the step needs it, no plugin code: the database is the archive's, and it decides what WordPress would include."""
+        return self.call(self.bin("wp-site-cli"), site, *args, "--skip-themes", *([] if plugins else ["--skip-plugins"]))
 
     def ext(self, site, *args):
         return self.call(self.bin("wp-site-ext"), site, *args)
@@ -320,7 +340,11 @@ def load_sql(site, work, prefix, tools):
             p.stdin.close()
         except BrokenPipeError:
             pass
-        rc = p.wait()
+        try:
+            rc = p.wait(timeout=tools.timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            raise Refuse("the load did not finish within %d s and was stopped" % tools.timeout)
         err.seek(0)
         tail = err.read()[-500:].decode(errors="replace").strip()
     if rc != 0:
@@ -348,15 +372,16 @@ def drop_all_tables(site, tools):
 
 # ---- stage: copy the data in (uploads, languages); code waits for approval
 
-def copy_tree(src, dst, uid, mode_dir, mode_file, chown, manifest, root):
-    """Copy a tree of plain files. Never overwrites, never follows a link; every path it made is added to the manifest (relative to root) the moment it exists."""
+def copy_tree(src, dst, uid, mode_dir, mode_file, chown, manifest, root, save=lambda: None):
+    """Copy a tree of plain files. Never overwrites, never follows a link; every path it made is added to the manifest (relative to root) the moment it exists, and the manifest is saved
+    every 200 files, so an interrupted copy can still be undone."""
     for cur, dirs, files in os.walk(src):
         here = Path(dst) / Path(cur).relative_to(src)
         if not here.exists():
             here.mkdir(mode=mode_dir)
+            manifest.append(str(here.relative_to(root)) + "/")      # recorded the moment it exists, before anything that can be interrupted
             os.chmod(here, mode_dir)
             chown(here, uid, uid)
-            manifest.append(str(here.relative_to(root)) + "/")
         elif here.is_symlink() or not here.is_dir():
             raise Refuse("%s exists and is not a directory: refusing" % here)
         for name in sorted(files):
@@ -366,6 +391,8 @@ def copy_tree(src, dst, uid, mode_dir, mode_file, chown, manifest, root):
             except FileExistsError:
                 raise Refuse("%s already exists: refusing to overwrite it" % target)
             manifest.append(str(target.relative_to(root)))
+            if len(manifest) % 200 == 0:
+                save()
             with os.fdopen(fd, "wb") as out, open(Path(cur) / name, "rb") as f:
                 shutil.copyfileobj(f, out, CHUNK)
             os.chmod(target, mode_file)
@@ -378,7 +405,7 @@ def copy_data(cfg, site_dir, work, record, tools):
     for sub, owner in (("uploads", uid), ("languages", 0)):
         src = work / "wp-content" / sub
         if src.is_dir():
-            copy_tree(src, html / "wp-content" / sub, owner, 0o755, 0o644, tools.chown, record["copied"], html)
+            copy_tree(src, html / "wp-content" / sub, owner, 0o755, 0o644, tools.chown, record["copied"], html, lambda: save_record(work, record))
             save_record(work, record)
 
 
@@ -415,13 +442,35 @@ def install_from_org(site, record, work, tools):
 # ---- stage: WP-CLI
 
 def old_hosts(meta):
+    """The addresses the archive says the site had, without scheme and trailing slashes. A value longer than a host name can be is ignored (it is the archive's text, not an address)."""
     hosts = []
     for key in ("SiteURL", "HomeURL", "InternalSiteURL", "InternalHomeURL"):
-        v = str(meta.get(key) or "")
-        m = re.match(r"^(?:https?:)?//(.+?)/*$", v)
-        if m and m.group(1) not in hosts:
-            hosts.append(m.group(1))
+        v = meta.get(key)
+        if not isinstance(v, str):
+            continue
+        for pre in ("https://", "http://", "//"):
+            if v.startswith(pre):
+                v = v[len(pre):].rstrip("/")
+                if v and len(v) <= HOST_MAX and v not in hosts:
+                    hosts.append(v)
+                break
     return hosts
+
+
+def sanitize_options(site, work, tools):
+    """Right after the load, before any command that could load plugin or theme code: the database is the archive's and says which files WordPress includes (active_plugins, template and
+    stylesheet are paths). Put back only what package.json says, which the reader has already checked to be plain names. Raises Refuse if one of them cannot be set."""
+    meta = json.loads((work / "package.json").read_text())
+    _, _, plugins, themes = w.check_meta(meta)
+    keep = [e for e in plugins if not dropped_plugin(e.split("/")[0] if "/" in e else e.rsplit(".", 1)[0])]
+    template, stylesheet = meta.get("Template") or themes[0], meta.get("Stylesheet") or themes[0]
+    steps = []
+    for name, value, fmt in (("active_plugins", json.dumps(keep), ["--format=json"]), ("template", template, []), ("stylesheet", stylesheet, [])):
+        ok, out = tools.cli(site, "option", "update", name, value, *fmt)
+        if not ok:
+            raise Refuse("could not reset the %s option from package.json before running anything else (%s)" % (name, out[-200:]))
+        steps.append({"name": "option %s reset to package.json" % name, "ok": True, "note": "%d plugin(s)" % len(keep) if name == "active_plugins" else value})
+    return steps
 
 
 def wpcli_steps(cfg, site, work, record, tools):
@@ -429,8 +478,8 @@ def wpcli_steps(cfg, site, work, record, tools):
     new_host = "%s.%s" % (site, cfg["domain"])
     new_url = "https://" + new_host
 
-    def step(name, *args):
-        ok, out = tools.cli(site, *args)
+    def step(name, *args, plugins=False):
+        ok, out = tools.cli(site, *args, plugins=plugins)
         steps.append({"name": name, "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:]})
         return ok, out
 
@@ -448,21 +497,22 @@ def wpcli_steps(cfg, site, work, record, tools):
             step("search-replace %s" % a, "search-replace", a, b, "--all-tables-with-prefix", "--report-changed-only", "--precise")
     active, _ = tools.cli(site, "plugin", "is-active", "elementor")
     if active:
-        ok, help_text = tools.cli(site, "elementor")
+        ok, help_text = tools.cli(site, "elementor", plugins=True)
         names = set(re.findall(r"\b(replace[-_]urls|flush[-_]css)\b", help_text))
         rep = next((n for n in ("replace-urls", "replace_urls") if n in names), None)
         if rep:
             for h in hosts:
                 if HOST_RE.match(h):
                     for scheme in ("http://", "https://"):
-                        step("elementor %s %s" % (rep, scheme + h), "elementor", rep, scheme + h, new_url)
+                        step("elementor %s %s" % (rep, scheme + h), "elementor", rep, scheme + h, new_url, plugins=True)
         else:
             steps.append({"name": "elementor replace-urls", "ok": False, "note": "Elementor is active but its help lists no replace command: URLs inside Elementor data may still be the old ones"})
         flush = next((n for n in ("flush-css", "flush_css") if n in names), None)
         if flush:
-            step("elementor %s" % flush, "elementor", flush)
+            step("elementor %s" % flush, "elementor", flush, plugins=True)
     step("transient delete", "transient", "delete", "--all")
-    step("rewrite flush", "rewrite", "flush")
+    ok, out = tools.cli(site, "rewrite", "flush", plugins=True)
+    steps.append({"name": "rewrite flush", "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:]})
     step("option blog_public", "option", "update", "blog_public", "0")
     step("cache flush", "cache", "flush")
     return steps
@@ -481,7 +531,8 @@ def pattern_scan(roots, limit=40):
                     continue
                 path = Path(cur) / name
                 try:
-                    data = path.read_bytes()
+                    with open(path, "rb") as fh:
+                        data = fh.read(SCAN_BYTES)
                 except OSError:
                     continue
                 found = [label for rx, label in SCAN_PATTERNS if re.search(rx, data)]
@@ -551,6 +602,9 @@ def build_report(site, record, steps, res, work):
     lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["held_hits"]]
     lines += ["  suspicious patterns in uploads/: %d file(s)" % res["uploads_hits_total"]]
     lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["uploads_hits"]]
+    blocked = [(k, v) for k, v in record["tally"].items() if k in (UPLOADS_BLOCKED, LANG_BLOCKED)]
+    if blocked:
+        lines += ["", "NOT COPIED because PHP or the web server would act on it:"] + ["  %d file(s)  %s" % (v[0], k) for k, v in blocked]
     if record["notes"]:
         lines += ["", "NOTES"] + ["  " + n for n in record["notes"]]
     failed = [s for s in steps if not s["ok"]] + ([{"name": "core checksums"}] if not res["core"][0] else [])
@@ -558,7 +612,7 @@ def build_report(site, record, steps, res, work):
               "      wp-site-import reset %s                         (undoes this run)" % site]
     if failed:
         lines.append("      approve refuses while a step failed; add --accept-failures once you have looked at them")
-    return "\n".join(lines)
+    return w.printable("\n".join(lines), keep_newline=True)
 
 
 # ---- the run
@@ -576,11 +630,12 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
         need = plan["keep_bytes"]
         intake_free = int(cfg["intake_quota_mb"]) * MIB - tree_bytes(cfg["intake_dir"])
         site_free = int(cfg["sites"][site]["quota_mb"]) * MIB - tree_bytes(site_dir)
+        site_need = need + 2 * plan["sql_bytes"]   # the database on disk is about three times its dump (a guess, so the check is a floor, not a promise)
         if need > intake_free:
             raise Refuse("the unpacked copy needs %.1f MB and the intake quota has %.1f MB free (the archive itself counts): remove files from %s or raise wp_intake_quota_mb. Nothing was changed"
                          % (need / MIB, intake_free / MIB, cfg["intake_dir"]))
-        if need > site_free:
-            raise Refuse("the files to copy in need %.1f MB and %s has %.1f MB left of its quota: raise quota_mb (wp_sites.py modify %s --set quota_mb=...). Nothing was changed" % (need / MIB, site, site_free / MIB, site))
+        if site_need > site_free:
+            raise Refuse("the files to copy in and the database need about %.1f MB and %s has %.1f MB left of its quota: raise quota_mb (wp_sites.py modify %s --set quota_mb=...). Nothing was changed" % (site_need / MIB, site, site_free / MIB, site))
         if plan_only:
             show_plan(plan, site, path.name, "", path.stat().st_size, out)
             out("\nPLAN ONLY: nothing was written.")
@@ -600,17 +655,19 @@ def run_import(cfg, site, arg, plan_only, get, tools, out):
     show_plan(plan, site, path.name, digest, size, out)
     out("\nUNPACKED into %s. Loading the database ..." % work)
     try:
-        tables = load_sql(site, work, prefix, tools)
-        record["db_loaded"] = True
+        record["db_loaded"] = True      # set BEFORE the load: a load that is interrupted has still put tables in, and reset must drop them
         save_record(work, record)
+        tables = load_sql(site, work, prefix, tools)
         ledger(cfg, site, "loaded", digest, size, path.name)
-        out("loaded %d tables. Copying data, installing from wordpress.org, running WP-CLI ..." % tables)
+        out("loaded %d tables. Resetting the options that name code, copying data, installing from wordpress.org, running WP-CLI ..." % tables)
+        steps = sanitize_options(site, work, tools)
         copy_data(cfg, site_dir, work, record, tools)
-        steps = install_from_org(site, record, work, tools)
+        steps += install_from_org(site, record, work, tools)
         steps += wpcli_steps(cfg, site, work, record, tools)
         res = scan(site, site_dir, work, record, tools)
-    except Refuse as e:
-        raise Refuse("%s\nThe run stopped part way. Look at the site, then undo it with: wp-site-import reset %s" % (e, site))
+    except (Refuse, KeyboardInterrupt) as e:
+        save_record(work, record)
+        raise Refuse("%s\nThe run stopped part way. Look at the site, then undo it with: wp-site-import reset %s" % (str(e) or "interrupted", site))
     ok, bout = tools.call(tools.bin("wp-site-backup"), site)
     steps.append({"name": "first backup", "ok": ok, "note": "taken" if ok else "FAILED: " + bout[-200:]})
     record["steps"], record["stage"], record["scan"] = steps, "reported", {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}
@@ -651,10 +708,12 @@ def run_approve(cfg, site, reject, accept_failures, tools, out):
             raise Refuse("%s already exists: refusing to overwrite it. Nothing was copied" % dst)
     for kind, slug, _ in take:
         sub, name = where[kind], ("" if kind == "mu-plugins" else slug)
-        copy_tree(work / "wp-content" / sub / name, html / "wp-content" / sub / name, 0, 0o755, 0o644, tools.chown, record["copied"], html)
-        save_record(work, record)
+        try:
+            copy_tree(work / "wp-content" / sub / name, html / "wp-content" / sub / name, 0, 0o755, 0o644, tools.chown, record["copied"], html, lambda: save_record(work, record))
+        finally:
+            save_record(work, record)
     f = Path(cfg["intake_dir"]) / record["file"]
-    if f.is_file() and not f.is_symlink():
+    if FILE_RE.match(str(record["file"])) and f.is_file() and not f.is_symlink():
         f.unlink()
     shutil.rmtree(work)
     ledger(cfg, site, "approved", record["sha256"], record["size"], record["file"])
@@ -727,6 +786,10 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         args = args[:i] + args[i + 2:]
     plan_only, accept = "--plan" in argv, "--accept-failures" in argv
     tools = Tools(cfg, run, popen, chown, which)
+    raw_out = out
+
+    def out(text):          # everything printed passes the filter: names and versions come from the archive
+        raw_out(w.printable(text, keep_newline=True))
     lock = None
     try:
         lock = os.open(os.path.join(cfg["intake_dir"], ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
@@ -747,6 +810,12 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         return 2
     except w.ArchiveError as e:
         out("wp-site-import: the archive may not be imported: %s" % e)
+        return 2
+    except KeyboardInterrupt:
+        out("wp-site-import: interrupted. If files or tables were already written, wp-site-import reset <site> undoes them.")
+        return 130
+    except subprocess.TimeoutExpired as e:
+        out("wp-site-import: a command did not answer within %d s and was stopped: %s" % (tools.timeout, " ".join(map(str, e.cmd))[:120]))
         return 2
     except urllib.error.URLError as e:
         out("wp-site-import: NOT JUDGED (wordpress.org could not be asked: %s); nothing was changed. Run it again." % e)

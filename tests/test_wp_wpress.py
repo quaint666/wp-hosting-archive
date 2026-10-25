@@ -188,6 +188,17 @@ class Verdicts(Base):
         with self.assertRaises(w.ArchiveError):
             w.pin("wordpress:latest")
 
+    def test_invisible_and_terminal_moving_characters_in_a_name_are_no_go(self):
+        for name in ("a\x85.php", "a\u202eb.php", "a\u200bb.php", "a\ufeff.php", "a\u2028.php"):
+            self.out.clear()
+            code, text = self.run_main(self.archive(good_files() + [("plugins/good", name, b"x")]))
+            self.assertEqual(code, 1, repr(name))
+            self.assertIn("unsafe path", text)
+
+    def test_ordinary_non_ascii_names_are_fine(self):
+        code, _ = self.run_main(self.archive(good_files() + [("plugins/good", "\u00fcber-\u65e5\u672c.php", b"x")]))
+        self.assertEqual(code, 0)
+
     def test_a_dotted_file_name_is_not_unsafe(self):
         code, _ = self.run_main(self.archive(good_files() + [("plugins/good", "..hidden.php", b"x"), ("plugins/good", "a..b.php", b"x")]))
         self.assertEqual(code, 0)
@@ -261,6 +272,97 @@ class Ours(Base):
         self.assertEqual(w.vtuple("8.5.12-beta1"), (8, 5, 12))
 
 
+class Hostile(Base):
+    """What a crafted archive can do to the reader: it must come out as a NO-GO, never as a traceback, a hang or text that moves the operator's terminal."""
+    def pj(self, m, extra=()):
+        raw = m if isinstance(m, bytes) else json.dumps(m).encode()
+        return self.archive([(".", "package.json", raw), (".", "database.sql", b"x")] + list(extra))
+
+    def test_a_negative_size_is_an_unreadable_header(self):
+        for size in (b"-4400", b"-1", b"-99999999999"):
+            h = block("x.php", "plugins/a", 5).replace(b"5".ljust(14, b"\0"), size.ljust(14, b"\0"), 1)
+            p = self.tmp / "neg.wpress"
+            p.write_bytes(h + b"abcde" + b"\0" * HEADER)
+            code, text = self.run_main(str(p))
+            self.assertEqual(code, 1, size)
+            self.assertIn("negative size", text)
+
+    def test_a_size_that_walks_back_to_an_earlier_header_cannot_loop(self):
+        first = block("a.php", "plugins/a", 3) + b"abc"
+        back = block("b.php", "plugins/a", 3)
+        back = back.replace(b"3".ljust(14, b"\0"), str(-(len(first) + HEADER)).encode().ljust(14, b"\0"), 1)
+        p = self.tmp / "loop.wpress"
+        p.write_bytes(first + back + b"xyz" + b"\0" * HEADER)
+        self.assertEqual(self.run_main(str(p))[0], 1)
+
+    def test_package_json_of_the_wrong_shape_is_no_go_not_a_traceback(self):
+        cases = [[1, 2], "text", 5, None, {"WordPress": "7.1.3"}, {"WordPress": {"Version": ["7"]}}, {"WordPress": {"Version": "7.1.3"}, "PHP": {"Version": []}, "Template": "t"},
+                 {"WordPress": {"Version": "7.1.3"}, "Plugins": "abc", "Template": "t"}, {"WordPress": {"Version": "7.1.3"}, "Plugins": [1, None], "Template": "t"},
+                 {"WordPress": {"Version": "7.1.3"}, "Plugins": [["a"]], "Template": "t"}, {"WordPress": {"Version": "7.1.3"}, "Plugins": [], "Template": ["t"]},
+                 {"WordPress": {"Version": "7.1.3"}, "Plugins": []},
+                 {"WordPress": "7.1.3", "Template": "t"}, {"WordPress": {"Version": ["7"]}, "Template": "t"}, {"WordPress": {"Version": ""}, "Template": "t"},
+                 {"WordPress": {}, "Template": "t"}, {"Template": "t"}]
+        for m in cases:
+            self.out.clear()
+            code, text = self.run_main(self.pj(m))
+            self.assertEqual(code, 1, m)
+            self.assertIn("NO-GO", text)
+
+    def test_deeply_nested_json_is_no_go(self):
+        code, text = self.run_main(self.pj(b"[" * 200000 + b"]" * 200000))
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", text)
+
+    def test_a_package_json_over_the_limit_is_no_go(self):
+        code, text = self.run_main(self.pj(b'{"x":"' + b"a" * (w.JSON_LIMIT + 10) + b'"}'))
+        self.assertEqual(code, 1)
+        self.assertIn("larger than", text)
+
+    def test_plugin_and_theme_names_must_be_plain(self):
+        for entry in ("../../x/y.php", "a/b/c.php", "..", "a b/c.php", "x/\x1b[2J.php", "/abs.php", "", "a" * 150 + "/b.php"):
+            self.out.clear()
+            code, text = self.run_main(self.pj(meta(Plugins=[entry])))
+            self.assertEqual(code, 1, entry)
+            self.assertIn("not a plain", text)
+        for theme in ("../..", "a/b", ".hidden", ""):
+            self.out.clear()
+            code, text = self.run_main(self.pj(meta(Template=theme, Stylesheet=theme)))
+            self.assertEqual(code, 1, theme)
+
+    def test_an_archive_with_no_theme_is_no_go(self):
+        m = meta(); del m["Template"]; del m["Stylesheet"]
+        code, text = self.run_main(self.pj(m))
+        self.assertEqual(code, 1)
+        self.assertIn("no active theme", text)
+
+    def test_too_many_plugins_are_refused_before_any_lookup(self):
+        asked = []
+
+        def counting(url):
+            asked.append(url)
+            return 404, None
+        m = meta(Plugins=["p%d/p.php" % i for i in range(w.MAX_ITEMS + 1)])
+        code, text = self.run_main(self.pj(m), get=counting)
+        self.assertEqual(code, 1)
+        self.assertIn("more than", text)
+        self.assertEqual(asked, [])
+
+    def test_escape_sequences_in_a_header_never_reach_the_output(self):
+        evil = plugin_php("1.0\x1b[2J\x1b[31mPWNED\u202e\x07 and a very long tail " + "z" * 200)
+        code, text = self.run_main(self.pj(meta(Plugins=["good/good.php"]), [("plugins/good", "good.php", evil.replace("\\u202e".encode(), "\u202e".encode()))]))
+        self.assertEqual(code, 0, text)
+        for bad in ("\x1b", "\x07", "\u202e"):
+            self.assertNotIn(bad, text)
+        self.assertIn("1.0?[2J", text)
+        self.assertLess(max(len(l) for l in text.splitlines()), 200)
+
+    def test_printable_keeps_text_and_replaces_controls(self):
+        self.assertEqual(w.printable("abc \u00e9\u00fc 1.2-beta"), "abc \u00e9\u00fc 1.2-beta")
+        self.assertEqual(w.printable("a\x1bb\x7fc\x85d\ne", keep_newline=True), "a?b?c?d\ne")
+        self.assertEqual(w.printable("a\nb"), "a?b")
+        self.assertEqual(w.printable("x" * 50, limit=10), "x" * 10 + "...")
+
+
 class Privacy(Base):
     def test_nothing_from_package_json_beyond_the_printed_fields_is_shown(self):
         for tail in ("zeros", "local"):
@@ -276,8 +378,8 @@ class Index(Base):
         h = bytearray(block("good.php", "plugins/good", 4)); h[20:30] = b"JUNKJUNKJU"; h[300:310] = b"JUNKJUNKJU"
         p = self.tmp / "a.wpress"
         p.write_bytes(bytes(h) + b"data" + b"\0" * HEADER)
-        a = w.Archive(p)
-        self.assertEqual([(e[0], e[1], e[2]) for e in a.entries], [("good.php", "plugins/good", 4)])
+        with w.Archive(p) as a:
+            self.assertEqual([(e[0], e[1], e[2]) for e in a.entries], [("good.php", "plugins/good", 4)])
 
     def test_header_version_reads_the_version_line_only(self):
         self.assertEqual(w.header_version(plugin_php("4.2.3", " * Requires PHP: 7.4\n")), "4.2.3")

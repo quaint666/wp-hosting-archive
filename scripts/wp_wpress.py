@@ -26,11 +26,24 @@ HEADER = 4377
 NAME, SIZE, PATH = slice(0, 255), slice(255, 269), slice(281, HEADER)
 JSON_LIMIT = 4 * 1024 * 1024
 HEAD_BYTES = 16 * 1024
+MAX_ITEMS = 150          # plugins plus themes one archive may name; each is a lookup on wordpress.org
+NAME_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 API = "https://api.wordpress.org/%s/info/1.2/?action=%s_information&request[slug]=%s&request[fields][versions]=1"
 
 
 class ArchiveError(Exception):
     pass
+
+
+def printable(text, keep_newline=False, limit=None):
+    """Text from an archive can reach the operator's terminal and a notification. Controls, escapes (ESC starts a terminal sequence), the C1 range and the bidirectional overrides become '?'."""
+    out = []
+    for c in str(text):
+        o = ord(c)
+        bad = o < 32 or 127 <= o <= 159 or 0x200B <= o <= 0x200F or 0x202A <= o <= 0x202E or 0x2066 <= o <= 0x2069 or o in (0xFEFF, 0x2028, 0x2029)
+        out.append("?" if bad and not (keep_newline and c == "\n") else c)
+    text = "".join(out)
+    return text if limit is None or len(text) <= limit else text[:limit] + "..."
 
 
 def pin(image):
@@ -58,7 +71,7 @@ def vtuple(version):
 def unsafe(path, name):
     full = path.replace("\\", "/") + "/" + name if path not in ("", ".") else name
     return ("\\" in path or "\\" in name or full.startswith("/") or re.match(r"^[A-Za-z]:", full) is not None or ".." in full.split("/")
-            or any(ord(c) < 32 or ord(c) == 127 for c in full))
+            or printable(full) != full)
 
 
 class Archive:
@@ -87,6 +100,8 @@ class Archive:
                 size = int(h[SIZE].split(b"\0")[0] or 0)
             except (UnicodeDecodeError, ValueError):
                 raise ArchiveError("unreadable header at byte %d" % at)
+            if size < 0:
+                raise ArchiveError("unreadable header at byte %d (a negative size)" % at)
             if at + HEADER + size > self.length:
                 raise ArchiveError("truncated inside %s/%s" % (path, name))
             self.entries.append((name, path, size, at + HEADER))
@@ -112,7 +127,7 @@ class Archive:
 
 def header_version(data):
     m = re.search(rb"^[ \t/*#@]*Version:[ \t]*([^\r\n]+)", data, re.M | re.I)
-    return m.group(1).decode(errors="replace").strip() if m else None
+    return printable(m.group(1).decode(errors="replace").strip(), limit=40) if m else None
 
 
 def header_field(data, field):
@@ -170,15 +185,52 @@ def preflight(path, repo=REPO, get=fetch):
         return judge(a, our_wp, our_php, get)
 
 
+def check_meta(meta):
+    """package.json comes from the archive: prove its shape before anything reads a field. Returns (wp_version, php_version or None, plugin entries, themes)."""
+    if not isinstance(meta, dict):
+        raise ArchiveError("package.json is not a JSON object")
+    wpd = meta.get("WordPress")
+    if not isinstance(wpd, dict) or not isinstance(wpd.get("Version"), str) or not wpd["Version"]:
+        raise ArchiveError("package.json names no WordPress version")
+    phpd = meta.get("PHP")
+    php = phpd.get("Version") if isinstance(phpd, dict) else None
+    if php is not None and not isinstance(php, str):
+        raise ArchiveError("package.json has an unreadable PHP version")
+    plugins = meta.get("Plugins", [])
+    if not isinstance(plugins, list) or not all(isinstance(x, str) for x in plugins):
+        raise ArchiveError("package.json lists its plugins in a form this tool does not read")
+    for entry in plugins:
+        parts = entry.split("/")
+        if len(parts) > 2 or not all(NAME_PART.match(x) for x in parts):
+            raise ArchiveError("package.json names a plugin '%s', which is not a plain folder/file name" % printable(entry, limit=60))
+    themes = []
+    for key in ("Template", "Stylesheet"):
+        v = meta.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, str) or not NAME_PART.match(v):
+            raise ArchiveError("package.json names a theme '%s', which is not a plain folder name" % printable(v, limit=60))
+        if v not in themes:
+            themes.append(v)
+    if not themes:
+        raise ArchiveError("package.json names no active theme")
+    if len(plugins) + len(themes) > MAX_ITEMS:
+        raise ArchiveError("package.json names %d plugins and themes; more than %d is not an archive this tool will look up one by one" % (len(plugins) + len(themes), MAX_ITEMS))
+    return wpd["Version"], php, plugins, themes
+
+
 def judge(a, our_wp, our_php, get):
     """The verdicts for an archive that is already open: (rows, notes, nogo, facts), as preflight returns them. Also used by wp-site-import on the VM."""
     pj = a.find(".", "package.json")
     if pj is None:
         raise ArchiveError("no package.json: this is not an All-in-One WP Migration archive")
+    if pj[2] > JSON_LIMIT:
+        raise ArchiveError("package.json is larger than %d MB" % (JSON_LIMIT >> 20))
     try:
         meta = json.loads(a.read(pj, JSON_LIMIT))
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ArchiveError("package.json is not valid JSON")
+    wp, php, plugin_entries, theme_names = check_meta(meta)
     if a.find(".", "database.sql") is None:
         raise ArchiveError("no database.sql in the archive")
     nogo, notes, rows = [], [], []
@@ -187,22 +239,18 @@ def judge(a, our_wp, our_php, get):
             nogo.append("this is a multisite network (%s): not supported" % name)
     for bad in a.unsafe_paths():
         nogo.append("unsafe path in the archive: %s" % bad)
-    wp = (meta.get("WordPress") or {}).get("Version")
-    php = (meta.get("PHP") or {}).get("Version")
-    if not wp:
-        raise ArchiveError("package.json names no WordPress version")
     if vtuple(wp) > vtuple(our_wp):
         nogo.append("the archive's WordPress %s is newer than the sites' %s: wait for the image to catch up" % (wp, our_wp))
     elif vtuple(wp) < vtuple(our_wp):
         notes.append("the archive's WordPress %s is older than the sites' %s: the database will be upgraded (wp core update-db)" % (wp, our_wp))
     if php and vtuple(php)[:2] != vtuple(our_php)[:2]:
         notes.append("the archive ran PHP %s, the sites run %s: check the plugins on the first page loads" % (php, our_php))
-    for entry in meta.get("Plugins") or []:
+    for entry in plugin_entries:
         slug, _, mainfile = str(entry).partition("/")
         path_, name = ("plugins/" + slug, mainfile) if mainfile else ("plugins", slug)
         e = a.find(path_, name)
         rows.append(judge_item("plugins", slug if mainfile else name.rsplit(".", 1)[0], a.read(e, HEAD_BYTES) if e else None, get, our_php))
-    for theme in dict.fromkeys(t for t in (meta.get("Template"), meta.get("Stylesheet")) if t):
+    for theme in theme_names:
         e = a.find("themes/" + theme, "style.css")
         rows.append(judge_item("themes", theme, a.read(e, HEAD_BYTES) if e else None, get, our_php))
     for r in rows:

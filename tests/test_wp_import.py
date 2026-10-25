@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -65,7 +66,12 @@ class FakePopen:
     def close(self):
         pass
 
-    def wait(self):
+    def kill(self):
+        self.host.killed = True
+
+    def wait(self, timeout=None):
+        if self.host.wait_times_out:
+            raise subprocess.TimeoutExpired("docker", timeout)
         self.stderr.write(self.host.sql_err)
         if self.host.sql_rc == 0 and self.host.sql_loaded_tables is not None:
             self.host.tables = self.host.sql_loaded_tables
@@ -81,12 +87,15 @@ class FakeHost:
         self.fail, self.elementor_active, self.elementor_help, self.clam = {}, False, "usage: wp elementor <command>\n  flush-css\n  replace-urls\n", None
         self.siteurl = "http://old.local"
         self.table_names = ["wp_options", "wp_posts"]
+        self.wait_times_out, self.killed, self.timeouts, self.cli_log, self.on_chown = False, False, set(), [], None
 
     def which(self, name):
         return self.clam if name == "clamscan" else None
 
     def chown(self, path, uid, gid):
         self.chowned.append((str(path), uid, gid))
+        if self.on_chown:
+            self.on_chown(len(self.chowned))
 
     def popen(self, cmd, stdin=None, stdout=None, stderr=None):
         self.calls.append(cmd)
@@ -95,6 +104,8 @@ class FakeHost:
     def run(self, cmd, **kw):
         self.calls.append(cmd)
         name = os.path.basename(cmd[0])
+        if name in self.timeouts or (name == "docker" and "docker" in self.timeouts):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
         if name == "docker":
             return self.docker(cmd, kw)
         if name == "wp-site-cli":
@@ -125,6 +136,9 @@ class FakeHost:
         raise AssertionError("an unexpected query: %s" % sql)
 
     def cli(self, args):
+        flags = [a for a in args if a in ("--skip-plugins", "--skip-themes")]
+        args = [a for a in args if a not in ("--skip-plugins", "--skip-themes")]
+        self.cli_log.append((args, flags))
         key = "cli:" + " ".join(args[:2])
         if key in self.fail:
             rc, text = self.fail[key]
@@ -154,7 +168,7 @@ class FakeHost:
         return Done(0, "Success: installed")
 
     def cli_calls(self):
-        return [c[2:] for c in self.calls if os.path.basename(c[0]) == "wp-site-cli"]
+        return [a for a, _ in self.cli_log]
 
 
 class Base(unittest.TestCase):
@@ -170,7 +184,7 @@ class Base(unittest.TestCase):
         (self.html / "wp-content/plugins/akismet").mkdir()
         (self.site_dir / "wp-config.php").write_text("<?php\n$table_prefix = 'wp_';\n")
         self.cfg = {"data_mount": str(self.data), "intake_dir": str(self.intake), "intake_quota_mb": 3072, "image_pin": "wordpress:7.1.3-php8.5-fpm", "domain": "example.test",
-                    "tools_bin": "/opt/bin", "php_uid": 33, "sites": {"wptest": {"state": "hold", "quota_mb": 2048}, "livesite": {"state": "live", "quota_mb": 2048}}}
+                    "tools_bin": "/opt/bin", "php_uid": 33, "step_timeout_s": 3600, "sites": {"wptest": {"state": "hold", "quota_mb": 2048}, "livesite": {"state": "live", "quota_mb": 2048}}}
         self.host = FakeHost(self.html)
         self.out = []
 
@@ -421,20 +435,19 @@ class Pipeline(Base):
 
 
 class Scan(Base):
-    def test_php_in_uploads_and_suspicious_code_are_listed(self):
-        fl = files(extra=[("uploads/2026", "shell.php", b"<?php eval(base64_decode($_POST['x']));"), ("uploads/2026", "ok.txt", b"hi")])
-        fl = [f for f in fl if f[1] != "m.php"] + [("mu-plugins", "m.php", b"<?php system($_GET['c']);")]
+    def test_suspicious_held_code_is_listed(self):
+        fl = [f for f in files() if f[1] != "m.php"] + [("mu-plugins", "m.php", b"<?php system($_GET['c']);"), ("plugins/notorg", "evil.php", b"<?php eval(base64_decode($_POST['x']));")]
         text = self.import_ok(files=fl)
-        self.assertIn("2026/shell.php", text)
-        self.assertIn("uploads/2026/shell.php: eval(), base64_decode()", text)
         self.assertIn("mu-plugins/m.php: system()/exec()", text)
-        self.assertNotIn("ok.txt", text)
+        self.assertIn("plugins/notorg/evil.php: eval(), base64_decode()", text)
+        self.assertIn("suspicious patterns in the held code: 2 file(s)", text)
 
     def test_a_clean_tree_has_no_hits(self):
         text = self.import_ok()
         self.assertIn("suspicious patterns in the held code: 0 file(s)", text)
         self.assertIn("suspicious patterns in uploads/: 0 file(s)", text)
         self.assertIn("PHP files under uploads/: none", text)
+        self.assertNotIn("NOT COPIED because", text)
 
     def test_clamav_runs_when_it_is_there_and_a_find_is_reported(self):
         self.host.clam = "/usr/bin/clamscan"
@@ -508,7 +521,7 @@ class StepFailures(Base):
         self.assertIn("ERROR 1064", text)
         self.assertIn("wp-site-import reset wptest", text)
         rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
-        self.assertFalse(rec["db_loaded"])
+        self.assertTrue(rec["db_loaded"], "set before the load: a stopped load has still put tables in")
         self.assertEqual(rec["stage"], "unpacked")
         self.assertFalse([c for c in self.host.calls if os.path.basename(c[0]) in ("wp-site-ext", "wp-site-cli", "wp-site-backup")])
         self.assertEqual([l.split("\t")[2] for l in (self.intake / "ledger.log").read_text().splitlines()], ["unpacked"])
@@ -830,6 +843,271 @@ class Names(Base):
         self.assertTrue((self.html / "wp-content").is_dir())
 
 
+class Hostile(Base):
+    """What a crafted archive can do to the run. The database is the archive's, so it names what WordPress will include; none of that may run before the operator approves."""
+    def test_no_command_loads_plugin_or_theme_code_unless_it_must(self):
+        self.host.elementor_active = True
+        m = meta(**dict(META, Plugins=["elementor/elementor.php"]))
+        self.import_ok(files=[f for f in files(m) if not f[0].startswith("plugins/good")] + [("plugins/elementor", "elementor.php", plugin_php("4.2"))])
+        self.assertTrue(self.host.cli_log)
+        for args, flags in self.host.cli_log:
+            self.assertIn("--skip-themes", flags, args)
+            loads_plugins = args[:1] == ["elementor"] or args[:2] == ["rewrite", "flush"]
+            self.assertEqual("--skip-plugins" in flags, not loads_plugins, args)
+
+    def test_the_options_that_name_code_are_reset_before_anything_else_runs(self):
+        self.import_ok()
+        first = self.host.cli_log[:3]
+        self.assertEqual([a[:3] for a, _ in first], [["option", "update", "active_plugins"], ["option", "update", "template"], ["option", "update", "stylesheet"]])
+        self.assertEqual(json.loads(first[0][0][3]), ["good/good.php", "notorg/notorg.php"], "the dropped plugin is out; the list is package.json's, not the database's")
+        self.assertEqual(first[0][0][4], "--format=json")
+        self.assertEqual((first[1][0][3], first[2][0][3]), ("blocksy", "blocksy"))
+        calls = [c for c in self.host.calls if os.path.basename(c[0]) in ("wp-site-cli", "wp-site-ext")]
+        self.assertEqual(calls[0][2:5], ["option", "update", "active_plugins"], "nothing, not even is-installed, may run first")
+
+    def test_a_child_theme_keeps_its_parent(self):
+        m = meta(**dict(META, Template="parent", Stylesheet="child"))
+        self.import_ok(files=files(m) + [("themes/parent", "style.css", theme_css("1")), ("themes/child", "style.css", theme_css("1"))])
+        opts = {a[2]: a[3] for a, _ in self.host.cli_log if a[:2] == ["option", "update"]}
+        self.assertEqual((opts["template"], opts["stylesheet"]), ("parent", "child"))
+
+    def test_when_the_options_cannot_be_reset_nothing_else_runs(self):
+        self.host.fail["cli:option update"] = (1, "Error: database gone")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("before running anything else", text)
+        self.assertFalse([c for c in self.host.calls if os.path.basename(c[0]) in ("wp-site-ext", "wp-site-backup")])
+        self.assertEqual(len(self.host.cli_log), 1)
+        self.assertEqual(list((self.html / "wp-content/uploads").iterdir()), [], "no data is copied before the options are safe")
+
+    def test_php_and_hidden_files_under_uploads_are_not_copied(self):
+        bad = [("uploads/a", "shell.php", b"<?php"), ("uploads/a", "SHELL.PHP", b"<?php"), ("uploads/a", "x.php5", b"<?php"), ("uploads/a", "x.phtml", b"<?php"), ("uploads/a", "x.phar", b"p"),
+               ("uploads/a", "x.php.jpg", b"<?php"), ("uploads/a", "x.inc", b"<?php"), ("uploads", ".htaccess", b"x"), ("uploads", ".user.ini", b"auto_prepend_file=x"),
+               ("uploads/.hidden", "y.jpg", b"j"), ("uploads/a", ".x.jpg", b"j")]
+        text = self.import_ok(files=files(extra=bad + [("uploads/a", "ok.jpg", b"fine"), ("uploads/a", "phpinfo.txt", b"t"), ("uploads/a", "my.phpfile.jpg", b"j")]))
+        got = sorted(str(p.relative_to(self.html / "wp-content/uploads")) for p in (self.html / "wp-content/uploads").rglob("*") if p.is_file())
+        self.assertEqual(got, ["2026/10/a.jpg", "a/my.phpfile.jpg", "a/ok.jpg", "a/phpinfo.txt"])
+        self.assertIn("NOT COPIED because PHP or the web server would act on it", text)
+        self.assertIn("%d file(s)  %s" % (len(bad), imp.UPLOADS_BLOCKED), text)
+
+    def test_only_translations_are_copied_from_languages(self):
+        langs = [("languages", n, b"x") for n in ("de_DE.mo", "de_DE.po", "de_DE.json", "de_DE.l10n.php", "evil.php", ".hidden.mo", "readme.txt")]
+        text = self.import_ok(files=files(extra=langs))
+        got = sorted(p.name for p in (self.html / "wp-content/languages").iterdir())
+        self.assertEqual(got, ["de_DE.json", "de_DE.mo", "de_DE.po", "x.mo"])
+        self.assertIn(imp.LANG_BLOCKED, text)
+
+    def test_the_old_address_regex_cannot_hang(self):
+        t = time.time()
+        self.assertEqual(imp.old_hosts({"SiteURL": "http://a" + "/" * 400000 + "b", "HomeURL": "http://" + "a" * 300, "InternalSiteURL": "//ok.local//", "InternalHomeURL": 5}), ["ok.local"])
+        self.assertLess(time.time() - t, 1.0)
+
+    def test_the_length_limit_applies_to_the_address_itself(self):
+        self.assertEqual(imp.old_hosts({"SiteURL": "http://" + "a" * imp.HOST_MAX}), ["a" * imp.HOST_MAX])
+        self.assertEqual(imp.old_hosts({"SiteURL": "http://" + "a" * (imp.HOST_MAX + 1)}), [])
+        self.assertEqual(imp.old_hosts({"SiteURL": "https://" + "a" * (imp.HOST_MAX + 1)}), [])
+
+    def test_the_scan_reads_only_the_first_bytes_of_a_file(self):
+        real = imp.SCAN_BYTES
+        imp.SCAN_BYTES = 100
+        try:
+            fl = [f for f in files() if f[1] != "m.php"] + [("mu-plugins", "m.php", b"<?php // " + b"x" * 200 + b" eval($a);"), ("mu-plugins", "n.php", b"<?php eval($a); " + b"x" * 200)]
+            text = self.import_ok(files=fl)
+        finally:
+            imp.SCAN_BYTES = real
+        self.assertIn("mu-plugins/n.php: eval()", text)
+        self.assertNotIn("mu-plugins/m.php", text)
+
+    def test_an_error_text_that_reaches_the_terminal_through_a_refusal_is_filtered_too(self):
+        self.host.fail["cli:option update"] = (1, "Error: \x1b[2J\x1b]0;pwned\x07 \u202e")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("before running anything else", text)
+        for bad in ("\x1b", "\x07", "\u202e"):
+            self.assertNotIn(bad, text)
+
+    def test_old_hosts_forms(self):
+        self.assertEqual(imp.old_hosts({"SiteURL": "https://a.local/blog/", "HomeURL": "http://a.local/blog", "InternalSiteURL": "//b.local:8080"}), ["a.local/blog", "b.local:8080"])
+        self.assertEqual(imp.old_hosts({"SiteURL": "ftp://x", "HomeURL": "", "InternalSiteURL": None}), [])
+
+    def test_text_from_a_command_cannot_move_the_operators_terminal(self):
+        self.host.fail["cli:core update-db"] = (1, "Error: \x1b[2J\x1b]0;pwned\x07 \x85 \u202e done")
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1)
+        for bad in ("\x1b", "\x07", "\x85", "\u202e"):
+            self.assertNotIn(bad, text)
+            self.assertNotIn(bad, (self.intake / "work-wptest/REPORT.txt").read_text())
+        self.assertIn("[2J", text)
+
+    def test_a_tampered_record_cannot_make_approve_delete_a_file_outside_the_intake(self):
+        self.import_ok()
+        outside = self.tmp / "precious.wpress"
+        outside.write_text("keep")
+        rp = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(rp.read_text())
+        rec["file"] = "../../precious.wpress"
+        rp.write_text(json.dumps(rec))
+        self.run_main(["approve", "wptest"])
+        self.assertTrue(outside.exists())
+
+    def test_names_that_are_not_plain_are_refused_by_the_reader_before_the_tool_goes_on(self):
+        for entry in ("../../etc/x.php", "a/b/c.php", ".."):
+            m = meta(**dict(META, Plugins=[entry]))
+            self.archive(files=files(m))
+            before = self.tree()
+            self.assertEqual(self.run_main(["wptest", "friend.wpress", "--plan"])[0], 2, entry)
+            self.assertEqual(self.tree(), before)
+
+
+class Interrupted(Base):
+    def test_ctrl_c_during_the_load_leaves_a_run_that_reset_can_clean(self):
+        self.host.pipe_breaks = False
+
+        def stop(*a, **k):
+            raise KeyboardInterrupt()
+        real = self.host.popen
+        self.host.popen = lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt())
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("interrupted", text)
+        self.assertIn("wp-site-import reset wptest", text)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertTrue(rec["db_loaded"])
+        self.host.tables = 5
+        self.assertEqual(self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")[0], 0)
+        self.assertEqual(self.host.tables, 0)
+
+    def test_ctrl_c_in_the_middle_of_a_copy_leaves_a_manifest_that_removes_every_file(self):
+        before = self.tree(self.site_dir)
+
+        def stop(n):
+            if n == 3:
+                raise KeyboardInterrupt()
+        self.host.on_chown = stop
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertNotEqual(self.tree(self.site_dir), before, "the copy had started")
+        self.host.on_chown = None
+        self.assertEqual(self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")[0], 0)
+        self.assertEqual(self.tree(self.site_dir), before)
+
+    def test_ctrl_c_in_the_middle_of_an_approve_leaves_a_manifest_that_removes_every_file(self):
+        self.import_ok()
+        before = self.tree(self.site_dir)
+        count = len(self.host.chowned)
+
+        def stop(n):
+            if n == count + 3:
+                raise KeyboardInterrupt()
+        self.host.on_chown = stop
+        code, text = self.run_main(["approve", "wptest"])
+        self.assertEqual(code, 130)
+        self.assertIn("interrupted", text)
+        self.assertNotEqual(self.tree(self.site_dir), before, "the copy had started")
+        self.assertTrue((self.intake / "work-wptest").exists(), "nothing is deleted when the approval did not finish")
+        self.assertTrue((self.intake / "friend.wpress").exists())
+        self.host.on_chown = None
+        self.assertEqual(self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")[0], 0)
+        self.assertNotIn("wp-content/plugins/notorg", " ".join(self.tree(self.site_dir)))
+        self.assertNotIn("mu-plugins", " ".join(self.tree(self.site_dir)))
+
+    def test_ctrl_c_with_nothing_written_says_so_and_exits_130(self):
+        self.archive()
+        self.host.run = lambda cmd, **kw: (_ for _ in ()).throw(KeyboardInterrupt())
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 130)
+
+    def test_the_manifest_is_saved_every_200_files_not_only_at_the_end(self):
+        many = [("uploads/many", "f%03d.jpg" % i, b"j") for i in range(450)]
+        saved = []
+        real = imp.save_record
+        imp.save_record = lambda work, record: (saved.append(len(record["copied"])), real(work, record))[1]
+        try:
+            self.import_ok(files=files(extra=many))
+        finally:
+            imp.save_record = real
+        self.assertTrue(any(n in (200, 400) for n in saved), saved)
+
+
+def _interrupt_at(n, approve):
+    """Ctrl-C at the n-th chown (every directory and file the copy makes passes one), then reset: the site must be exactly as it was before the copy started."""
+    def test(self):
+        before = self.tree(self.site_dir)       # reset undoes the whole run, so this is the site before the import, also after an interrupted approve
+        if approve:
+            self.import_ok()
+        start = len(self.host.chowned)
+
+        def stop(k):
+            if k == start + n:
+                raise KeyboardInterrupt()
+        self.host.on_chown = stop
+        if approve:
+            code, _ = self.run_main(["approve", "wptest"])
+        else:
+            self.archive()
+            code, _ = self.run_main(["wptest", "friend.wpress"])
+        self.host.on_chown = None
+        if code in (0, 1):
+            return      # fewer than n files: nothing was interrupted
+        self.assertIn(code, (2, 130))
+        self.assertEqual(self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")[0], 0)
+        self.assertEqual(self.tree(self.site_dir), before, "interrupted at chown %d" % n)
+    return test
+
+
+for _n in range(1, 13):
+    setattr(Interrupted, "test_ctrl_c_during_the_import_copy_at_chown_%02d_leaves_nothing_behind" % _n, _interrupt_at(_n, False))
+    setattr(Interrupted, "test_ctrl_c_during_the_approve_copy_at_chown_%02d_leaves_nothing_behind" % _n, _interrupt_at(_n, True))
+
+
+class Timeouts(Base):
+    def test_a_step_that_hangs_is_a_failed_step_not_a_hang(self):
+        self.host.timeouts = {"wp-site-ext"}
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 1)
+        self.assertRegex(text, r"FAILED\s+plugin good\s+FAILED: timed out after 3600 s")
+
+    def test_a_database_that_does_not_answer_is_a_refusal(self):
+        self.host.timeouts = {"docker"}
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("did not answer within 3600 s", text)
+
+    def test_a_load_that_never_finishes_is_killed(self):
+        self.host.wait_times_out = True
+        self.archive()
+        code, text = self.run_main(["wptest", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("did not finish within 3600 s", text)
+        self.assertTrue(self.host.killed)
+
+    def test_every_command_is_given_the_timeout(self):
+        seen = []
+        real = self.host.run
+        self.host.run = lambda cmd, **kw: (seen.append(kw.get("timeout")), real(cmd, **kw))[1]
+        self.import_ok()
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {3600})
+
+
+class Quota(Base):
+    def test_the_database_grows_on_disk_so_the_site_needs_room_for_more_than_the_dump(self):
+        big = [(".", "database.sql", SQL + b"-- " + b"x" * (1024 * 1024) + b"\n")]
+        fl = [f for f in files() if f[1] != "database.sql"] + big
+        self.archive(files=fl)
+        self.cfg["sites"]["wptest"]["quota_mb"] = 2
+        self.assert_refused(["wptest", "friend.wpress"], "left of its quota")
+        self.cfg["sites"]["wptest"]["quota_mb"] = 4
+        self.assertEqual(self.run_main(["wptest", "friend.wpress", "--plan"])[0], 0)
+
+
 class Reset(Base):
     def test_reset_after_a_complete_run_returns_the_site_to_its_earlier_tree(self):
         before = self.tree(self.site_dir)
@@ -846,15 +1124,15 @@ class Reset(Base):
         self.assertEqual((self.intake / "ledger.log").read_text().splitlines()[-1].split("\t")[1:3], ["wptest", "reset"])
         self.assertTrue((self.html / "wp-content/plugins/akismet").exists(), "something the run did not install must stay")
 
-    def test_reset_after_a_failed_load_does_not_touch_the_database(self):
+    def test_reset_after_a_failed_load_drops_whatever_the_load_left(self):
         self.host.sql_rc, self.host.sql_err = 1, b"ERROR"
         self.archive()
         self.run_main(["wptest", "friend.wpress"])
-        self.host.calls.clear()
+        self.host.tables = 12
         code, text = self.run_main(["reset", "wptest"], ask=lambda prompt: "wptest\n")
         self.assertEqual(code, 0, text)
-        self.assertEqual(self.host.dropped, "")
-        self.assertFalse([c for c in self.host.calls if c[:2] == ["docker", "exec"]])
+        self.assertIn("`wp_options`", self.host.dropped)
+        self.assertEqual(self.host.tables, 0)
 
     def test_reset_after_a_half_finished_copy_removes_only_what_was_made(self):
         (self.html / "wp-content/uploads/2026/10").mkdir(parents=True)
@@ -932,7 +1210,7 @@ class Wrapper(unittest.TestCase):
         cfg = self.config(text)
         self.assertEqual(cfg["sites"], {"alpha": {"state": "hold", "quota_mb": 4096}, "beta": {"state": v["wp_site_defaults"]["state"], "quota_mb": v["wp_site_defaults"]["quota_mb"]}})
         self.assertEqual((cfg["intake_dir"], cfg["intake_quota_mb"], cfg["image_pin"], cfg["data_mount"]), (v["wp_intake_dir"], v["wp_intake_quota_mb"], v["wp_image_php"], v["wp_data_mount"]))
-        self.assertEqual((cfg["domain"], cfg["tools_bin"], cfg["php_uid"]), (v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"]))
+        self.assertEqual((cfg["domain"], cfg["tools_bin"], cfg["php_uid"], cfg["step_timeout_s"]), (v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"], v["wp_import_step_timeout_s"]))
         self.assertIsInstance(cfg["php_uid"], int)
         self.assertIn('sys.path.insert(0, "%s")' % v["wp_tools_lib"], text)
 
@@ -969,7 +1247,7 @@ class Classify(unittest.TestCase):
         cases = [(("package.json", "."), "keep"), (("database.sql", "."), "keep"), (("index.php", "."), "skip"), (("x", "upgrade/y"), "skip"), (("x", "cache"), "skip"),
                  (("f.php", "plugins/a"), "skip"), (("f.php", "plugins/b/sub"), "keep"), (("f.php", "plugins/c"), "skip"), (("f.php", "plugins/zz"), "skip"), (("one.php", "plugins"), "skip"),
                  (("s.css", "themes/t"), "skip"), (("s.css", "themes/u"), "keep"), (("s.css", "themes/other"), "skip"), (("f", "uploads/2026"), "keep"), (("f", "mu-plugins"), "keep"),
-                 (("f", "languages"), "keep"), (("f", "elsewhere"), "skip")]
+                 (("f.mo", "languages"), "keep"), (("f.php", "languages"), "skip"), (("f.l10n.php", "languages"), "skip"), (("f.php", "uploads"), "skip"), (("f", "elsewhere"), "skip")]
         for (name, path), want in cases:
             self.assertEqual(imp.classify(name, path, pl, th)[0], want, (name, path))
 
