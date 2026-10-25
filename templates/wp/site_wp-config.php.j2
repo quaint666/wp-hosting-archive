@@ -28,6 +28,24 @@ define( 'DISABLE_WP_CRON', true );
 define( 'DISALLOW_FILE_MODS', true );
 define( 'AUTOMATIC_UPDATER_DISABLED', true );
 
+// The must-use plugins of the hosting service (templates/wp/mu/) live outside wp-content, in a root-owned directory mounted read-only; a friend's own mu-plugins folder is not loaded.
+define( 'WPMU_PLUGIN_DIR', '/var/www/wp-mu' );
+define( 'WPMU_PLUGIN_URL', 'https://{{ wp_host }}/wp-mu' );
+define( 'WP_HOSTING_LOGIN_LIMIT_IP', {{ wp_login_limit_ip | int }} );
+define( 'WP_HOSTING_LOGIN_LIMIT_USER', {{ wp_login_limit_user | int }} );
+define( 'WP_HOSTING_LOGIN_WINDOW_S', {{ wp_login_window_s | int }} );
+define( 'WP_HOSTING_ALLOW_XMLRPC', {{ 'true' if wp_s.allow_xmlrpc else 'false' }} );
+define( 'WP_HOSTING_ALLOW_APP_PASSWORDS', {{ 'true' if wp_s.allow_app_passwords else 'false' }} );
+define( 'WP_HOSTING_ALLOW_USER_ENUM', {{ 'true' if wp_s.allow_user_enum else 'false' }} );
+define( 'WP_HOSTING_2FA_ROLES', '{{ wp_2fa_roles }}' );
+define( 'WP_HOSTING_MAIL_MODE', '{{ wp_s.mail_mode }}' );
+define( 'WP_HOSTING_MAIL_FROM', '{{ wp_s.name }} <{{ wp_s.name }}@{{ wp_mail_sender_domain }}>' );
+define( 'WP_HOSTING_MAIL_PER_HOUR', {{ wp_mail_per_hour | int }} );
+define( 'WP_HOSTING_MAIL_PER_DAY', {{ wp_mail_per_day | int }} );
+{% if wp_s.mail_mode == 'send' %}
+define( 'WP_HOSTING_MAIL_KEY', '{{ dellwp_wp_resend_key }}' );
+{% endif %}
+
 if ( ! defined( 'ABSPATH' ) ) {
 	define( 'ABSPATH', __DIR__ . '/' );
 }

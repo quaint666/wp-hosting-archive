@@ -74,9 +74,9 @@ def read_key(path):
     try:
         text = Path(path).read_text().strip()
     except OSError:
-        raise NotRun("there is no feed key (%s): run scripts/wp_vulnfeed_secret.sh, then dellwp/wp_scans_dellwp.yml" % path)
+        raise NotRun("there is no feed key (%s): run scripts/wp_provider_key.sh wordfence, then dellwp/wp_scans_dellwp.yml" % path)
     if not KEY_RE.match(text):
-        raise NotRun("the feed key in %s does not look like a key: run scripts/wp_vulnfeed_secret.sh again" % path)
+        raise NotRun("the feed key in %s does not look like a key: run scripts/wp_provider_key.sh wordfence again" % path)
     return text
 
 

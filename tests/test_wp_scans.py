@@ -287,7 +287,7 @@ class Tasks(unittest.TestCase):
     def test_the_play_stops_early_without_the_key_or_the_tools(self):
         first = self.tasks[0]
         self.assertIn("dellwp_wp_wordfence_key is defined", first["ansible.builtin.assert"]["that"])
-        self.assertIn("scripts/wp_vulnfeed_secret.sh", first["ansible.builtin.assert"]["fail_msg"])
+        self.assertIn("scripts/wp_provider_key.sh wordfence", first["ansible.builtin.assert"]["fail_msg"])
         stat_t = self.by["Look for the tools the scans need"]
         wanted = {"{{ wp_tools_bin }}/wp-clamscan", "{{ wp_tools_bin }}/wp-clamav-update", "{{ wp_tools_bin }}/wp-vulnfeed", "{{ wp_tools_lib }}/wp_vulnfeed.py"}
         self.assertTrue(wanted <= set(stat_t["loop"]))
@@ -358,7 +358,7 @@ class SecretScript(unittest.TestCase):
         (self.repo / "scripts").mkdir()
         (self.repo / "host_vars/dellwp").mkdir(parents=True)
         (self.repo / "bin").mkdir()
-        (self.repo / "scripts/wp_vulnfeed_secret.sh").write_text((ROOT / "scripts/wp_vulnfeed_secret.sh").read_text())
+        (self.repo / "scripts/wp_provider_key.sh").write_text((ROOT / "scripts/wp_provider_key.sh").read_text())
         (self.repo / "bin/ansible-vault").write_text(VAULT_SHIM)
         (self.repo / "bin/ansible-vault").chmod(0o755)
         self.vault = self.repo / "host_vars/dellwp/vault_wp.yml"
@@ -370,9 +370,9 @@ class SecretScript(unittest.TestCase):
     def tearDown(self):
         self.d.cleanup()
 
-    def run_script(self, typed=(), tty=True, env=None):
+    def run_script(self, typed=(), tty=True, env=None, preset="wordfence"):
         """Run it on a terminal; each string in typed is sent once the script has asked (a prompt ends in ': ' or '] ')."""
-        cmd = ["bash", str(self.repo / "scripts/wp_vulnfeed_secret.sh")]
+        cmd = ["bash", str(self.repo / "scripts/wp_provider_key.sh")] + ([preset] if preset else [])
         if not tty:
             r = subprocess.run(cmd, capture_output=True, text=True, env=env or self.env, stdin=subprocess.DEVNULL, timeout=60)
             return r.returncode, r.stdout, r.stderr
@@ -415,6 +415,24 @@ class SecretScript(unittest.TestCase):
         self.assertNotIn(KEY, out + err)
         self.assertTrue(self.vault.read_text().startswith("$ANSIBLE_VAULT"))
 
+    def test_the_resend_preset_writes_its_own_name_and_leaves_the_other_key_alone(self):
+        self.run_script([KEY])
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "x"], check=True, capture_output=True)
+        mail = "re_mailkey_abcdefghijklmnopqrstuvwxyz"
+        rc, out, err = self.run_script([mail], preset="resend")
+        self.assertEqual(rc, 0, out + err)
+        v = self.values()
+        self.assertEqual((v["dellwp_wp_resend_key"], v["dellwp_wp_wordfence_key"], v["dellwp_wp_master_secret"]), (mail, KEY, "m"))
+        self.assertIn("dellwp_wp_resend_key is %d characters" % len(mail), out); self.assertNotIn(mail, out + err)
+        self.assertIn("Resend API key (hidden)", err)
+
+    def test_an_unknown_or_missing_provider_changes_nothing(self):
+        before = self.vault.read_bytes()
+        for preset in (None, "", "stripe", "Wordfence", "wordfence resend"):
+            rc, out, err = self.run_script([KEY], preset=preset)
+            self.assertEqual(rc, 2, repr(preset)); self.assertIn("usage: bash scripts/wp_provider_key.sh wordfence|resend", err)
+            self.assertEqual(self.vault.read_bytes(), before, repr(preset))
+
     def test_an_existing_key_is_replaced_only_after_a_yes(self):
         self.run_script([KEY])
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "x"], check=True, capture_output=True)
@@ -455,7 +473,7 @@ class SecretScript(unittest.TestCase):
         self.assertEqual(self.vault.read_bytes(), before)
 
     def test_the_key_is_never_an_argument_or_echoed(self):
-        text = (ROOT / "scripts/wp_vulnfeed_secret.sh").read_text()
+        text = (ROOT / "scripts/wp_provider_key.sh").read_text()
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
         self.assertIn("read -r -s", code)
         self.assertNotRegex(code, r"echo[^\n]*\$key|echo[^\n]*\$\{key"); self.assertNotRegex(code, r"ansible-vault[^\n]*\$key")

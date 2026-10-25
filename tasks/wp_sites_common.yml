@@ -160,6 +160,10 @@
   check_mode: false
   when: wp_sites_merged | selectattr('state', 'eq', 'closed') | list | length > 0
 
+# The must-use plugins every site mounts (tasks/wp_mu_common.yml). Static import: it runs before any site, and keeps the wp_sites tag.
+- name: Deploy the must-use plugins (tasks/wp_mu_common.yml)
+  ansible.builtin.import_tasks: wp_mu_common.yml
+
 - name: Deploy each site that exists (tasks/wp_site_one_common.yml)
   ansible.builtin.include_tasks: wp_site_one_common.yml
   loop: "{{ wp_sites_merged | rejectattr('state', 'eq', 'closed') | list }}"

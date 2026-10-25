@@ -64,6 +64,7 @@ IMPORT_FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")              
 REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")
 STATES = ("hold", "live")
 POLICIES = ("auto", "notify", "freeze")
+MAIL_MODES = ("log", "send")
 # What `modify` and `create --set` may change: key -> (kind, minimum, maximum). Minimums are sanity floors, not laws: the play's own assert still decides whether the whole list fits.
 EDITABLE = {
     "state": ("choice", STATES),
@@ -74,10 +75,15 @@ EDITABLE = {
     "db_mem_mb": ("int", 192, 4096),
     "upload_mb": ("int", 1, 512),
     "allow_xmlrpc": ("bool",),
+    "allow_app_passwords": ("bool",),
+    "allow_user_enum": ("bool",),
+    "mail_mode": ("choice", MAIL_MODES),
 }
 # What each change costs, so the question can say it: the compose file changes (the whole stack restarts, about ten seconds), or only the vhost or php.ini (a reload).
 RESTARTS = {"php_mem_mb": "restarts the whole stack, about ten seconds offline", "db_mem_mb": "restarts the whole stack, about ten seconds offline",
-            "upload_mb": "reloads nginx and php", "allow_xmlrpc": "reloads nginx"}
+            "upload_mb": "reloads nginx and php", "allow_xmlrpc": "reloads nginx",
+            "allow_app_passwords": "rewrites wp-config.php, picked up on the next request", "allow_user_enum": "rewrites wp-config.php, picked up on the next request",
+            "mail_mode": "rewrites wp-config.php, picked up on the next request; send needs dellwp_wp_resend_key in the vault"}
 
 
 class Refuse(Exception):

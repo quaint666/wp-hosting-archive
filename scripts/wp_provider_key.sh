@@ -1,14 +1,20 @@
 #!/bin/bash
-# Put your Wordfence Intelligence API key into host_vars/dellwp/vault_wp.yml as dellwp_wp_wordfence_key, for the vulnerability feed (dellwp/wp_scans_dellwp.yml writes it to the VM).
-#   bash scripts/wp_vulnfeed_secret.sh
-# The key is free: log in at wordfence.com, Integrations, create an API key (it is shown ONCE; you can make a new one any time). You type it here at a hidden prompt: it is never an argument,
-# never in the environment of another command, never printed (only its length is), and the only place it is written is the encrypted vault. If the name is already in the vault it asks before replacing it.
-# Needs ansible-vault and its password file (ansible.cfg names it); refuses if the vault file has uncommitted changes, so the commit afterwards is only this change.
-# Afterwards:  git add host_vars/dellwp/vault_wp.yml && git commit -m "ops(wp): wordfence key"   then run dellwp/wp_scans_dellwp.yml.
+# Put an API key of an outside provider into host_vars/dellwp/vault_wp.yml, for a service the sites use:
+#   bash scripts/wp_provider_key.sh wordfence   dellwp_wp_wordfence_key  the Wordfence Intelligence vulnerability feed (dellwp/wp_scans_dellwp.yml writes it to the VM)
+#   bash scripts/wp_provider_key.sh resend      dellwp_wp_resend_key     the mail provider (a site with mail_mode: send gets it in its wp-config.php; a domain-restricted key)
+# wordfence: free, log in at wordfence.com, Integrations, create an API key (shown ONCE; you can make a new one any time). resend: the key made for the sender domain in the Resend dashboard.
+# You type the key at a hidden prompt: it is never an argument, never in the environment of another command, never printed (only its length is), and the only place it is written is the encrypted vault.
+# If the name is already in the vault it asks before replacing it. Needs ansible-vault and its password file (ansible.cfg names it); refuses if the vault file has uncommitted changes, so the commit
+# afterwards is only this change.
+# Afterwards:  git add host_vars/dellwp/vault_wp.yml && git commit -m "ops(wp): <provider> key"   then run the play that uses it (dellwp/wp_scans_dellwp.yml, or dellwp/wp_sites_dellwp.yml for resend).
 set -euo pipefail
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 readonly VAULT=host_vars/dellwp/vault_wp.yml
-readonly NAME=dellwp_wp_wordfence_key
+case "${1:-}" in
+  wordfence) readonly NAME=dellwp_wp_wordfence_key LABEL="Wordfence Intelligence API key" ;;
+  resend) readonly NAME=dellwp_wp_resend_key LABEL="Resend API key" ;;
+  *) echo "usage: bash scripts/wp_provider_key.sh wordfence|resend" >&2; exit 2 ;;
+esac
 tmp=""; new=""
 trap 'rm -f "$tmp" "$new"; unset key' EXIT
 
@@ -25,7 +31,7 @@ if grep -q "^${NAME}:" "$tmp"; then
   [ "$ans" = y ] || { echo "left alone"; exit 0; }
   grep -v "^${NAME}:" "$tmp" > "$new"; cp "$new" "$tmp"; : > "$new"
 fi
-read -r -s -p "Wordfence Intelligence API key (hidden): " key; echo
+read -r -s -p "$LABEL (hidden): " key; echo
 # the same rule as scripts/wp_vulnfeed.py (KEY_RE): 16 to 512 of letters, digits and . _ ~ + / = -
 [[ $key =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]] || { echo "that does not look like an API key (16 to 512 characters: letters, digits and . _ ~ + / = -). Nothing was changed." >&2; exit 2; }
 printf '%s: "%s"\n' "$NAME" "$key" >> "$tmp"

@@ -1,7 +1,7 @@
 ---
 # dellwp/wp_scans_dellwp.yml
 # The scans for the WordPress imports and sites on dellwp: ClamAV (image, signatures, daily refresh) and the Wordfence Intelligence vulnerability feed (key, state, daily update-and-check), in
-# tasks/wp_scans_common.yml. Run dellwp/wp_sites_dellwp.yml first (it installs the tools), and scripts/wp_vulnfeed_secret.sh once for the key. After the first run, fetch both by hand so the next
+# tasks/wp_scans_common.yml. Run dellwp/wp_sites_dellwp.yml first (it installs the tools), and scripts/wp_provider_key.sh wordfence once for the key. After the first run, fetch both by hand so the next
 # import has them: ssh -t dellwp 'sudo systemctl start wp-clamav-update.service wp-vulnfeed.service' and read journalctl -u wp-clamav-update -u wp-vulnfeed.
 # Secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml).
 

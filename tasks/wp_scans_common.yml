@@ -3,7 +3,7 @@
 # The scans on dellwp: ClamAV (its signatures directory, the image, a daily refresh) and the vulnerability feed (its key, its state directory, a daily update-and-check). No hosts:/become: and no
 # handlers; imported via import_tasks into dellwp/wp_scans_dellwp.yml. The tools themselves (wp-clamscan, wp-clamav-update, wp-vulnfeed and wp_vulnfeed.py) are installed by
 # dellwp/wp_sites_dellwp.yml (tasks/wp_tools_common.yml), which this play needs to have run first. wp-site-import calls them during every import; without this play they say NOT RUN and the import
-# goes on. Secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml, put there by scripts/wp_vulnfeed_secret.sh).
+# goes on. Secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml, put there by scripts/wp_provider_key.sh wordfence).
 # Check mode cannot show: the image pull, whether freshclam can reach its mirrors, whether the key is accepted, or the key file's contents (no_log).
 
 - name: Stop early if the key or the tools are missing
@@ -11,7 +11,7 @@
     that:
       - dellwp_wp_wordfence_key is defined
     fail_msg: >-
-      Missing a secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml): run scripts/wp_vulnfeed_secret.sh (a free key from your Wordfence.com account, Integrations). Nothing was changed.
+      Missing a secret: dellwp_wp_wordfence_key (host_vars/dellwp/vault_wp.yml): run scripts/wp_provider_key.sh wordfence (a free key from your Wordfence.com account, Integrations). Nothing was changed.
     quiet: true
 
 - name: Look for the tools the scans need

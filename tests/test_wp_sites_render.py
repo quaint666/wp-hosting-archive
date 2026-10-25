@@ -189,7 +189,7 @@ class Render(unittest.TestCase):
 
     def test_every_template_renders_the_same_each_time(self):
         # Ansible reports changed when a rendered file differs: two renders of one input must be byte-identical.
-        for name in sorted(p.name for p in (ROOT / "templates/wp").iterdir()):
+        for name in sorted(str(p.relative_to(ROOT / "templates/wp")) for p in (ROOT / "templates/wp").rglob("*") if p.is_file()):      # includes mu/: plain PHP must pass through Jinja untouched
             first = self.render(name)
             for _ in range(30):
                 self.assertEqual(first, self.render(name), name)

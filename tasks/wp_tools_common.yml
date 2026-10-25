@@ -97,6 +97,7 @@
     - { src: wp_site_import.py.j2, dest: wp-site-import }
     - { src: wp_backup_check.sh.j2, dest: wp-backup-check }
     - { src: wp_restore_drill.sh.j2, dest: wp-restore-drill }
+    - { src: wp_site_2fa_reset.sh.j2, dest: wp-site-2fa-reset }
     - { src: wp_clamscan.sh.j2, dest: wp-clamscan }
     - { src: wp_clamav_update.sh.j2, dest: wp-clamav-update }
     - { src: wp_vulnfeed.py.j2, dest: wp-vulnfeed }

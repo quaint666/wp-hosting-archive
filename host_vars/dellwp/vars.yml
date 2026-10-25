@@ -46,6 +46,9 @@ wp_site_defaults:
   upload_mb: 64
   backup_quota_mb: 3072
   allow_xmlrpc: false
+  allow_app_passwords: false
+  allow_user_enum: false
+  mail_mode: log
   php_allow_functions: []
 # port = the loopback port of the site's php-fpm container (unique per site); quota_id = its ext4 project id (unique, never reused for another site).
 wp_sites:
@@ -186,7 +189,7 @@ wp_update_probe_wait_s: 10
 
 # Scans (dellwp/wp_scans_dellwp.yml, tasks/wp_scans_common.yml; the tools are installed by dellwp/wp_sites_dellwp.yml): ClamAV in a one-shot container with its signatures in wp_clamav_dir, refreshed daily;
 # and the Wordfence Intelligence vulnerability feed (templates/wp/wp_vulnfeed.py.j2, scripts/wp_vulnfeed.py): downloaded daily with a free API key (host_vars/dellwp/vault_wp.yml: dellwp_wp_wordfence_key,
-# put there by scripts/wp_vulnfeed_secret.sh), reduced to an index, and every site checked against it; a NEW hit goes to ntfy once. An index older than wp_vulnfeed_max_age_days days is "NOT RUN", never
+# put there by scripts/wp_provider_key.sh wordfence), reduced to an index, and every site checked against it; a NEW hit goes to ntfy once. An index older than wp_vulnfeed_max_age_days days is "NOT RUN", never
 # "none known". The update parses about 120 MB of JSON, so its unit has a memory limit.
 wp_clamav_dir: /var/lib/wp-clamav
 wp_clamav_mem_mb: 2048
@@ -200,3 +203,17 @@ wp_vulnfeed_cmd_timeout_s: 120
 wp_vulnfeed_mem_mb: 2048
 wp_vulnfeed_timeout_s: 1800
 wp_vulnfeed_calendar: "*-*-* 04:20:00"
+
+# Must-use plugins of the hosting service (templates/wp/mu/, tasks/wp_mu_common.yml): one root-owned directory on the VM, mounted read-only into every site's php container at /var/www/wp-mu and named
+# by WPMU_PLUGIN_DIR in wp-config.php, so a friend's own wp-content/mu-plugins (held back by the import until you approve it) is a separate, inert folder and an import can never remove ours.
+#   login throttle: failed logins per visitor address and per user name in a window; xmlrpc, application passwords and user listings are off unless the site's allow_* flag says otherwise
+#   two-factor: the Two Factor plugin (pinned in vars/wp.yml), required of the roles in wp_2fa_roles
+#   mail: mail_mode log (default; nothing leaves the site) or send (the provider's HTTPS API); the sender is <site>@wp_mail_sender_domain, the key is dellwp_wp_resend_key in host_vars/dellwp/vault_wp.yml
+wp_mu_dir: "{{ wp_data_mount }}/mu"
+wp_2fa_roles: "administrator,shop_manager"
+wp_login_limit_ip: 20
+wp_login_limit_user: 10
+wp_login_window_s: 900
+wp_mail_sender_domain: "mail.{{ wp_domain }}"
+wp_mail_per_hour: 20
+wp_mail_per_day: 60

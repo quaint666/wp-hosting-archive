@@ -64,6 +64,7 @@ services:
       - ./html:/var/www/html:ro
       - ./html/wp-content/uploads:/var/www/html/wp-content/uploads
       - ./wp-config.php:/var/www/html/wp-config.php:ro
+      - {{ wp_mu_dir }}:/var/www/wp-mu:ro
       - ./php.ini:/usr/local/etc/php/conf.d/zz-site.ini:ro
       - ./fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-pool.conf:ro
     logging:
