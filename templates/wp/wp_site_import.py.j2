@@ -1,6 +1,6 @@
 #!/usr/bin/python3 -I
 # Managed by Ansible (templates/wp/wp_site_import.py.j2). Bring a .wpress archive into a site on hold:   ssh -t dellwp sudo wp-site-import <site> <file.wpress> [--plan]
-# or remove what an earlier run unpacked:   wp-site-import reset <site>. The logic is {{ wp_tools_lib }}/wp_site_import.py, with the archive reader {{ wp_tools_lib }}/wp_wpress.py (both copied from scripts/ in the
+# then   wp-site-import approve <site> [--reject a,b]   or   wp-site-import reset <site>   (undo). The logic is {{ wp_tools_lib }}/wp_site_import.py, with the archive reader {{ wp_tools_lib }}/wp_wpress.py (both copied from scripts/ in the
 # repo, where tests/test_wp_import.py and tests/test_wp_wpress.py run them); this file only carries the values from the repo. Root-only (0750), like the other wp-site tools. The states and quotas
 # of the sites are those of the last run of dellwp/wp_sites_dellwp.yml: a site edited to live in the repo is still "hold" here until that play has run.
 import sys
@@ -13,6 +13,9 @@ CONFIG = {
     "intake_dir": "{{ wp_intake_dir }}",
     "intake_quota_mb": {{ wp_intake_quota_mb }},
     "image_pin": "{{ wp_image_php }}",
+    "domain": "{{ wp_domain }}",
+    "tools_bin": "{{ wp_tools_bin }}",
+    "php_uid": {{ wp_php_uid }},
     "sites": {
 {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}
         "{{ s.name }}": {"state": "{{ s.state | default(wp_site_defaults.state) }}", "quota_mb": {{ s.quota_mb | default(wp_site_defaults.quota_mb) }}},

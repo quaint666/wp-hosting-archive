@@ -5,9 +5,14 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import <site> <file.wpress> [--plan]     (the file must sit in the intake directory)
     wp-site-import reset <site>                      (asks for the site name; removes the unpacked copy)
 
-BATCH A, what exists: every refusal, the plan, the unpack into a work directory, the ledger. Nothing is written into the site, its database or its containers. Not built yet (batch B):
-copy-in, plugin reinstall, the SQL load, the WP-CLI steps, the scan, the report, the first backup, the approval.
-Refuses, changing nothing: a site that is not in wp_sites or not on hold; a site with a database that is not empty; a file that is not a plain *.wpress directly inside the intake directory;
+    wp-site-import approve <site> [--reject a,b] [--accept-failures]
+
+After the unpack the run goes on by itself: load the SQL (the migration plugin's table prefix is swapped for the site's), copy the data (uploads, languages), reinstall every plugin and theme
+wordpress.org offers (the archive's version if it is still offered, else the newest, and the report says so), run the WP-CLI steps (update-db, the URLs, Elementor, transients, rewrite rules),
+scan, write the report, take the first backup and stop. The site stays on hold. CODE THAT IS NOT FROM WORDPRESS.ORG (plugins and themes it does not offer, mu-plugins) STAYS IN THE WORK
+DIRECTORY until `approve` copies it in, so no step before your approval runs a line of it; `approve` also deletes the intake file and the work directory. `reset` undoes a run that is not
+approved yet, by the manifest in PLAN.json: it drops the tables and removes what the run copied or installed, nothing else.
+Refuses (before anything is written): a site that is not in wp_sites or not on hold; a site with a database that is not empty; a file that is not a plain *.wpress directly inside the intake directory;
 an archive the reader rejects (wp_wpress.judge: core newer than ours, a plugin that needs a newer PHP, an unsafe path, a multisite, a truncated file); a work directory left by an earlier run; not enough
 room in the intake quota or in the site's quota. --plan does all of that and prints the plan, writing nothing.
 The work directory is intake/work-<site>, inside the intake quota project: /srv/wp/scratch is shared with the restore drill, which sets and then removes its project limit around its own run.
@@ -23,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 from pathlib import Path
 
@@ -37,7 +43,23 @@ MIB = 1 << 20
 DROP_DIRS = {"upgrade": "upgrade/ (a half-finished update)", "cache": "cache directory", "litespeed": "LiteSpeed cache data", "ai1wm-backups": "the migration plugin's own backups"}
 # Directories of wp-content that are copied as they are (mu-plugins is code: the report says so)
 KEEP_DIRS = ("uploads", "mu-plugins", "languages")
-DB_EMPTY = 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()" "$MARIADB_DATABASE"'
+DB_SH = 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" -N -B -e "$SQL" "$MARIADB_DATABASE"'
+LOAD_SH = 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb -u"$MARIADB_USER" "$MARIADB_DATABASE"'
+# What the load starts with: the dump is a MySQL dump (zero dates, no strict mode), and checks the load does not need are off. Nothing else of the session is touched.
+PRELUDE = b"SET SESSION sql_mode='';\nSET SESSION foreign_key_checks=0;\nSET SESSION unique_checks=0;\nSET NAMES utf8mb4;\n"
+# MySQL 8's default collation does not exist in MariaDB; the dump of the practice file has none of it, an archive from MySQL 8 may
+COLLATION_FIXES = ((b"utf8mb4_0900_ai_ci", b"utf8mb4_unicode_520_ci"), (b"utf8mb4_0900_as_cs", b"utf8mb4_unicode_520_ci"))
+SERVMASK = b"SERVMASK_PREFIX_"
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+PREFIX_RE = re.compile(r"\$table_prefix\s*=\s*'([A-Za-z0-9_]+)'")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# A plugin or theme folder name that comes out of the archive and goes into a path: a plain name, never "..", never a slash. (A wordpress.org slug is stricter: SLUG_RE.)
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]*$")
+# A heuristic, not a verdict: patterns that legitimate plugins use too. A hit is a place to look, an absence proves nothing.
+SCAN_PATTERNS = ((rb"\beval\s*\(", "eval()"), (rb"\bbase64_decode\s*\(", "base64_decode()"), (rb"\bgzinflate\s*\(|\bgzuncompress\s*\(|\bstr_rot13\s*\(", "gzinflate/str_rot13"),
+                 (rb"\b(?:shell_exec|passthru|proc_open|popen|pcntl_exec)\s*\(", "shell execution"), (rb"\b(?:system|exec)\s*\(", "system()/exec()"), (rb"\bassert\s*\(\s*\$", "assert($var)"))
+SCAN_EXT = (".php", ".phtml", ".phar", ".php3", ".php4", ".php5", ".php7", ".inc", ".pht")
 
 
 class Refuse(Exception):
@@ -83,6 +105,9 @@ def build_plan(a, cfg, get):
     rows, notes, nogo, facts = w.judge(a, our_wp, our_php, get)
     if nogo:
         raise Refuse("the archive may not be imported:\n  " + "\n  ".join(nogo))
+    odd = [r["slug"] for r in rows if not NAME_RE.match(r["slug"])]
+    if odd:
+        raise Refuse("the archive names a plugin or theme '%s', which is not a plain folder name: refusing" % odd[0][:60])
     plugins, themes = {}, {}
     for r in rows:
         table = plugins if r["kind"] == "plugin" else themes
@@ -130,12 +155,23 @@ def check_site(cfg, site):
     return d
 
 
-def check_db_empty(site, run):
-    db = "wp_%s_db" % site.replace("-", "_")
-    p = run(["docker", "exec", db, "sh", "-c", DB_EMPTY], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+def db_name(site):
+    return "wp_%s_db" % site.replace("-", "_")
+
+
+def db_query(site, sql, run):
+    """One statement as the site's own database user, inside its container. Returns the first line of the answer; raises Refuse when the container does not answer."""
+    p = run(["docker", "exec", "-e", "SQL=" + sql, db_name(site), "sh", "-c", DB_SH], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     out = (p.stdout or "").strip()
-    if p.returncode != 0 or not out.isdigit():
+    if p.returncode != 0:
         raise Refuse("could not read the database of %s (%s): is its stack up? systemctl status wp-%s" % (site, (p.stderr or out or "no answer").strip()[:200], site))
+    return out.split("\n")[0].strip()
+
+
+def check_db_empty(site, run):
+    out = db_query(site, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()", run)
+    if not out.isdigit():
+        raise Refuse("could not read the database of %s (answer: '%s'): is its stack up? systemctl status wp-%s" % (site, out[:80], site))
     if int(out) != 0:
         raise Refuse("the database of %s is not empty (%s tables): an import needs an empty one. Nothing was changed" % (site, out))
 
@@ -217,13 +253,324 @@ def show_plan(plan, site, fname, digest, size, out):
         out("note: the archive carries mu-plugins: code that runs on every request. Read it before you approve")
 
 
-def run_import(cfg, site, arg, plan_only, get, run, out):
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---- the record of a run: PLAN.json in the work directory is what `reset` and `approve` work from
+
+def read_record(work):
+    try:
+        return json.loads((work / "PLAN.json").read_text())
+    except (OSError, ValueError):
+        raise Refuse("%s has no readable PLAN.json: the unpack did not finish. Run: wp-site-import reset <site>" % work)
+
+
+def save_record(work, record):
+    tmp = work / ".PLAN.json.new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(record, f, indent=1, sort_keys=True)
+    os.replace(tmp, work / "PLAN.json")
+
+
+class Tools:
+    """The things the run asks of the host, in one place so that the tests can stand in for them."""
+    def __init__(self, cfg, run, popen, chown, which):
+        self.cfg, self.run, self.popen, self.chown, self.which = cfg, run, popen, chown, which
+
+    def bin(self, name):
+        return os.path.join(self.cfg["tools_bin"], name)
+
+    def call(self, *cmd):
+        p = self.run(list(cmd), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+
+    def cli(self, site, *args):
+        return self.call(self.bin("wp-site-cli"), site, *args)
+
+    def ext(self, site, *args):
+        return self.call(self.bin("wp-site-ext"), site, *args)
+
+
+def table_prefix(site_dir):
+    try:
+        m = PREFIX_RE.search((site_dir / "wp-config.php").read_text())
+    except OSError:
+        m = None
+    if not m:
+        raise Refuse("cannot read $table_prefix from %s/wp-config.php: run dellwp/wp_sites_dellwp.yml" % site_dir)
+    return m.group(1)
+
+
+# ---- stage: the SQL
+
+def load_sql(site, work, prefix, tools):
+    """Stream database.sql into the site's own database, swapping the migration plugin's placeholder for the site's table prefix. Raises Refuse with the end of MariaDB's complaint."""
+    old = [(SERVMASK, prefix.encode())] + list(COLLATION_FIXES)
+    with tempfile.TemporaryFile() as err:
+        p = tools.popen(["docker", "exec", "-i", db_name(site), "sh", "-c", LOAD_SH], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err)
+        try:
+            p.stdin.write(PRELUDE)
+            with open(work / "database.sql", "rb") as f:
+                for line in f:
+                    for a, b in old:
+                        line = line.replace(a, b)
+                    p.stdin.write(line)
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+        rc = p.wait()
+        err.seek(0)
+        tail = err.read()[-500:].decode(errors="replace").strip()
+    if rc != 0:
+        raise Refuse("MariaDB stopped the load (exit %s): %s" % (rc, tail or "no message"))
+    tables = db_query(site, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()", tools.run)
+    url = db_query(site, "SELECT option_value FROM %soptions WHERE option_name='siteurl'" % prefix, tools.run)
+    if not tables.isdigit() or int(tables) == 0 or not url:
+        raise Refuse("the load ended without an error but the database has %s tables and no siteurl: treat it as failed" % tables)
+    return int(tables)
+
+
+def drop_all_tables(site, tools):
+    p = tools.run(["docker", "exec", "-e", "SQL=SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE()", db_name(site), "sh", "-c", DB_SH],
+                  capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+        raise Refuse("could not list the tables of %s: %s" % (site, (p.stderr or "")[:200]))
+    names = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
+    if any(not re.fullmatch(r"[A-Za-z0-9_$]+", n) for n in names):
+        raise Refuse("a table of %s has a name this tool will not put in a statement: drop the tables by hand" % site)
+    sql = "SET FOREIGN_KEY_CHECKS=0;\n" + "".join("DROP TABLE IF EXISTS `%s`;\n" % n for n in names)
+    p = tools.run(["docker", "exec", "-i", db_name(site), "sh", "-c", LOAD_SH], input=sql, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise Refuse("could not drop the tables of %s: %s" % (site, (p.stderr or "")[:300]))
+
+
+# ---- stage: copy the data in (uploads, languages); code waits for approval
+
+def copy_tree(src, dst, uid, mode_dir, mode_file, chown, manifest, root):
+    """Copy a tree of plain files. Never overwrites, never follows a link; every path it made is added to the manifest (relative to root) the moment it exists."""
+    for cur, dirs, files in os.walk(src):
+        here = Path(dst) / Path(cur).relative_to(src)
+        if not here.exists():
+            here.mkdir(mode=mode_dir)
+            os.chmod(here, mode_dir)
+            chown(here, uid, uid)
+            manifest.append(str(here.relative_to(root)) + "/")
+        elif here.is_symlink() or not here.is_dir():
+            raise Refuse("%s exists and is not a directory: refusing" % here)
+        for name in sorted(files):
+            target = here / name
+            try:
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode_file)
+            except FileExistsError:
+                raise Refuse("%s already exists: refusing to overwrite it" % target)
+            manifest.append(str(target.relative_to(root)))
+            with os.fdopen(fd, "wb") as out, open(Path(cur) / name, "rb") as f:
+                shutil.copyfileobj(f, out, CHUNK)
+            os.chmod(target, mode_file)
+            chown(target, uid, uid)
+
+
+def copy_data(cfg, site_dir, work, record, tools):
+    html = site_dir / "html"
+    uid = int(cfg["php_uid"])
+    for sub, owner in (("uploads", uid), ("languages", 0)):
+        src = work / "wp-content" / sub
+        if src.is_dir():
+            copy_tree(src, html / "wp-content" / sub, owner, 0o755, 0o644, tools.chown, record["copied"], html)
+            save_record(work, record)
+
+
+# ---- stage: plugins and themes from wordpress.org
+
+def install_from_org(site, record, work, tools):
+    steps = []
+    for r in record["rows"]:
+        kind, slug, have = r["kind"], r["slug"], r["have"]
+        table = record["plugins"] if kind == "plugin" else record["themes"]
+        if table.get(slug) != "reinstall":
+            continue
+        if not SLUG_RE.match(slug):
+            steps.append({"name": "%s %s" % (kind, slug), "ok": False, "note": "not a wordpress.org slug: skipped"})
+            continue
+        present, _ = tools.cli(site, kind, "is-installed", slug)
+        if present:
+            steps.append({"name": "%s %s" % (kind, slug), "ok": True, "note": "already in the image: left as it is"})
+            continue
+        ok, out, note = False, "", ""
+        if have and VERSION_RE.match(have):
+            ok, out = tools.ext(site, kind, "install", slug, "--version=" + have)
+            note = "installed version %s" % have
+        if not ok:
+            ok, out = tools.ext(site, kind, "install", slug)
+            note = ("version %s is not offered any more: the newest was installed" % have) if have else "the newest was installed"
+        if ok:
+            record["installed"][kind].append(slug)
+            save_record(work, record)
+        steps.append({"name": "%s %s" % (kind, slug), "ok": ok, "note": note if ok else "FAILED: " + out[-200:]})
+    return steps
+
+
+# ---- stage: WP-CLI
+
+def old_hosts(meta):
+    hosts = []
+    for key in ("SiteURL", "HomeURL", "InternalSiteURL", "InternalHomeURL"):
+        v = str(meta.get(key) or "")
+        m = re.match(r"^(?:https?:)?//(.+?)/*$", v)
+        if m and m.group(1) not in hosts:
+            hosts.append(m.group(1))
+    return hosts
+
+
+def wpcli_steps(cfg, site, work, record, tools):
+    steps = []
+    new_host = "%s.%s" % (site, cfg["domain"])
+    new_url = "https://" + new_host
+
+    def step(name, *args):
+        ok, out = tools.cli(site, *args)
+        steps.append({"name": name, "ok": ok, "note": (out.strip().splitlines() or [""])[-1][:160] if ok else "FAILED: " + out[-300:]})
+        return ok, out
+
+    step("core update-db", "core", "update-db")
+    step("option siteurl", "option", "update", "siteurl", new_url)
+    step("option home", "option", "update", "home", new_url)
+    meta = json.loads((work / "package.json").read_text())
+    hosts = [h for h in old_hosts(meta) if h != new_host]
+    for h in hosts:
+        if not HOST_RE.match(h):
+            steps.append({"name": "search-replace %s" % h[:60], "ok": False, "note": "the old address in package.json has characters this tool will not pass on: skipped; replace it by hand"})
+            continue
+        for a, b in (("http://" + h, new_url), ("https://" + h, new_url), ("//" + h, "//" + new_host),
+                     ("http:\\/\\/" + h, "https:\\/\\/" + new_host), ("https:\\/\\/" + h, "https:\\/\\/" + new_host), ("\\/\\/" + h, "\\/\\/" + new_host)):
+            step("search-replace %s" % a, "search-replace", a, b, "--all-tables-with-prefix", "--report-changed-only", "--precise")
+    active, _ = tools.cli(site, "plugin", "is-active", "elementor")
+    if active:
+        ok, help_text = tools.cli(site, "elementor")
+        names = set(re.findall(r"\b(replace[-_]urls|flush[-_]css)\b", help_text))
+        rep = next((n for n in ("replace-urls", "replace_urls") if n in names), None)
+        if rep:
+            for h in hosts:
+                if HOST_RE.match(h):
+                    for scheme in ("http://", "https://"):
+                        step("elementor %s %s" % (rep, scheme + h), "elementor", rep, scheme + h, new_url)
+        else:
+            steps.append({"name": "elementor replace-urls", "ok": False, "note": "Elementor is active but its help lists no replace command: URLs inside Elementor data may still be the old ones"})
+        flush = next((n for n in ("flush-css", "flush_css") if n in names), None)
+        if flush:
+            step("elementor %s" % flush, "elementor", flush)
+    step("transient delete", "transient", "delete", "--all")
+    step("rewrite flush", "rewrite", "flush")
+    step("option blog_public", "option", "update", "blog_public", "0")
+    step("cache flush", "cache", "flush")
+    return steps
+
+
+# ---- stage: scan
+
+def pattern_scan(roots, limit=40):
+    """[(path relative to its root, [what matched])] for PHP-like files under the roots."""
+    hits = []
+    for root in roots:
+        root = Path(root)
+        for cur, _, files in os.walk(root):
+            for name in files:
+                if not name.lower().endswith(SCAN_EXT):
+                    continue
+                path = Path(cur) / name
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    continue
+                found = [label for rx, label in SCAN_PATTERNS if re.search(rx, data)]
+                if found:
+                    hits.append((str(path.relative_to(root.parent)), found))
+    return sorted(hits)[:limit], len(hits)
+
+
+def php_in_uploads(uploads):
+    out = []
+    for cur, _, files in os.walk(uploads):
+        out += [str((Path(cur) / n).relative_to(uploads)) for n in files if n.lower().endswith(SCAN_EXT)]
+    return sorted(out)
+
+
+def scan(site, site_dir, work, record, tools):
+    res = {}
+    held = [work / "wp-content" / d for d in ("plugins", "themes", "mu-plugins") if (work / "wp-content" / d).is_dir()]
+    res["held_hits"], res["held_total"] = pattern_scan(held)
+    res["uploads_php"] = php_in_uploads(site_dir / "html/wp-content/uploads")
+    uploads_hits, uploads_total = pattern_scan([site_dir / "html/wp-content/uploads"])
+    res["uploads_hits"], res["uploads_hits_total"] = uploads_hits, uploads_total
+    ok, out = tools.cli(site, "core", "verify-checksums")
+    res["core"] = (ok, (out.strip().splitlines() or [""])[-1][:200])
+    ok, out = tools.cli(site, "plugin", "verify-checksums", "--all")
+    res["plugins"] = (ok, (out.strip().splitlines() or [""])[-1][:200])
+    clam = tools.which("clamscan")
+    if clam:
+        targets = [str(work / "wp-content"), str(site_dir / "html/wp-content/uploads")]
+        ok, out = tools.call(clam, "-r", "--infected", "--no-summary", *[t for t in targets if os.path.isdir(t)])
+        res["clam"] = "clean" if ok else ("FOUND: " + out[-400:] if out else "FAILED to run")
+    else:
+        res["clam"] = "NOT RUN: ClamAV is not installed on this VM"
+    return res
+
+
+# ---- the report
+
+def held_items(record, work):
+    items = []
+    for kind, table in (("plugin", record["plugins"]), ("theme", record["themes"])):
+        for slug, d in sorted(table.items()):
+            if d == "approve":
+                base = work / "wp-content" / ("plugins" if kind == "plugin" else "themes") / slug
+                items.append((kind, slug, sum(1 for _ in base.rglob("*") if _.is_file()) if base.is_dir() else 0))
+    mu = work / "wp-content" / "mu-plugins"
+    if mu.is_dir():
+        items.append(("mu-plugins", "mu-plugins", sum(1 for _ in mu.rglob("*") if _.is_file())))
+    return items
+
+
+def build_report(site, record, steps, res, work):
+    f = record["facts"]
+    lines = ["IMPORT REPORT for %s  (%s, sha256 %s...)" % (site, record["file"], record["sha256"][:16]),
+             "archive WordPress %s, PHP %s; sites WordPress %s, PHP %s" % (f["archive_wp"], f["archive_php"], f["our_wp"], f["our_php"]), "",
+             "STEPS (%d, %d failed)" % (len(steps), sum(1 for s in steps if not s["ok"]))]
+    lines += ["  %-6s %-52s %s" % ("ok" if s["ok"] else "FAILED", s["name"][:52], s["note"]) for s in steps]
+    lines += ["", "CODE HELD BACK until you approve it (nothing of it has run):"]
+    items = held_items(record, work)
+    lines += ["  %-10s %-36s %d files" % i for i in items] or ["  none"]
+    lines += ["", "SCAN (a heuristic: a hit is a place to look, a clean result proves nothing)",
+              "  core checksums:   %s %s" % ("ok" if res["core"][0] else "FAILED", res["core"][1]),
+              "  plugin checksums: %s %s" % ("ok" if res["plugins"][0] else "FAILED", res["plugins"][1]),
+              "  ClamAV:           %s" % res["clam"],
+              "  PHP files under uploads/: %s" % (", ".join(res["uploads_php"][:10]) + (" ..." if len(res["uploads_php"]) > 10 else "") if res["uploads_php"] else "none"),
+              "  suspicious patterns in the held code: %d file(s)" % res["held_total"]]
+    lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["held_hits"]]
+    lines += ["  suspicious patterns in uploads/: %d file(s)" % res["uploads_hits_total"]]
+    lines += ["    %s: %s" % (p, ", ".join(l)) for p, l in res["uploads_hits"]]
+    if record["notes"]:
+        lines += ["", "NOTES"] + ["  " + n for n in record["notes"]]
+    failed = [s for s in steps if not s["ok"]] + ([{"name": "core checksums"}] if not res["core"][0] else [])
+    lines += ["", "NEXT  wp-site-import approve %s [--reject slug,...]    (copies the held code in, deletes the intake file)" % site,
+              "      wp-site-import reset %s                         (undoes this run)" % site]
+    if failed:
+        lines.append("      approve refuses while a step failed; add --accept-failures once you have looked at them")
+    return "\n".join(lines)
+
+
+# ---- the run
+
+def run_import(cfg, site, arg, plan_only, get, tools, out):
     site_dir = check_site(cfg, site)
     path = locate(cfg, arg)
     work = Path(cfg["intake_dir"]) / ("work-" + site)
     if work.exists() or work.is_symlink():
         raise Refuse("%s exists: an earlier import of %s left it. Look at it, then run: wp-site-import reset %s" % (work, site, site))
-    check_db_empty(site, run)
+    check_db_empty(site, tools.run)
+    prefix = table_prefix(site_dir)
     with w.Archive(path) as a:
         plan = build_plan(a, cfg, get)
         need = plan["keep_bytes"]
@@ -245,25 +592,116 @@ def run_import(cfg, site, arg, plan_only, get, run, out):
         if written != need:
             shutil.rmtree(work, ignore_errors=True)
             raise Refuse("internal check failed: wrote %d bytes, planned %d; the work directory was removed" % (written, need))
-        record = {"site": site, "file": path.name, "sha256": digest, "size": size, "unpacked_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "facts": plan["facts"],
-                  "plugins": plan["plugins"], "themes": plan["themes"], "rows": plan["rows"], "notes": plan["notes"], "tally": plan["tally"], "files": len(plan["keep"]), "bytes": need}
-        fd = os.open(work / "PLAN.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(record, f, indent=1, sort_keys=True)
+        record = {"site": site, "file": path.name, "sha256": digest, "size": size, "unpacked_at": now_utc(), "facts": plan["facts"], "plugins": plan["plugins"], "themes": plan["themes"],
+                  "rows": plan["rows"], "notes": plan["notes"], "tally": plan["tally"], "files": len(plan["keep"]), "bytes": need, "stage": "unpacked", "prefix": prefix,
+                  "db_loaded": False, "copied": [], "installed": {"plugin": [], "theme": []}, "steps": []}
+        save_record(work, record)
     ledger(cfg, site, "unpacked", digest, size, path.name)
     show_plan(plan, site, path.name, digest, size, out)
-    out("\nUNPACKED into %s. Batch A ends here: copy-in, plugin reinstall, the SQL load, the scan and the approval are not built yet. Undo: wp-site-import reset %s" % (work, site))
+    out("\nUNPACKED into %s. Loading the database ..." % work)
+    try:
+        tables = load_sql(site, work, prefix, tools)
+        record["db_loaded"] = True
+        save_record(work, record)
+        ledger(cfg, site, "loaded", digest, size, path.name)
+        out("loaded %d tables. Copying data, installing from wordpress.org, running WP-CLI ..." % tables)
+        copy_data(cfg, site_dir, work, record, tools)
+        steps = install_from_org(site, record, work, tools)
+        steps += wpcli_steps(cfg, site, work, record, tools)
+        res = scan(site, site_dir, work, record, tools)
+    except Refuse as e:
+        raise Refuse("%s\nThe run stopped part way. Look at the site, then undo it with: wp-site-import reset %s" % (e, site))
+    ok, bout = tools.call(tools.bin("wp-site-backup"), site)
+    steps.append({"name": "first backup", "ok": ok, "note": "taken" if ok else "FAILED: " + bout[-200:]})
+    record["steps"], record["stage"], record["scan"] = steps, "reported", {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}
+    report = build_report(site, record, steps, res, work)
+    fd = os.open(work / "REPORT.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(report + "\n")
+    save_record(work, record)
+    ledger(cfg, site, "reported", digest, size, path.name)
+    out("\n" + report)
+    return 1 if any(not s["ok"] for s in steps) else 0
+
+
+def run_approve(cfg, site, reject, accept_failures, tools, out):
+    check_site(cfg, site)
+    work = Path(cfg["intake_dir"]) / ("work-" + site)
+    if not work.is_dir() or work.is_symlink():
+        raise Refuse("there is no unapproved import of %s (%s is not a directory)" % (site, work))
+    record = read_record(work)
+    if record.get("stage") != "reported":
+        raise Refuse("the import of %s is at stage '%s', not 'reported': let it finish, or reset it" % (site, record.get("stage")))
+    failed = [s["name"] for s in record["steps"] if not s["ok"]]
+    if failed and not accept_failures:
+        raise Refuse("%d step(s) failed (%s ...): look at the report, then use --accept-failures, or reset" % (len(failed), failed[0]))
+    items = held_items(record, work)
+    odd = [i[1] for i in items if i[0] != "mu-plugins" and not NAME_RE.match(i[1])]
+    if odd:
+        raise Refuse("the record names '%s', which is not a plain folder name: refusing to copy anything" % odd[0][:60])
+    unknown = [r for r in reject if r not in {i[1] for i in items}]
+    if unknown:
+        raise Refuse("--reject names %s, which is not held back (held: %s)" % (", ".join(unknown), ", ".join(i[1] for i in items) or "nothing"))
+    html = Path(cfg["data_mount"]) / "sites" / site / "html"
+    take = [i for i in items if i[1] not in reject]
+    where = {"plugin": "plugins", "theme": "themes", "mu-plugins": "mu-plugins"}
+    for kind, slug, _ in take:
+        dst = html / "wp-content" / where[kind] / ("" if kind == "mu-plugins" else slug)
+        if dst.is_symlink() or (dst.is_dir() and any(dst.iterdir())) or (dst.exists() and not dst.is_dir()):
+            raise Refuse("%s already exists: refusing to overwrite it. Nothing was copied" % dst)
+    for kind, slug, _ in take:
+        sub, name = where[kind], ("" if kind == "mu-plugins" else slug)
+        copy_tree(work / "wp-content" / sub / name, html / "wp-content" / sub / name, 0, 0o755, 0o644, tools.chown, record["copied"], html)
+        save_record(work, record)
+    f = Path(cfg["intake_dir"]) / record["file"]
+    if f.is_file() and not f.is_symlink():
+        f.unlink()
+    shutil.rmtree(work)
+    ledger(cfg, site, "approved", record["sha256"], record["size"], record["file"])
+    ok, bout = tools.call(tools.bin("wp-site-backup"), site)
+    out("approved: copied in %s; rejected %s. The intake file and the work directory are gone (the ledger line stays). The site is still on hold; going live is its own step. Backup after the copy: %s"
+        % (", ".join(i[1] for i in take) or "nothing", ", ".join(reject) or "nothing", "taken" if ok else "FAILED (" + bout[-120:] + ")"))
     return 0
 
 
-def run_reset(cfg, site, ask, out):
+def undo(cfg, site, work, tools, out):
+    """Put the site back as it was before the run: the tables, the copied files, the installed plugins and themes. Only what the record names."""
+    record = read_record(work)
+    html = Path(cfg["data_mount"]) / "sites" / site / "html"
+    if record.get("db_loaded"):
+        drop_all_tables(site, tools)
+        out("dropped the tables of %s" % site)
+    files = [m for m in record.get("copied", []) if not m.endswith("/")]
+    dirs = sorted((m for m in record.get("copied", []) if m.endswith("/")), key=len, reverse=True)
+    for m in files:
+        t = html / m
+        if t.is_file() and not t.is_symlink():
+            t.unlink()
+    for m in dirs:
+        t = html / m
+        if t.is_dir() and not t.is_symlink():
+            try:
+                t.rmdir()
+            except OSError:
+                pass
+    for kind, sub in (("plugin", "plugins"), ("theme", "themes")):
+        for slug in record.get("installed", {}).get(kind, []):
+            t = html / "wp-content" / sub / slug
+            if SLUG_RE.match(slug) and t.is_dir() and not t.is_symlink():
+                shutil.rmtree(t)
+    out("removed %d copied files and %d installed plugins/themes" % (len(files), sum(len(v) for v in record.get("installed", {}).values())))
+
+
+def run_reset(cfg, site, ask, tools, out):
     if not SITE_RE.match(site or ""):
         raise Refuse("'%s' is not a site name" % site)
     work = Path(cfg["intake_dir"]) / ("work-" + site)
     if not work.is_dir() or work.is_symlink():
         raise Refuse("there is nothing to reset: %s is not a directory" % work)
-    if ask("Type the site name (%s) to remove %s: " % (site, work)).strip() != site:
+    if ask("Type the site name (%s) to undo the import and remove %s: " % (site, work)).strip() != site:
         raise Refuse("the name did not match: nothing was removed")
+    if (work / "PLAN.json").exists():
+        undo(cfg, site, work, tools, out)
     shutil.rmtree(work)
     ledger(cfg, site, "reset")
     out("removed %s. The file in the intake directory was left (you remove it)." % work)
@@ -276,9 +714,19 @@ def tty_ask(prompt):
         return t.readline()
 
 
-def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print):
-    plan_only = "--plan" in argv
-    args = [x for x in argv if x != "--plan"]
+USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>")
+
+
+def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, popen=subprocess.Popen, chown=os.chown, which=shutil.which):
+    flags = {"--plan", "--accept-failures"}
+    args = [x for x in argv if x not in flags]
+    reject = []
+    if "--reject" in args:
+        i = args.index("--reject")
+        reject = [x for x in (args[i + 1] if i + 1 < len(args) else "").split(",") if x]
+        args = args[:i] + args[i + 2:]
+    plan_only, accept = "--plan" in argv, "--accept-failures" in argv
+    tools = Tools(cfg, run, popen, chown, which)
     lock = None
     try:
         lock = os.open(os.path.join(cfg["intake_dir"], ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
@@ -287,11 +735,13 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print):
         except OSError:
             raise Refuse("another import is running")
         if args[:1] == ["reset"] and len(args) == 2:
-            return run_reset(cfg, args[1], ask, out)
-        if len(args) != 2 or args[0] == "reset":
-            out("usage: wp-site-import <site> <file.wpress> [--plan]\n       wp-site-import reset <site>")
+            return run_reset(cfg, args[1], ask, tools, out)
+        if args[:1] == ["approve"] and len(args) == 2:
+            return run_approve(cfg, args[1], reject, accept, tools, out)
+        if len(args) != 2 or args[0] in ("reset", "approve") or reject or accept:
+            out(USAGE)
             return 2
-        return run_import(cfg, args[0], args[1], plan_only, get, run, out)
+        return run_import(cfg, args[0], args[1], plan_only, get, tools, out)
     except Refuse as e:
         out("wp-site-import: %s" % e)
         return 2
