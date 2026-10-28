@@ -580,7 +580,9 @@ def h_backup(call):
 
 
 def h_delete(call):
-    return call.job([call.ctl.tool("wp-site-delete"), call.args["site"]], tty=[call.args["site"]])    # the tool asks for the name to be typed; the typed confirmation was checked equal
+    """A delete is confirmed by the name typed TWICE (the convention of the older handoff, 12.3: in the script and again on the VM; the page asks them as two separate entries). Both are checked
+    equal to the site before anything starts, and the second is what the tool's own prompt is answered with."""
+    return call.job([call.ctl.tool("wp-site-delete"), call.args["site"]], tty=[call.args["confirm_again"]])
 
 
 def h_password(call):
@@ -629,7 +631,7 @@ VERBS = {
     "audit-tail": Verb("read", {"lines": Arg("int", required=False, lo=1, hi=200, default=50)}, h_audit_tail),
     "import-report": Verb("read", {"site": SITE}, h_import_report),
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
-    "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site")}, h_delete),
+    "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),
     "import-receive": Verb("stream", {"file": Arg("text", rx=IMPORT_FILE_RE)}, h_import_receive),
     "import-discard": Verb("inline", {"file": Arg("text", rx=IMPORT_FILE_RE), "if_present": Arg("flag")}, h_import_discard),

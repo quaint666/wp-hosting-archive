@@ -208,6 +208,10 @@ class Validation(Base):
     def test_missing_arguments_and_the_typed_confirmation(self):
         for label, req, code in (("no site", {"verb": "backup"}, "missing_argument"), ("delete without the name", {"verb": "delete", "site": "wptest"}, "missing_argument"),
                                  ("delete with another name", {"verb": "delete", "site": "wptest", "confirm_name": "held"}, "confirm_mismatch"),
+                                 ("delete typed once", {"verb": "delete", "site": "wptest", "confirm_name": "wptest"}, "missing_argument"),
+                                 ("delete, the second typing is another name", {"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "held"}, "confirm_mismatch"),
+                                 ("delete, the second typing in capitals", {"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "WPTEST"}, "bad_value"),
+                                 ("delete, only the second typing", {"verb": "delete", "site": "wptest", "confirm_again": "wptest"}, "missing_argument"),
                                  ("delete, name in capitals", {"verb": "delete", "site": "wptest", "confirm_name": "WPTEST"}, "bad_value"),
                                  ("delete, name with a space", {"verb": "delete", "site": "wptest", "confirm_name": "wptest "}, "bad_value"),
                                  ("reset without the name", {"verb": "import-reset", "site": "wptest"}, "missing_argument"),
@@ -240,7 +244,7 @@ class Argv(Base):
         for label, req, argv, expected_tty in (
                 ("backup", {"verb": "backup", "site": "wptest"}, [b + "/wp-site-backup", "wptest"], None),
                 ("backup, all options", {"verb": "backup", "site": "wptest", "force": True, "tag": "final"}, [b + "/wp-site-backup", "wptest", "--force", "--tag=final"], None),
-                ("delete", {"verb": "delete", "site": "wptest", "confirm_name": "wptest"}, [b + "/wp-site-delete", "wptest"], "wptest\n"),
+                ("delete", {"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"}, [b + "/wp-site-delete", "wptest"], "wptest\n"),
                 ("import", {"verb": "import-run", "site": "wptest", "file": "friend-1.wpress"}, [b + "/wp-site-import", "wptest", "friend-1.wpress"], None),
                 ("import, plan", {"verb": "import-run", "site": "wptest", "file": "f.wpress", "plan": True}, [b + "/wp-site-import", "wptest", "f.wpress", "--plan"], None),
                 ("import, replace", {"verb": "import-run", "site": "wptest", "file": "f.wpress", "replace": True, "confirm_name": "wptest"},
@@ -461,7 +465,7 @@ class Stream(Base):
 
 class Jobs(Base):
     def start(self, **kw):
-        rc, reply = self.call(dict({"verb": "delete", "site": "wptest", "confirm_name": "wptest"}, **kw))
+        rc, reply = self.call(dict({"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"}, **kw))
         self.assertEqual((rc, reply["ok"]), (0, True), reply)
         return reply["job"]
 
@@ -475,6 +479,17 @@ class Jobs(Base):
         for p in ((self.state / "jobs" / job), (self.state / "jobs" / job / "spec.json"), (self.state / "jobs" / job / "tty")):
             self.assertEqual(p.stat().st_mode & 0o077, 0, "%s must be root-only" % p)
         self.assertEqual((self.state / "jobs" / job / "tty").read_text(), "wptest\n")
+
+    def test_a_delete_needs_the_name_typed_twice_and_the_tool_is_answered_with_the_second_typing(self):
+        rc, reply = self.call({"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual((self.state / "jobs" / reply["job"] / "tty").read_text(), "wptest\n")
+        self.assertEqual(self.audit()[0]["args"], {"confirm_again": "wptest", "confirm_name": "wptest"}, "both typings are in the record of the attempt")
+        # an import's reset and replace ask once, as their tools do; only a delete asks twice
+        rc, reply = self.call({"verb": "import-reset", "site": "held", "confirm_name": "held"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        rc, reply = self.call({"verb": "import-reset", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"})
+        self.assertEqual((rc, reply["error"]), (2, "unknown_argument"))
 
     def test_running_a_job_keeps_its_log_and_exit_code_and_removes_the_typed_answer(self):
         job = self.start()
@@ -539,14 +554,14 @@ class Jobs(Base):
 
     def test_a_unit_that_cannot_be_started_leaves_nothing_behind(self):
         self.control("sd_rc", 1)
-        rc, reply = self.call({"verb": "delete", "site": "wptest", "confirm_name": "wptest"})
+        rc, reply = self.call({"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"})
         self.assertEqual((rc, reply["error"]), (2, "job_not_started"))
         self.assertEqual(self.jobs(), [])
         self.assertEqual([l["phase"] for l in self.audit()], ["intent", "refused"])
 
     def test_a_job_that_runs_too_long_is_stopped_and_says_so(self):
         cfg = self.limits(delete={"timeout_s": 1})
-        rc, reply = self.call({"verb": "delete", "site": "wptest", "confirm_name": "wptest"}, cfg=cfg)
+        rc, reply = self.call({"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"}, cfg=cfg)
         job = reply["job"]
         self.assertEqual(self.spec(job)["timeout_s"], 1, "the limit is written into the job when it starts")
         self.control("sleep", 30)
@@ -604,7 +619,7 @@ class Jobs(Base):
 
 class Idempotency(Base):
     def job(self, req=None, **kw):
-        body = dict({"verb": "delete", "site": "wptest", "confirm_name": "wptest"}, **kw)
+        body = dict({"verb": "delete", "site": "wptest", "confirm_name": "wptest", "confirm_again": "wptest"}, **kw)
         if req:
             body["req"] = req
         return self.call(body)
@@ -640,7 +655,7 @@ class Idempotency(Base):
 
     def test_the_same_id_for_anything_else_is_refused_and_starts_nothing(self):
         rc, first = self.job("click-5")
-        for label, req in (("another verb", {"verb": "backup", "site": "wptest", "req": "click-5"}), ("another site", {"verb": "delete", "site": "held", "confirm_name": "held", "req": "click-5"}),
+        for label, req in (("another verb", {"verb": "backup", "site": "wptest", "req": "click-5"}), ("another site", {"verb": "delete", "site": "held", "confirm_name": "held", "confirm_again": "held", "req": "click-5"}),
                            ("other arguments", {"verb": "backup", "site": "wptest", "force": True, "req": "click-5"})):
             with self.subTest(label):
                 rc, reply = self.call(req)
@@ -694,7 +709,7 @@ class Idempotency(Base):
 class Limits(Base):
     def test_each_job_unit_gets_the_memory_process_and_time_limits_of_its_verb(self):
         for req, props in (({"verb": "backup", "site": "wptest"}, "[--property=MemoryMax=512M] [--property=MemorySwapMax=0] [--property=TasksMax=256] [--property=RuntimeMaxSec=900]"),
-                           ({"verb": "delete", "site": "held", "confirm_name": "held"}, "[--property=MemoryMax=384M] [--property=MemorySwapMax=0] [--property=TasksMax=256] [--property=RuntimeMaxSec=900]"),
+                           ({"verb": "delete", "site": "held", "confirm_name": "held", "confirm_again": "held"}, "[--property=MemoryMax=384M] [--property=MemorySwapMax=0] [--property=TasksMax=256] [--property=RuntimeMaxSec=900]"),
                            ({"verb": "import-run", "site": "wptest", "file": "a.wpress"}, "[--property=MemoryMax=1024M] [--property=MemorySwapMax=0] [--property=TasksMax=256] [--property=RuntimeMaxSec=1200]"),
                            ({"verb": "import-approve", "site": "held"}, "[--property=MemoryMax=1024M] [--property=MemorySwapMax=0] [--property=TasksMax=256] [--property=RuntimeMaxSec=1000]"),
                            ({"verb": "import-reset", "site": "wptest", "confirm_name": "wptest"}, "[--property=MemoryMax=1024M] [--property=MemorySwapMax=0] [--property=TasksMax=64] [--property=RuntimeMaxSec=1100]")):

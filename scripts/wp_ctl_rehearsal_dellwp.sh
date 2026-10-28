@@ -74,10 +74,10 @@ echo "== 5. a fake site with only a registry record, and a job on it"
 mkdir -p "$DIR" && echo '{"label": "rehearsal"}' > "$DIR/site.json" || { bad "could not make $DIR"; exit 1; }
 out=$(panel "{\"verb\":\"show\",\"site\":\"$SITE\"}"); echo "$out" | grep -q '"label": "rehearsal"' && ok "show finds the registry record" || bad "show did not return the record: $out"
 out=$(panel "{\"verb\":\"check-name\",\"name\":\"$SITE\"}"); echo "$out" | grep -q name_taken && ok "check-name says the name is taken" || bad "check-name: $out"
-out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\",\"req\":\"rehearsal-1\"}"); rc=$?
+out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\",\"confirm_again\":\"$SITE\",\"req\":\"rehearsal-1\"}"); rc=$?
 JOB=$(echo "$out" | jget job)
 [ "$rc" = 0 ] && [ -n "$JOB" ] && ok "job started: $JOB" || { bad "no job: $rc $out"; exit 1; }
-out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\",\"req\":\"rehearsal-1\"}")
+out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\",\"confirm_again\":\"$SITE\",\"req\":\"rehearsal-1\"}")
 [ "$(echo "$out" | jget job)" = "$JOB" ] && echo "$out" | grep -q '"duplicate": true' && ok "the same request again returned the same job (idempotent)" || bad "a repeat did not return the same job: $out"
 out=$(panel "{\"verb\":\"backup\",\"site\":\"$SITE\",\"req\":\"rehearsal-1\"}")
 echo "$out" | grep -q '"error": "req_reused"' && ok "the same request id for another verb is refused" || bad "req_reused expected: $out"
@@ -99,7 +99,7 @@ systemctl is-active "wpjob-$JOB" >/dev/null 2>&1 && bad "the unit wpjob-$JOB is 
 echo "== 6. a locked site refuses a second verb"
 ( flock -x 9; sleep 25 ) 9>"$STATE/locks/$SITE.lock" & HOLDER=$!
 sleep 1
-out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\"}"); rc=$?
+out=$(panel "{\"verb\":\"delete\",\"site\":\"$SITE\",\"confirm_name\":\"$SITE\",\"confirm_again\":\"$SITE\"}"); rc=$?
 [ "$rc" = 2 ] && echo "$out" | grep -q '"error": "busy"' && ok "refused as busy while the lock is held" || bad "not refused as busy: $rc $out"
 kill "$HOLDER" 2>/dev/null; HOLDER=""
 echo
