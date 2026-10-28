@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""The rules and the registry of the WordPress sites on dellwp: what a site may be called, which fields may be set and to what, where a site's record lives, which port and quota id a new site gets,
+and whether the whole list of sites still fits the VM. Standard library only: the provisioning tool (wp-site-provision, a later batch) runs it on dellwp and tests/test_wp_site_model.py runs it offline.
+Design: docs/handoff_wp_control_temp.md (sections 3, 4 and 6.1).
+
+A site's record is {data_dir}/<name>/site.json (JSON, written atomically, only by the provisioning tool). A closed site leaves a tombstone, {tombstones_dir}/<name>.json, outside the site's directory
+so that deleting the directory never touches it: the name, port and quota id of a closed site are never given to another. Until the sites move out of host_vars/dellwp/vars.yml the allocator
+and the fit check also see that list (`known`): a record in the registry and an entry in the repo are one set of names, ports and ids.
+
+The checks of the fit rules are a port of the assert in tasks/wp_sites_common.yml, rule for rule and in the same order; tests/test_wp_site_model.py runs both on the same site lists and demands
+the same verdict, so a change to one that is not made to the other fails there. scripts/wp_sites.py keeps its own copies of the field rules until it retires; the same test ties those too."""
+import json
+import os
+import re
+import tempfile
+from pathlib import Path
+
+SCHEMA = 1
+NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_sites.py and scripts/wp_ctl.py)
+FIT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")                             # the play's own, looser rule (fullmatch: the play's `match` test also lets a trailing newline through)
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+STATES = ("hold", "live", "stopped", "closed")
+POLICIES = ("auto", "notify", "freeze")
+MAIL_MODES = ("log", "send")
+PORT_BASE, QUOTA_BASE = 9100, 1000                                            # a first site gets 9101 and 1001: above the base, as scripts/wp_sites.py does
+# What `set` may change: key -> (kind, minimum, maximum). The ranges are those of scripts/wp_sites.py EDITABLE, and `state` is not here: it has its own verb. `name`, `port` and `quota_id` are
+# never editable (the name is in the container, database, unit, vhost, directories and quota projects; the port and the id are assigned from the registry).
+EDITABLE = {
+    "update_policy": ("choice", POLICIES),
+    "quota_mb": ("int", 512, 100000),
+    "backup_quota_mb": ("int", 512, 100000),
+    "php_mem_mb": ("int", 384, 4096),
+    "db_mem_mb": ("int", 192, 4096),
+    "upload_mb": ("int", 1, 512),
+    "allow_xmlrpc": ("bool",),
+    "allow_app_passwords": ("bool",),
+    "allow_user_enum": ("bool",),
+    "mail_mode": ("choice", MAIL_MODES),
+    "label": ("text", 100),
+    "note": ("text", 500),
+}
+# What the registry keeps beyond the editable keys: identity, assigned numbers, state and the keys the page never shows (they stay at the defaults; the registry file is the CLI fallback).
+FIXED_KEYS = ("schema", "name", "port", "quota_id", "state", "secret_rev", "created")
+HIDDEN_KEYS = ("cpus", "pids_limit", "php_memory_limit", "fpm_max_children", "opcache_mb", "db_buffer_pool_mb", "php_allow_functions")
+RECORD_KEYS = frozenset(FIXED_KEYS) | frozenset(EDITABLE) | frozenset(HIDDEN_KEYS)
+TEXT_KEYS = ("label", "note")                                                 # registry-only information: never applied to the site, so absent from wp_site_defaults
+
+
+class Refuse(Exception):
+    """A plain-language reason to stop; nothing has been written."""
+
+
+class RegistryError(Exception):
+    """A record on disk that cannot be trusted (not JSON, wrong name, unknown key, wrong type). The tool stops rather than guess."""
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------- the rules
+def validate_value(key, raw):
+    """(value, None) or (None, why) for a value given to `set` or `create`. Text arrives typed or as a string; a number or a switch also arrives as a string (a form field, a command line)."""
+    if key not in EDITABLE:
+        return None, "%s is not a field that can be set" % key
+    spec = EDITABLE[key]
+    if spec[0] == "text":
+        if not isinstance(raw, str):
+            return None, "%s must be text" % key
+        if len(raw) > spec[1]:
+            return None, "%s is at most %d characters" % (key, spec[1])
+        if CONTROL_RE.search(raw):
+            return None, "%s may not contain control characters" % key
+        return raw, None
+    if spec[0] == "bool":
+        if isinstance(raw, bool):
+            return raw, None
+        raw = str(raw).strip()
+        return (raw == "true", None) if raw in ("true", "false") else (None, "%s must be true or false" % key)
+    if isinstance(raw, bool):
+        return None, "%s must be a whole number" % key
+    raw = str(raw).strip()
+    if spec[0] == "choice":
+        return (raw, None) if raw in spec[1] else (None, "%s must be one of %s" % (key, ", ".join(spec[1])))
+    if not re.fullmatch(r"[0-9]{1,6}", raw):
+        return None, "%s must be a whole number" % key
+    n = int(raw)
+    return (n, None) if spec[1] <= n <= spec[2] else (None, "%s must be between %d and %d" % (key, spec[1], spec[2]))
+
+
+def check_name(name, reserved, taken, closed):
+    """None when `name` may be given to a new site, else the reason. `taken` = names of existing sites, `closed` = names of tombstones (a closed site's name is never reused)."""
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name) or "--" in name:
+        return "letters, digits and single hyphens inside, 2 to 24 characters, starting with a letter"
+    if name in reserved:
+        return "'%s' is reserved" % name
+    if name in closed:
+        return "'%s' is the name of a closed site; a name is never reused" % name
+    if name in taken:
+        return "'%s' already exists" % name
+    return None
+
+
+# -------------------------------------------------------------------------------------------------------------------------------------- the registry
+def check_record(rec, defaults, where="record"):
+    """Raise RegistryError unless `rec` is a site record this tool could have written. Every key is known, every editable value passes its rule, the assigned numbers are integers."""
+    if not isinstance(rec, dict):
+        raise RegistryError("%s: not a JSON object" % where)
+    if rec.get("schema") != SCHEMA:
+        raise RegistryError("%s: schema %r (this tool reads %d)" % (where, rec.get("schema"), SCHEMA))
+    unknown = sorted(set(rec) - RECORD_KEYS)
+    if unknown:
+        raise RegistryError("%s: unknown key %s" % (where, ", ".join(unknown)))
+    for key in ("name", "port", "quota_id", "state"):
+        if key not in rec:
+            raise RegistryError("%s: no %s" % (where, key))
+    if not isinstance(rec["name"], str) or not NAME_RE.fullmatch(rec["name"]):
+        raise RegistryError("%s: the name %r is not a site name" % (where, rec["name"]))
+    for key in ("port", "quota_id"):
+        if not isinstance(rec[key], int) or isinstance(rec[key], bool) or rec[key] <= 0:
+            raise RegistryError("%s: %s must be a whole number above zero" % (where, key))
+    if rec["state"] not in STATES:
+        raise RegistryError("%s: state %r (one of %s)" % (where, rec["state"], ", ".join(STATES)))
+    for key in EDITABLE:
+        if key in rec:
+            _, why = validate_value(key, rec[key])
+            if why:
+                raise RegistryError("%s: %s" % (where, why))
+    for key in HIDDEN_KEYS + ("secret_rev",):
+        if key in rec and type(rec[key]) is not type(defaults[key]):
+            raise RegistryError("%s: %s has the wrong type" % (where, key))
+    return rec
+
+
+class Registry:
+    """The records on disk. `data_dir` holds <name>/site.json, `tombstones_dir` holds <name>.json."""
+
+    def __init__(self, data_dir, tombstones_dir, defaults):
+        self.data_dir, self.tombstones_dir, self.defaults = Path(data_dir), Path(tombstones_dir), defaults
+
+    def site_file(self, name):
+        return self.data_dir / name / "site.json"
+
+    def tombstone_file(self, name):
+        return self.tombstones_dir / (name + ".json")
+
+    @staticmethod
+    def load(path):
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError) as e:
+            raise RegistryError("%s: %s" % (path, e))
+
+    def read_site(self, name):
+        """The record of one site, or None when it has none (a missing file or a link, which is not a record)."""
+        path = self.site_file(name)
+        if path.is_symlink() or not path.is_file():
+            return None
+        rec = check_record(self.load(path), self.defaults, str(path))
+        if rec["name"] != name:
+            raise RegistryError("%s: the record is for %r" % (path, rec["name"]))
+        return rec
+
+    def sites(self):
+        """Every record, by name. A directory without a record is not a site of the registry (it is what the repo still declares, or debris)."""
+        if not self.data_dir.is_dir():
+            return []
+        return [rec for rec in (self.read_site(p.name) for p in sorted(self.data_dir.iterdir()) if p.is_dir() and not p.is_symlink()) if rec]
+
+    def tombstones(self):
+        if not self.tombstones_dir.is_dir():
+            return []
+        out = []
+        for path in sorted(self.tombstones_dir.glob("*.json")):
+            rec = check_record(self.load(path), self.defaults, str(path))
+            if rec["state"] != "closed" or rec["name"] != path.stem:
+                raise RegistryError("%s: a tombstone is a closed site named like its file" % path)
+            out.append(rec)
+        return out
+
+    def write_site(self, rec):
+        """Write the record atomically (a temp file beside it, flushed, then renamed): a crash leaves the old record or the new one, never half. The site's directory must exist."""
+        check_record(rec, self.defaults, "new record for %s" % rec.get("name"))
+        if rec["state"] == "closed":
+            raise Refuse("a closed site has a tombstone, not a site record")
+        self.atomic_write(self.site_file(rec["name"]), rec)
+
+    def write_tombstone(self, rec):
+        rec = {**rec, "state": "closed"}
+        check_record(rec, self.defaults, "tombstone for %s" % rec.get("name"))
+        self.tombstones_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.tombstones_dir, 0o755)
+        self.atomic_write(self.tombstone_file(rec["name"]), rec)
+
+    @staticmethod
+    def atomic_write(path, rec):
+        text = json.dumps(rec, indent=2, sort_keys=True) + "\n"
+        fd, tmp = tempfile.mkstemp(prefix=".site-", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def merged(defaults, rec):
+    """A record over the defaults: the dict the templates and the fit check read. `label` and `note` are registry-only and have no default."""
+    return {**defaults, **rec}
+
+
+def everything(registry, known=()):
+    """Every site the registry or the repo knows, as plain dicts of name, port, quota_id, state: records, tombstones and `known` (the repo's wp_sites until it moves). A name in two places must agree."""
+    seen = {}
+    for rec in list(registry.sites()) + list(registry.tombstones()) + [dict(k) for k in known]:
+        rec = {k: rec[k] for k in ("name", "port", "quota_id", "state") if k in rec}
+        old = seen.get(rec["name"])
+        if old and (old["port"], old["quota_id"]) != (rec["port"], rec["quota_id"]):
+            raise RegistryError("%s is recorded with two different ports or quota ids (%s and %s)" % (rec["name"], old, rec))
+        if old and old.get("state") == "closed":
+            rec["state"] = "closed"                                           # once closed, closed: a stale copy elsewhere cannot reopen the name
+        seen[rec["name"]] = {**(old or {}), **rec}
+    return sorted(seen.values(), key=lambda s: s["name"])
+
+
+def next_numbers(sites):
+    """(port, quota_id) for a new site: above every one ever recorded, closed sites included, so none is ever given twice."""
+    return (max([s["port"] for s in sites] + [PORT_BASE]) + 1, max([s["quota_id"] for s in sites] + [QUOTA_BASE]) + 1)
+
+
+# -------------------------------------------------------------------------------------------------------------------------------------------- the fit
+def to_int(value):
+    """Ansible's `| int`: a number or a string of digits, else 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+# The rules of the assert in tasks/wp_sites_common.yml, in its order. broken_rules() returns the positions of those that do not hold.
+RULES = (
+    "there is at least one site",
+    "every site has a name, a port and a quota id",
+    "names are 2 to 24 characters of a-z, 0-9 and -",
+    "no name is reserved",
+    "names are unique",
+    "ports are unique",
+    "quota ids are unique",
+    "ports are above 1024",
+    "quota ids are from 1000",
+    "states are hold, live, stopped or closed",
+    "update policies are auto, notify or freeze",
+    "the memory of the sites that run fits the VM",
+    "the quotas of the sites that exist fit the data disk",
+    "the backup id offset is larger than the spread of the quota ids",
+    "the highest backup id is below the scratch project",
+    "the archive and scratch projects differ",
+    "the highest backup id is below the archive project",
+    "the intake and scratch projects differ",
+    "the intake and archive projects differ",
+    "the highest backup id is below the intake project",
+)
+
+
+def broken_rules(sites, limits):
+    """Indexes into RULES that do not hold for `sites` (each merged over the defaults, tombstones included). `limits`: reserved_names, vm_memory_mb, data_disk_gb, ram_reserve_mb, data_reserve_mb,
+    backup_quota_offset, scratch_quota_id, archive_quota_id, intake_quota_id."""
+    n = len(sites)
+    complete = all(all(k in s for k in ("name", "port", "quota_id")) for s in sites)
+    if not complete:
+        return [1]                                                            # the rest cannot be judged without them (the play's expressions raise on a missing key, which counts as failing)
+    ids = [to_int(s["quota_id"]) for s in sites]
+    ports = [to_int(s["port"]) for s in sites]
+    names = [s["name"] for s in sites]
+    live = [s for s in sites if s["state"] not in ("stopped", "closed")]
+    exist = [s for s in sites if s["state"] != "closed"]
+    top = (max(ids) if ids else 0) + to_int(limits["backup_quota_offset"])
+    offset, scratch, archive, intake = (to_int(limits[k]) for k in ("backup_quota_offset", "scratch_quota_id", "archive_quota_id", "intake_quota_id"))
+    holds = (
+        n > 0,
+        True,
+        sum(1 for x in names if isinstance(x, str) and FIT_NAME_RE.fullmatch(x)) == n,
+        not set(names) & set(limits["reserved_names"]),
+        len(set(names)) == n,
+        len(set(ports)) == n,
+        len(set(ids)) == n,
+        all(p > 1024 for p in ports),
+        all(i >= 1000 for i in ids),
+        all(s["state"] in STATES for s in sites),
+        all(s["update_policy"] in POLICIES for s in sites),
+        sum(to_int(s["php_mem_mb"]) for s in live) + sum(to_int(s["db_mem_mb"]) for s in live) <= to_int(limits["vm_memory_mb"]) - to_int(limits["ram_reserve_mb"]),
+        sum(to_int(s["quota_mb"]) for s in exist) + sum(to_int(s["backup_quota_mb"]) for s in exist) <= to_int(limits["data_disk_gb"]) * 1024 - to_int(limits["data_reserve_mb"]),
+        offset > (max(ids) - min(ids) if ids else 0),
+        top < scratch,
+        archive != scratch,
+        top < archive,
+        intake != scratch,
+        intake != archive,
+        top < intake,
+    )
+    return [i for i, ok in enumerate(holds) if not ok]
+
+
+def fit_report(sites, limits):
+    """The plain-language list of the rules a site list breaks (empty = fits)."""
+    return [RULES[i] for i in broken_rules(sites, limits)]
