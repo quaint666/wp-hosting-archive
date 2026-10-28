@@ -66,6 +66,11 @@ def base_vars():
     return v
 
 
+def dellwp_vm():
+    """dellwp's entry in the Dell's declared VMs (host_vars/delloptiplex3040/vars.yml): its memory is what the play's RAM rule is checked against, so tests read it here and never hardcode a size."""
+    return next(vm for vm in load("host_vars/delloptiplex3040/vars.yml")["proxmox_vms"] if vm["name"] == "dellwp")
+
+
 def site_vars(v, site):
     s = {**v["wp_site_defaults"], **site}
     out = dict(v)
@@ -98,7 +103,7 @@ def failing(that, v, sites):
     ctx = dict(v)
     ctx["wp_sites"] = sites
     ctx["wp_sites_merged"] = [{**v["wp_site_defaults"], **s} for s in sites]
-    ctx["wp_vm"] = next(vm for vm in load("host_vars/delloptiplex3040/vars.yml")["proxmox_vms"] if vm["name"] == "dellwp")
+    ctx["wp_vm"] = dellwp_vm()
     bad = []
     for expr in that:
         try:
@@ -442,7 +447,7 @@ class Assertions(unittest.TestCase):
 
     def test_a_stopped_site_is_a_valid_state_and_does_not_count_against_the_vms_ram_but_does_against_its_disk(self):
         mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
-        budget = 6144 - self.v["wp_vm_ram_reserve_mb"]   # dellwp's declared memory less the reserve
+        budget = dellwp_vm()["memory"] - self.v["wp_vm_ram_reserve_mb"]   # dellwp's declared memory (host_vars/delloptiplex3040/vars.yml) less the reserve
         n = budget // mem + 1                            # one more than fits
         small = {"quota_mb": 512, "backup_quota_mb": 512}
         sites = [{"name": "s%d" % i, "port": 9100 + i, "quota_id": 1000 + i, "state": "hold", **small} for i in range(1, n + 1)]
@@ -480,9 +485,14 @@ class Assertions(unittest.TestCase):
             with self.subTest(label):
                 self.assertFalse(self.ok(sites))
 
-    def test_five_default_sites_fit(self):
-        sites = [{"name": "site%d" % i, "port": 9100 + i, "quota_id": 1000 + i} for i in range(1, 6)]
-        self.assertTrue(self.ok(sites))
+    def test_as_many_default_sites_as_the_vms_ram_holds_fit_and_one_more_does_not(self):
+        # the VM is held to three sites (host_vars/delloptiplex3040/vars.yml, 2026-10-28); the number comes from the declared memory, so a resize moves this test instead of breaking it
+        mem = self.v["wp_site_defaults"]["php_mem_mb"] + self.v["wp_site_defaults"]["db_mem_mb"]
+        fit = (dellwp_vm()["memory"] - self.v["wp_vm_ram_reserve_mb"]) // mem
+        self.assertGreaterEqual(fit, 1)
+        site = lambda i: {"name": "site%d" % i, "port": 9100 + i, "quota_id": 1000 + i}
+        self.assertTrue(self.ok([site(i) for i in range(1, fit + 1)]), "%d default sites fit" % fit)
+        self.assertFalse(self.ok([site(i) for i in range(1, fit + 2)]), "one more than fit is refused")
 
     def test_nine_default_sites_do_not(self):
         sites = [{"name": "site%d" % i, "port": 9100 + i, "quota_id": 1000 + i} for i in range(1, 10)]

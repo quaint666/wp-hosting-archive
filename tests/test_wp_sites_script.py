@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wp_sites as w  # noqa: E402
-from test_wp_sites_render import fixture_vars_text  # noqa: E402
+from test_wp_sites_render import base_vars, dellwp_vm, fixture_vars_text  # noqa: E402
 
 GOOD_PW = "correct-horse-battery-staple"
 
@@ -492,12 +492,18 @@ class Lifecycle(Base):
         self.vars.write_text(w.set_site_field(self.vars.read_text(), name, "state", "stopped")); self.commit("stopped")
 
     def crowded_repo(self):
-        """Seven small sites, the last one stopped: the six running ones fill the RAM budget exactly, so starting the seventh cannot fit."""
+        """As many small sites as the VM's RAM budget holds (what dellwp declares in host_vars/delloptiplex3040/vars.yml less wp_vm_ram_reserve_mb, at the default php and db memory), plus one more that is stopped:
+        starting that one cannot fit. Returns its name. The size is read from the real variables, so a change to the VM's RAM moves this test with it instead of breaking it."""
+        v = base_vars()
+        fit = (dellwp_vm()["memory"] - v["wp_vm_ram_reserve_mb"]) // (v["wp_site_defaults"]["php_mem_mb"] + v["wp_site_defaults"]["db_mem_mb"])
+        self.assertGreaterEqual(fit, 2, "the test needs room for two running sites to stop one of them")
+        last = "s%d" % (fit + 1)
         t = w.set_site_field(w.set_site_field(self.vars.read_text(), "wptest", "quota_mb", 512), "wptest", "backup_quota_mb", 512)
-        for i in range(2, 8):
+        for i in range(2, fit + 2):
             t = w.add_site(t, {"name": "s%d" % i, "port": 9100 + i, "quota_id": 1000 + i, "state": "hold", "update_policy": "notify", "quota_mb": 512, "backup_quota_mb": 512})
-        t = w.set_site_field(t, "s7", "state", "stopped")
+        t = w.set_site_field(t, last, "state", "stopped")
         self.vars.write_text(t); self.commit("crowded")
+        return last
 
     def test_stop_takes_the_final_backup_after_every_answer_and_immediately_before_the_play(self):
         self.answers = ["y"]   # write the change and run the play
@@ -556,14 +562,14 @@ class Lifecycle(Base):
         self.assertIn("modify wptest --set state=live", self.text())
 
     def test_a_start_that_would_not_fit_in_the_vms_ram_is_refused_by_the_plays_own_rule(self):
-        self.crowded_repo()
+        last = self.crowded_repo()
         with self.assertRaises(w.Refuse) as cm:
-            self.sites().start("s7", yes=True)
+            self.sites().start(last, yes=True)
         self.assertIn("php_mem_mb", str(cm.exception)); self.assertEqual(self.calls, [])
-        self.assertEqual(self.site("s7")["state"], "stopped")
+        self.assertEqual(self.site(last)["state"], "stopped")
         self.assertEqual(self.sites().stop("s2", yes=True), 0, "stopping never needs room")
         self.commit("stopped s2")
-        self.assertEqual(self.sites().start("s7", yes=True), 0, "with one of the others stopped, it fits")
+        self.assertEqual(self.sites().start(last, yes=True), 0, "with one of the others stopped, it fits")
 
     def test_modify_cannot_move_a_stopped_site_around_the_final_backup(self):
         self.stopped_repo()
