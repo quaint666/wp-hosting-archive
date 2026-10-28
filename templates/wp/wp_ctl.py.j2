@@ -1,0 +1,44 @@
+#!/usr/bin/python3 -I
+# Managed by Ansible (templates/wp/wp_ctl.py.j2). The control dispatcher of dellwp:   ssh dellwp sudo wp-ctl <verb> [key=value ...]   or one JSON line on standard input (the control app's key is forced to run this).
+# The logic is {{ wp_tools_lib }}/wp_ctl.py (copied from scripts/ in the repo, where tests/test_wp_ctl.py runs it); this file only carries the values from the repo. Root-only (0750): the account the
+# control app logs in as reaches it through one sudoers entry (tasks/wp_ctl_common.yml) and nothing else. The sites it knows are those of the last run of dellwp/wp_sites_dellwp.yml plus any
+# with a site.json in their directory; a site edited into the repo is unknown here until that play has run.
+import sys
+
+sys.path.insert(0, "{{ wp_tools_lib }}")
+import wp_ctl  # noqa: E402
+
+CONFIG = {
+    "state_dir": "{{ wp_ctl_state_dir }}",
+    "run_dir": "{{ wp_ctl_run_dir }}",
+    "audit_file": "{{ wp_ctl_audit_file }}",
+    "data_dir": "{{ wp_data_mount }}/sites",
+    "tools_bin": "{{ wp_tools_bin }}",
+    "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "logger": "/usr/bin/logger",
+    "systemd_run": "/usr/bin/systemd-run",
+    "panel_user": "{{ wp_ctl_user }}",
+    "job_keep_days": {{ wp_ctl_job_keep_days }},
+    "max_request_bytes": {{ wp_ctl_max_request_bytes }},
+    "limits": {
+{% for name, own in wp_ctl_limits.items() %}
+        "{{ name }}": {{ own | tojson }},
+{% endfor %}
+    },
+    "reserved_names": [
+{% for n in wp_reserved_names %}
+        "{{ n }}",
+{% endfor %}
+    ],
+    "closed_sites": [
+{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) == 'closed' %}
+        "{{ s.name }}",
+{% endfor %}
+    ],
+    "sites": [
+{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}
+        "{{ s.name }}",
+{% endfor %}
+    ],
+}
+sys.exit(wp_ctl.main(CONFIG, sys.argv[1:]))

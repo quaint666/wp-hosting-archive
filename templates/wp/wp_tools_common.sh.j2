@@ -9,13 +9,16 @@ readonly WP_FREEZE='{{ wp_freeze_file }}'
 {% raw %}
 die() { echo "$(basename "$0"): $*" >&2; exit 2; }
 
-# Sets site, dir and host. The name must look like a site name AND be one the repo declares: the regex keeps path tricks and globs out, the list keeps typos out.
+# Sets site, dir and host. The name must look like a site name AND be one that exists: the regex keeps path tricks and globs out, the list keeps typos out. A site exists if the repo declares it
+# (WP_SITES, rendered by the play) OR it has a registry record, site.json, in its directory (written by the control app's provisioning; a link does not count). This is the TRANSITION: while the
+# sites are still declared in the repo the two agree; when they leave the repo WP_SITES is empty and the record is the only source. The tools that loop over $WP_SITES themselves (wp-backup-check,
+# wp-restore-drill) do not see a site that only has a record; they move to the registry in the step that moves the sites.
 require_site() {
   site=${1:-}
   [[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || die "'$site' is not a site name"
   local s known=0
   for s in $WP_SITES; do [ "$s" = "$site" ] && known=1; done
-  [ "$known" = 1 ] || die "'$site' is not in wp_sites (add it and run dellwp/wp_sites_dellwp.yml)"
+  [ "$known" = 1 ] || { [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || die "'$site' is not in wp_sites (add it and run dellwp/wp_sites_dellwp.yml)"
   dir=$WP_DATA/$site
   host=$site.$WP_DOMAIN
 }

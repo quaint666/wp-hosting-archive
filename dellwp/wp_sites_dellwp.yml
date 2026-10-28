@@ -24,6 +24,9 @@
     - name: Install the operator's tools (tasks/wp_tools_common.yml)
       ansible.builtin.import_tasks: ../tasks/wp_tools_common.yml
       tags: [wp_tools]
+    - name: Set up the control dispatcher's access (tasks/wp_ctl_common.yml)
+      ansible.builtin.import_tasks: ../tasks/wp_ctl_common.yml
+      tags: [wp_ctl]
     - name: Apply the site engine (tasks/wp_sites_common.yml)
       ansible.builtin.import_tasks: ../tasks/wp_sites_common.yml
       tags: [wp_sites]

@@ -186,6 +186,32 @@ wp_approvals_max_per_minute: 20
 wp_approvals_read_timeout_s: 120
 wp_approvals_resolve_timeout_s: 7200
 wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
+# The control dispatcher (scripts/wp_ctl.py, templates/wp/wp_ctl.py.j2, tasks/wp_ctl_common.yml; design in docs/handoff_wp_control_temp.md): the one program the control app's ssh key may run, and the
+# operator's own `sudo wp-ctl`. wp_ctl_user is the account that key logs in as (its only sudoers entry is wp-ctl). wp_ctl_panel_keys are the public keys allowed to log in as it, each forced to wp-ctl;
+# the list is empty until the control VM exists, and an empty list means nobody can log in as that account. wp_ctl_state_dir holds the jobs (one directory each: its request, its log, its exit code) and
+# the per-site locks, and a job directory is removed after wp_ctl_job_keep_days days. wp_ctl_run_dir (a tmpfs) holds the files a tool reads its typed answers from, so a password is never written to
+# the disk. wp_ctl_audit_file is append-only (chattr +a, if the filesystem takes it) and every line is also sent to the journal, which Alloy ships to Loki. A request line may be wp_ctl_max_request_bytes long.
+wp_ctl_user: wpctl
+wp_ctl_panel_keys: []
+wp_ctl_state_dir: /var/lib/wp-ctl
+wp_ctl_run_dir: /run/wp-ctl
+wp_ctl_audit_file: /var/log/wp-ctl/audit.jsonl
+wp_ctl_job_keep_days: 14
+wp_ctl_max_request_bytes: 65536
+# What each verb may use, like a function's timeout and memory. timeout_s: how long its tool may run before it is stopped (every job and the upload must name their own). memory_mb and tasks: the cap of a
+# JOB's systemd unit (MemoryMax, TasksMax) on the tool's own processes (bash, gzip, tar, the Python importer); the containers a tool starts keep the limits of their compose files (wp_cli_mem_mb and so on)
+# and are not counted here. `default` gives all three; a verb overrides what it names; a verb that does not exist, or a key that is not one of the three, stops wp-ctl at its next start. The numbers are
+# `[proposed]`, not measured: the approval timeout is the listener's (wp_approvals_resolve_timeout_s), the import's step limit is wp_import_step_timeout_s. A job that dies with status 137, or whose log
+# says "Killed", ran out of memory_mb: raise it for that verb.
+wp_ctl_limits:
+  default: { timeout_s: 120, memory_mb: 512, tasks: 256 }
+  password: { timeout_s: 300 }
+  backup: { timeout_s: 3600 }
+  delete: { timeout_s: 3600 }
+  import-receive: { timeout_s: 14400 }
+  import-run: { timeout_s: 14400, memory_mb: 1024 }
+  import-approve: { timeout_s: 7200, memory_mb: 1024 }
+  import-reset: { timeout_s: 7200, memory_mb: 1024 }
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
 # The monthly restore drill (templates/wp/wp_restore_drill.sh.j2): the 1st of the month at 05:30 local, after the Proxmox job at 04:00 has finished. One random site that has a good backup.

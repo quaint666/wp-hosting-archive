@@ -1,0 +1,104 @@
+---
+# tasks/wp_ctl_common.yml
+# The access side of the control dispatcher: the account the control app's ssh key logs in as, its one sudoers entry, the forced-command key list, and the audit file and state directory. The program
+# itself (wp-ctl, scripts/wp_ctl.py through templates/wp/wp_ctl.py.j2) is installed with the other tools by tasks/wp_tools_common.yml (tag wp_tools). No hosts:/become: and no handlers; imported via
+# import_tasks into dellwp/wp_sites_dellwp.yml. Design: docs/handoff_wp_control_temp.md. Check mode cannot show: whether sshd takes the forced command and the empty key list, whether sudo allows the
+# entry, or whether the filesystem accepts the append-only attribute; scripts/wp_ctl_rehearsal_dellwp.sh proves those on the VM.
+#
+# The account has no password ('*' in /etc/shadow, which still lets a key in) and a shell only because sshd runs a forced command through it. Its home, .ssh and authorized_keys belong to root, so the
+# account cannot change which keys may log in. Each key is forced to `sudo -n wp-ctl` with `restrict` (no terminal, no forwarding, no agent), and the sudoers entry allows that program with NO arguments,
+# so even a stolen key cannot ask for --run-job or a flag. With the list empty nobody can log in as this account. The key line should also carry from="<the control VM's address>" once that VM is in
+# the inventory.
+
+- name: Stop if a control key is not a plain ed25519 public key
+  ansible.builtin.assert:
+    that:
+      - wp_ctl_panel_keys | reject('match', '^ssh-ed25519 AAAA[0-9A-Za-z+/]+=*( [A-Za-z0-9@._-]+)?$') | list | length == 0
+    fail_msg: "wp_ctl_panel_keys holds an entry that is not 'ssh-ed25519 AAAA... [comment]' on one line; it would be written into authorized_keys with the forced command in front of it"
+    quiet: true
+
+- name: Make the control account
+  ansible.builtin.user:
+    name: "{{ wp_ctl_user }}"
+    system: true
+    shell: /bin/sh
+    home: "/var/lib/{{ wp_ctl_user }}"
+    create_home: false
+    password: "*"
+    comment: "wp-ctl forced-command login for the control app"
+
+- name: Make the account's home and .ssh directories, owned by root
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "/var/lib/{{ wp_ctl_user }}"
+    - "/var/lib/{{ wp_ctl_user }}/.ssh"
+
+# The file always starts with a comment line: with an empty key list the content would otherwise render to an empty string, and Ansible reads that as "no content" and fails the task
+# ("src (or content) is required", seen on dellwp 2026-10-28). sshd ignores comment lines, so with no keys listed nobody can log in.
+- name: Write the keys that may log in as the control account, each forced to wp-ctl
+  ansible.builtin.copy:
+    dest: "/var/lib/{{ wp_ctl_user }}/.ssh/authorized_keys"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (tasks/wp_ctl_common.yml). Keys allowed to log in as {{ wp_ctl_user }}, each forced to wp-ctl; none while wp_ctl_panel_keys is empty.
+      {% for key in wp_ctl_panel_keys %}
+      restrict,command="sudo -n {{ wp_tools_bin }}/wp-ctl" {{ key }}
+      {% endfor %}
+
+- name: Let the control account run wp-ctl as root, with no arguments, and nothing else
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/wp-ctl
+    owner: root
+    group: root
+    mode: "0440"
+    content: |
+      {{ wp_ctl_user }} ALL=(root) NOPASSWD: {{ wp_tools_bin }}/wp-ctl ""
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Make the dispatcher's state directory (jobs, locks, the typed confirmations)
+  ansible.builtin.file:
+    path: "{{ wp_ctl_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Make the audit directory
+  ansible.builtin.file:
+    path: "{{ wp_ctl_audit_file | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+# force: false leaves an existing file (and what it holds) alone; the attribute below must not make the next run try to rewrite it. The first line is a record like any other (audit-tail reads it),
+# and not empty, because Ansible treats an empty content as missing.
+- name: Make the audit file
+  ansible.builtin.copy:
+    dest: "{{ wp_ctl_audit_file }}"
+    content: |
+      {"phase":"created","by":"tasks/wp_ctl_common.yml"}
+    force: false
+    owner: root
+    group: root
+    mode: "0600"
+
+# Append-only means nothing, not even root, can truncate or edit the file until `chattr -a`; the journal copy that Alloy ships is the second record. A line is a few hundred bytes, so the file is
+# not rotated. A filesystem that does not take the attribute is reported, not a failure (rescue: the play goes on and the recap says rescued=1): the audit then rests on the journal copy alone.
+- name: Make the audit file append-only
+  block:
+    - name: Set the append-only attribute
+      ansible.builtin.file:
+        path: "{{ wp_ctl_audit_file }}"
+        attributes: a
+  rescue:
+    - name: Say so when the audit file could not be made append-only
+      ansible.builtin.debug:
+        msg: "The filesystem of {{ wp_ctl_audit_file }} did not take the append-only attribute ({{ ansible_failed_result.msg | default('no message') }}); the audit is then only as safe as the journal copy."
