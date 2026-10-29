@@ -44,8 +44,25 @@ def env():
     return e
 
 
+def inventory_hostvars():
+    """{host: {"overlay_ip": ...}} for every inventory host that has an overlay address, so variables like wp_ctl_panel_from (hostvars['aopenpanel']['overlay_ip']) resolve in the tests."""
+    out = {}
+
+    def walk(node):
+        for name, host in (node.get("hosts") or {}).items():
+            if (host or {}).get("overlay_ip"):
+                out[name] = {"overlay_ip": host["overlay_ip"]}
+        for key, child in node.items():
+            if isinstance(child, dict) and key not in ("hosts", "vars"):
+                walk(child)
+        for child in (node.get("children") or {}).values():
+            walk(child or {})
+    walk(load("inventory.yml"))
+    return out
+
+
 def base_vars():
-    v = {}
+    v = {"hostvars": inventory_hostvars()}
     v.update(load("vars/wp.yml"))
     v.update(load("host_vars/dellwp/vars.yml"))
     v["wp_sites"] = [dict(FIXTURE_SITE)]               # test-only: the one live site the template tests render

@@ -1,0 +1,29 @@
+# Managed by Ansible (templates/wp_panel/panel.service.j2). The WordPress control app: one container from the image the play built on this VM (aopenvms/wp_panel_aopenvms.yml). It starts as the same
+# unprivileged user the image makes, with a read-only root file system, no capabilities and a memory cap equal to its swap cap; its secrets are mounted read-only and its only writable places are three tmpfs.
+# The host network is used (like the watcher's containers) but gunicorn binds to loopback only: nginx is the only way in. Restart it with systemctl restart, never docker restart.
+[Unit]
+Description=WordPress control app
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+ExecStartPre=-/usr/bin/docker rm -fv {{ panel_container }}
+ExecStart=/usr/bin/docker run --name {{ panel_container }} \
+  --net=host \
+  --read-only \
+  --tmpfs /tmp --tmpfs /dev/shm --tmpfs /run/panel:uid={{ panel_uid }},gid={{ panel_uid }},mode=700 \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --memory={{ panel_memory }} --memory-swap={{ panel_memory }} \
+  -v {{ panel_secret_dir }}:/run/secrets:ro \
+  -e PANEL_CTL_HOST={{ panel_ctl_host }} -e PANEL_CTL_USER={{ panel_ctl_user }} \
+  -e PANEL_SECRET_DIR=/run/secrets -e PANEL_STATE_DIR=/run/panel \
+  -e PANEL_BIND={{ panel_bind }} -e PANEL_SESSION_HOURS={{ panel_session_hours }} \
+  {{ panel_image }}
+ExecStop=/usr/bin/docker stop -t 20 {{ panel_container }}
+
+[Install]
+WantedBy=multi-user.target

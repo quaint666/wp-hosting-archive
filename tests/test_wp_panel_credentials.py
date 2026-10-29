@@ -107,7 +107,7 @@ class Totp(unittest.TestCase):
 
 
 class Make(Base):
-    def test_it_writes_the_three_variables_in_a_private_file_and_the_app_accepts_them(self):
+    def test_it_writes_the_four_variables_in_a_private_file_and_the_app_accepts_them(self):
         rc, cap = self.make()
         self.assertEqual(rc, 0)
         mode = stat.S_IMODE(self.out.stat().st_mode)
@@ -118,6 +118,16 @@ class Make(Base):
         self.assertEqual(len(base64.b64decode(v["aopenpanel_panel_session_key"])), 48)
         self.assertEqual(len(v["aopenpanel_panel_totp_secret"]), 32)
         pyotp.TOTP(v["aopenpanel_panel_totp_secret"]).now()                  # a secret pyotp can use
+        private = v["aopenpanel_panel_ssh_key"]
+        self.assertTrue(private.startswith("-----BEGIN OPENSSH PRIVATE KEY-----\n") and private.endswith("-----END OPENSSH PRIVATE KEY-----\n"), "a whole key, with its final newline")
+        pub = Path(str(self.out) + ".pub")
+        self.assertEqual(stat.S_IMODE(pub.stat().st_mode), 0o644)
+        line = pub.read_text().strip()
+        accept = re.fullmatch(r"wp_ctl_panel_keys \| reject\('match', '(.*)'\) \| list \| length == 0", [x for x in __import__("yaml").safe_load((ROOT / "tasks/wp_ctl_common.yml").read_text()) if "ansible.builtin.assert" in x][0]["ansible.builtin.assert"]["that"][0]).group(1)
+        self.assertRegex(line, accept)                                       # the very pattern the play enforces on wp_ctl_panel_keys
+        self.assertTrue(line.endswith(" wp-panel@aopenpanel"))
+        self.assertEqual(cred.derive_public(private, self.dir), " ".join(line.split()[:2]), "the public file is the private key's other half")
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir() if p.name.startswith(".panel-key")), [], "the scratch directory is gone")
         # what the app's own loader makes of the three values, written the way the play will write them
         secrets_dir = self.dir / "secrets"
         secrets_dir.mkdir()
@@ -128,6 +138,16 @@ class Make(Base):
         self.assertTrue(check_password_hash(s.password_hash, PASSWORD))
         self.assertGreaterEqual(len(s.session_key), 32)
 
+    def test_the_modes_are_set_by_the_script_and_not_by_the_users_umask(self):
+        old = os.umask(0)                                  # with no umask, a mode asked for in the script is the mode the file gets
+        try:
+            rc, _ = self.make()
+        finally:
+            os.umask(old)
+        self.assertEqual(rc, 0)
+        self.assertEqual(stat.S_IMODE(self.out.stat().st_mode), 0o600, "the secret file")
+        self.assertEqual(stat.S_IMODE(Path(str(self.out) + ".pub").stat().st_mode), 0o644, "the public key file: readable by all, writable by the owner only")
+
     def test_nothing_secret_is_printed_and_the_file_says_what_to_do(self):
         rc, cap = self.make()
         v = self.values()
@@ -135,9 +155,13 @@ class Make(Base):
             self.assertNotIn(value, cap.text)
         self.assertNotIn(PASSWORD, cap.text)
         self.assertNotIn(base64.b64decode(v["aopenpanel_panel_session_key"]).hex(), cap.text)
+        for line in v["aopenpanel_panel_ssh_key"].splitlines()[1:-1]:
+            self.assertNotIn(line, cap.text, "no line of the private key is shown")
         self.assertIn("No secret is shown", cap.text)
         self.assertIn("ansible-vault encrypt host_vars/aopenpanel/vault.yml", cap.text)
         self.assertIn("shred -u", cap.text)
+        self.assertIn("PUBLIC ssh key", cap.text)
+        self.assertNotIn("PRIVATE KEY", cap.text)
         self.assertIn("PLAIN TEXT until encrypted", self.out.read_text())
         self.assertNotIn(PASSWORD, self.out.read_text(), "the password itself is never stored")
 
@@ -146,6 +170,7 @@ class Make(Base):
         a = self.values()
         b_path = self.dir / "other.yml"
         self.make(out=b_path)
+        self.assertNotEqual(Path(str(self.out) + ".pub").read_text(), Path(str(b_path) + ".pub").read_text())
         b = cred.read_values(str(b_path))
         for k in cred.KEYS:
             self.assertNotEqual(a[k], b[k], k)
@@ -158,6 +183,43 @@ class Make(Base):
         link.symlink_to(self.dir / "target.yml")
         self.assertEqual(self.make(out=link)[0], 2)
         self.assertFalse((self.dir / "target.yml").exists())
+
+    def test_it_never_overwrites_the_public_file_either(self):
+        Path(str(self.out) + ".pub").write_text("precious")
+        rc, _ = self.make()
+        self.assertEqual((rc, self.out.exists(), Path(str(self.out) + ".pub").read_text()), (2, False, "precious"))
+
+    def test_a_key_that_ssh_keygen_cannot_make_stops_before_anything_is_written(self):
+        import subprocess as sp
+
+        def broken(parent, run=None):
+            raise cred.Refused("ssh-keygen could not make the key (is OpenSSH installed?): it failed")
+        cap = Capture()
+        rc = cred.main(["make", str(self.out)], getpw=getpw(PASSWORD, PASSWORD), out=cap, keygen=broken)
+        self.assertEqual(rc, 2)
+        self.assertFalse(self.out.exists() or Path(str(self.out) + ".pub").exists())
+
+        def failing_run(cmd, **kw):
+            raise sp.CalledProcessError(1, cmd)
+        with self.assertRaises(cred.Refused):
+            cred.new_ssh_key(self.dir, run=failing_run)
+        with self.assertRaises(cred.Refused):
+            cred.new_ssh_key(self.dir, run=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "No such file")))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir() if p.name.startswith(".panel-key")), [])
+
+    def test_a_key_that_is_not_an_ed25519_key_in_the_form_the_play_accepts_is_refused(self):
+        def writes(private, public):
+            def run(cmd, **kw):
+                keyfile = cmd[cmd.index("-f") + 1]
+                Path(keyfile).write_text(private)
+                Path(keyfile + ".pub").write_text(public)
+            return run
+        good_pub = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc wp-panel@aopenpanel"
+        for private, public in (("garbage", good_pub), ("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB wp-panel@aopenpanel"),
+                                ("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n", 'ssh-ed25519 AAAAC3Nza x" , command="id')):
+            with self.subTest(public=public[:20]), self.assertRaises(cred.Refused):
+                cred.new_ssh_key(self.dir, run=writes(private, public))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir() if p.name.startswith(".panel-key")), [])
 
     def test_it_refuses_a_path_inside_the_repo_a_relative_path_and_a_missing_or_open_directory(self):
         for bad in (ROOT / "host_vars/aopenpanel.yml", ROOT / "x.yml", "plain.yml", "~/../../nonexistent-dir/x.yml", self.dir / "nodir" / "x.yml"):
@@ -218,7 +280,7 @@ class ShowAndCheck(Base):
         """By the syntax tree: in every function but show_totp, no call to out() has a secret variable among its arguments, except inside len() (a length is not a secret)."""
         import ast
         tree = ast.parse((ROOT / "scripts/wp_panel_credentials.py").read_text())
-        secret_names = {"secret", "session_key", "totp", "hashed", "password", "values", "uri", "text", "stored", "digest"}
+        secret_names = {"secret", "session_key", "totp", "hashed", "password", "values", "uri", "text", "stored", "digest", "private", "block"}
         seen_out = 0
         for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
             for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "out"]:
@@ -243,7 +305,43 @@ class ShowAndCheck(Base):
         code = pyotp.TOTP(self.v["aopenpanel_panel_totp_secret"]).at(now)
         cap = Capture()
         rc = cred.main(["check", str(self.out)], getpw=getpw(PASSWORD, code), out=cap, now=lambda: now)
-        self.assertEqual((rc, cap.lines), (0, ["password: ok", "code: ok"]))
+        self.assertEqual((rc, cap.lines[:2]), (0, ["password: ok", "code: ok"]))
+        self.assertTrue(cap.lines[2].startswith("ssh key: ok (it is the private half of"), cap.lines)
+
+    def check_with(self, text=None, pub=None):
+        if text is not None:
+            self.out.write_text(text)
+            os.chmod(self.out, 0o600)
+        pubfile = Path(str(self.out) + ".pub")
+        if pub == "remove":
+            pubfile.unlink()
+        elif pub is not None:
+            pubfile.write_text(pub)
+        now = 1_800_000_010.0
+        code = pyotp.TOTP(self.v["aopenpanel_panel_totp_secret"]).at(now)
+        cap = Capture()
+        rc = cred.main(["check", str(self.out)], getpw=getpw(PASSWORD, code), out=cap, now=lambda: now)
+        return rc, cap
+
+    def test_check_names_a_private_key_that_is_not_the_public_files_other_half_and_one_that_is_not_a_key(self):
+        other = self.dir / "other.yml"
+        self.make(out=other)
+        other_pub = Path(str(other) + ".pub").read_text()
+        rc, cap = self.check_with(pub=other_pub)
+        self.assertEqual(rc, 1)
+        self.assertIn("ssh key: WRONG (it does not match", cap.text)
+        self.setUp()
+        self.make()
+        self.v = self.values()
+        broken = self.out.read_text().replace("-----END OPENSSH PRIVATE KEY-----", "-----END nothing-----")
+        rc, cap = self.check_with(text=broken)
+        self.assertEqual(rc, 1)
+        self.assertIn("ssh key: WRONG (not an OpenSSH private key block)", cap.text)
+
+    def test_check_says_so_when_the_public_file_is_not_there_to_compare_with(self):
+        rc, cap = self.check_with(pub="remove")
+        self.assertEqual(rc, 0)
+        self.assertIn("was not compared", cap.text)
 
     def test_check_names_the_wrong_half_without_saying_anything_else(self):
         now = 1_800_000_010.0
@@ -272,9 +370,9 @@ class Source(unittest.TestCase):
     def test_standard_library_only_and_it_never_runs_the_vault_or_reads_a_secret_file_of_the_repo(self):
         text = (ROOT / "scripts/wp_panel_credentials.py").read_text()
         imports = {l.split()[1].split(".")[0] for l in text.splitlines() if l.startswith(("import ", "from "))}
-        self.assertLessEqual(imports, {"base64", "getpass", "hashlib", "hmac", "os", "re", "secrets", "stat", "struct", "sys", "time", "urllib", "pathlib"})
+        self.assertLessEqual(imports, {"base64", "getpass", "hashlib", "hmac", "os", "re", "secrets", "shutil", "stat", "struct", "subprocess", "sys", "tempfile", "time", "urllib", "pathlib"})
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
-        for bad in ("subprocess", "os.system", "vault_pass", ".vault", "ansible-vault\"", "clipboard", "xclip", "pbcopy", "wl-copy"):
+        for bad in ("os.system", "shell=True", "vault_pass", ".vault", "ansible-vault\"", "clipboard", "xclip", "pbcopy", "wl-copy"):
             self.assertNotIn(bad, code, bad)
 
     def test_usage_is_a_refusal_not_a_traceback(self):

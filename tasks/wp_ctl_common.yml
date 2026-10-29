@@ -7,14 +7,16 @@
 #
 # The account has no password ('*' in /etc/shadow, which still lets a key in) and a shell only because sshd runs a forced command through it. Its home, .ssh and authorized_keys belong to root, so the
 # account cannot change which keys may log in. Each key is forced to `sudo -n wp-ctl` with `restrict` (no terminal, no forwarding, no agent), and the sudoers entry allows that program with NO arguments,
-# so even a stolen key cannot ask for --run-job or a flag. With the list empty nobody can log in as this account. The key line should also carry from="<the control VM's address>" once that VM is in
-# the inventory.
+# so even a stolen key cannot ask for --run-job or a flag. With the list empty nobody can log in as this account. Each key line also carries from="<the control VM's address>" (wp_ctl_panel_from, the
+# control app's VM in the inventory), so a stolen key is no use from anywhere else.
 
 - name: Stop if a control key is not a plain ed25519 public key
   ansible.builtin.assert:
     that:
       - wp_ctl_panel_keys | reject('match', '^ssh-ed25519 AAAA[0-9A-Za-z+/]+=*( [A-Za-z0-9@._-]+)?$') | list | length == 0
-    fail_msg: "wp_ctl_panel_keys holds an entry that is not 'ssh-ed25519 AAAA... [comment]' on one line; it would be written into authorized_keys with the forced command in front of it"
+      - wp_ctl_panel_from is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+      - wp_ctl_panel_from == (wp_ctl_panel_from | trim)
+    fail_msg: "wp_ctl_panel_keys holds an entry that is not 'ssh-ed25519 AAAA... [comment]' on one line (it would be written into authorized_keys with the forced command in front of it), or wp_ctl_panel_from is not one plain IPv4 address (it goes into from=\"...\" on every key line)"
     quiet: true
 
 - name: Make the control account
@@ -49,7 +51,7 @@
     content: |
       # Managed by Ansible (tasks/wp_ctl_common.yml). Keys allowed to log in as {{ wp_ctl_user }}, each forced to wp-ctl; none while wp_ctl_panel_keys is empty.
       {% for key in wp_ctl_panel_keys %}
-      restrict,command="sudo -n {{ wp_tools_bin }}/wp-ctl" {{ key }}
+      from="{{ wp_ctl_panel_from }}",restrict,command="sudo -n {{ wp_tools_bin }}/wp-ctl" {{ key }}
       {% endfor %}
 
 - name: Let the control account run wp-ctl as root, with no arguments, and nothing else

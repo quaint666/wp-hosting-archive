@@ -30,7 +30,7 @@ import jinja2  # noqa: E402
 import yaml  # noqa: E402
 import wp_site_import as imp  # noqa: E402
 import wp_wpress as w  # noqa: E402
-from test_wp_sites_render import ROOT, load  # noqa: E402
+from test_wp_sites_render import ROOT, inventory_hostvars, load  # noqa: E402
 from test_wp_wpress import build, get_from, meta, plugin_php, theme_css  # noqa: E402
 
 ANSWERS = {("plugins", "good"): {"version": "1.1", "requires_php": "7.4"}, ("plugins", "litespeed-cache"): {"version": "7.9", "requires_php": "7.2"},
@@ -2178,7 +2178,7 @@ class Reset(Base):
 
 class Wrapper(unittest.TestCase):
     def render(self, **over):
-        v = {}
+        v = {"hostvars": inventory_hostvars()}          # wp_ctl_panel_from refers to the control app's VM
         v.update(load("vars/wp.yml")); v.update(load("host_vars/dellwp/vars.yml"))
         e = jinja2.Environment(undefined=jinja2.StrictUndefined)
         e.filters["regex_search"] = lambda value, pattern: (__import__("re").search(pattern, value) or [None])[0]

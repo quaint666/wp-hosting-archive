@@ -1,0 +1,36 @@
+# Managed by Ansible (templates/wp_panel/panel_nginx.conf.j2). TLS for the WordPress control app, on the overlay address only. The certificate is the fleet's wildcard (le_cert_dir), put there by
+# aopenvms/deploy_le_cert_aopenpanel.yml and renewed by the HP's hook, which reloads this nginx. There is no port 80 and no other name: a request for anything but the app's own name is refused at the TLS
+# handshake. server_tokens is set inside each server block, never at the top: this distribution's nginx.conf already sets it in http{} and a second one there fails nginx -t. Behind it the app listens on loopback. The body limit is small on purpose (the login form is the largest thing any page takes); the import page of a later step sets its own on its own location.
+server {
+    listen {{ overlay_ip }}:443 ssl default_server;
+    ssl_reject_handshake on;
+    server_tokens off;
+}
+
+server {
+    listen {{ overlay_ip }}:443 ssl;
+    http2 on;
+    server_name {{ panel_domain }};
+    server_tokens off;
+
+    ssl_certificate {{ le_cert_dir }}/fullchain.pem;
+    ssl_certificate_key {{ le_cert_dir }}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:panel_tls:2m;
+    ssl_session_timeout 1h;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    client_max_body_size 1m;
+
+    location / {
+        proxy_pass http://{{ panel_bind }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+}

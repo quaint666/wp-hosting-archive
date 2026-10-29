@@ -1150,13 +1150,26 @@ class Access(unittest.TestCase):
 
     def test_a_key_line_is_forced_to_the_program_with_restrict_and_an_empty_list_lets_nobody_in(self):
         content = self.task("keys that may log in")["ansible.builtin.copy"]["content"]
-        render = lambda keys: jinja2.Environment(trim_blocks=True).from_string(content).render(wp_ctl_panel_keys=keys, wp_tools_bin="/usr/local/sbin", wp_ctl_user="wpctl")
+        render = lambda keys: jinja2.Environment(trim_blocks=True).from_string(content).render(wp_ctl_panel_keys=keys, wp_tools_bin="/usr/local/sbin", wp_ctl_user="wpctl", wp_ctl_panel_from="10.8.0.68")
         render_user = lambda keys: render(keys).replace("{{ wp_ctl_user }}", "wpctl")
         self.assertEqual([l for l in render([]).splitlines() if not l.startswith("#")], [], "no key line: sshd lets nobody in")
         two = [l for l in render(["ssh-ed25519 AAAAC3Nza one@panel", "ssh-ed25519 AAAAC3Nzb two"]).splitlines() if not l.startswith("#")]
-        self.assertEqual(two, ['restrict,command="sudo -n /usr/local/sbin/wp-ctl" ssh-ed25519 AAAAC3Nza one@panel', 'restrict,command="sudo -n /usr/local/sbin/wp-ctl" ssh-ed25519 AAAAC3Nzb two'])
+        self.assertEqual(two, ['from="10.8.0.68",restrict,command="sudo -n /usr/local/sbin/wp-ctl" ssh-ed25519 AAAAC3Nza one@panel', 'from="10.8.0.68",restrict,command="sudo -n /usr/local/sbin/wp-ctl" ssh-ed25519 AAAAC3Nzb two'])
         self.assertTrue(render_user([]).startswith("#"), "the file starts with a comment so the content is never empty")
-        self.assertEqual(self.vars["wp_ctl_panel_keys"], [], "no key until the control VM exists")
+        keys = self.vars["wp_ctl_panel_keys"]
+        self.assertEqual(len(keys), 1, "exactly one key may log in: the control app's")
+        self.assertRegex(keys[0], r"^ssh-ed25519 AAAA[0-9A-Za-z+/]+=* wp-panel@aopenpanel$")
+        self.assertEqual(yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())["wp_ctl_panel_from"], "{{ hostvars['aopenpanel']['overlay_ip'] }}", "the one address the keys may log in from is the control app's VM")
+
+    def test_the_from_address_must_be_one_plain_ipv4_address(self):
+        that = self.task("not a plain ed25519")["ansible.builtin.assert"]["that"][1]
+        rx = re.fullmatch(r"wp_ctl_panel_from is match\('(.*)'\)", that).group(1)
+        for good in ("10.8.0.68", "1.2.3.4", "192.168.100.200"):
+            self.assertTrue(re.match(rx, good), good)
+        trim = self.task("not a plain ed25519")["ansible.builtin.assert"]["that"][2]
+        self.assertEqual(trim, "wp_ctl_panel_from == (wp_ctl_panel_from | trim)", "a trailing newline would pass the pattern above, because $ matches before it")
+        for bad in ("*", "10.8.0.0/24", "10.8.0.68,10.8.0.69", '10.8.0.68",command="id', "10.8.0.68 ", "", "a.b.c.d", "10.8.0", "10.8.0.68.1", "!10.8.0.68", "10.8.0.68\nfrom=*"):
+            self.assertFalse(re.match(rx, bad), repr(bad))
 
     def test_no_copy_task_can_render_an_empty_content_which_ansible_reads_as_no_content(self):
         # "src (or content) is required" failed the real run on dellwp (2026-10-28) when the key list was empty: plain Jinja rendered "" and called it fine, Ansible reads "" as missing

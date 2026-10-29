@@ -1,0 +1,218 @@
+---
+# The WordPress control app on its VM: nginx with TLS in front of one container (Flask under gunicorn) that reaches dellwp's wp-ctl dispatcher over ssh. Design: docs/handoff_wp_control_temp.md; the app is app/,
+# its image recipe app/Dockerfile (proved on a host with Docker by scripts/wp_panel_image_rehearsal.sh), the values host_vars/aopenpanel/vars.yml, the secrets host_vars/aopenpanel/vault.yml (scripts/wp_panel_credentials.py).
+# Run order: the VM and its base plays, the network rules, the name, hp705g4/cert_orchestration_key_setup_hp705g4.yml, aopenvms/deploy_le_cert_aopenpanel.yml, then this play, then the ssh key's public half in
+# wp_ctl_panel_keys on dellwp (dellwp/wp_sites_dellwp.yml --tags wp_ctl). This play stops early, naming the missing piece, if a secret or the certificate is not there.
+# What it does: puts app/ on the VM and builds the image there (tagged by a hash of the files, so only a change builds), writes the secrets as root-managed files owned by the app's uid with mode 0400, pins dellwp's ssh host
+# key (read from dellwp itself, never trusted on first use), installs nginx with the vhost, writes the unit, starts both, and asks for /login through nginx with the certificate checked.
+# Check mode cannot show: the copy of app/, the image build, the container, nginx's own syntax check or any answer; scripts/wp_panel_rehearsal_aopenpanel.sh proves those.
+- name: Deploy the WordPress control app on its VM
+  hosts: aopenpanel
+  become: true
+  vars:
+    panel_cert_file: "{{ le_cert_dir }}/fullchain.pem"
+    # templates/ at the repo root: template looks only next to the task file and the playbook, so the path is explicit (the wp plays do the same).
+    panel_template_dir: "{{ playbook_dir }}/../templates/wp_panel"
+  tasks:
+    - name: Stop if a secret is missing or not in the form the app reads
+      ansible.builtin.assert:
+        that:
+          - aopenpanel_panel_session_key is defined
+          - aopenpanel_panel_session_key | length >= 44
+          - aopenpanel_panel_password_hash is defined
+          - aopenpanel_panel_password_hash is match('^(scrypt|pbkdf2):[^ ]+$')
+          - aopenpanel_panel_totp_secret is defined
+          - aopenpanel_panel_totp_secret is match('^[A-Z2-7]{16,128}$')
+          - aopenpanel_panel_ssh_key is defined
+          - aopenpanel_panel_ssh_key is match('^-----BEGIN OPENSSH PRIVATE KEY-----')
+          - aopenpanel_panel_ssh_key | trim is match('(?s).*-----END OPENSSH PRIVATE KEY-----$')
+        fail_msg: >-
+          A secret of the control app is missing or malformed in host_vars/aopenpanel/vault.yml. Make them with scripts/wp_panel_credentials.py (make, show-totp, check), encrypt the file
+          with ansible-vault yourself, and run this again. Nothing was changed. (The values are not shown.)
+        quiet: true
+      no_log: true
+
+    - name: Look for the wildcard certificate the first deploy play puts here
+      ansible.builtin.stat:
+        path: "{{ panel_cert_file }}"
+      register: panel_cert_stat
+      check_mode: false
+
+    - name: Stop if the certificate is not on the VM
+      ansible.builtin.assert:
+        that:
+          - panel_cert_stat.stat.exists
+        fail_msg: >-
+          {{ panel_cert_file }} is not on this VM. Run hp705g4/cert_orchestration_key_setup_hp705g4.yml and then aopenvms/deploy_le_cert_aopenpanel.yml first: nginx cannot start without it. Nothing was changed.
+        quiet: true
+
+    - name: Read dellwp's ssh host key from dellwp itself (it is pinned, never trusted on first use)
+      ansible.builtin.slurp:
+        src: /etc/ssh/ssh_host_ed25519_key.pub
+      register: panel_dellwp_hostkey
+      delegate_to: dellwp
+      check_mode: false
+
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Make the app's directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "0755"
+      loop:
+        - { path: "{{ panel_dir }}", owner: admin }
+        - { path: "{{ panel_build_dir }}", owner: admin }
+        - { path: "{{ panel_secret_dir }}", owner: root }
+      loop_control:
+        label: "{{ item.path }}"
+
+    # app/ is the build context: the same tree the rehearsal sends to a host with Docker. Files that are gone from app/ are gone here too (delete), and byte caches never go over.
+    - name: Put app/ on the VM, as the build context
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../app/"
+        dest: "{{ panel_build_dir }}/"
+        recursive: true
+        delete: true
+        checksum: true
+        archive: false
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+      become: false
+
+    - name: Look at the build context
+      ansible.builtin.stat:
+        path: "{{ panel_build_dir }}/Dockerfile"
+      register: panel_build_stat
+
+    # The tag is a hash of every file of the build context: a changed file is a new image, an unchanged tree is the one already built.
+    - name: Hash the build context
+      ansible.builtin.shell:
+        cmd: set -o pipefail; cd {{ panel_build_dir }} && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12
+        executable: /bin/bash
+      register: panel_tree_hash
+      changed_when: false
+      check_mode: false
+      when: panel_build_stat.stat.exists
+
+    - name: Name the image
+      ansible.builtin.set_fact:
+        panel_image: "wp-panel:{{ panel_tree_hash.stdout | default('unbuilt') }}"
+
+    - name: Look for that image
+      ansible.builtin.command: docker image inspect {{ panel_image }}
+      register: panel_image_found
+      changed_when: false
+      failed_when: panel_image_found.rc not in [0, 1]
+      check_mode: false
+      when: panel_build_stat.stat.exists
+
+    - name: Build the image when it does not exist yet
+      ansible.builtin.command: docker build --pull=false -t {{ panel_image }} {{ panel_build_dir }}
+      when: panel_build_stat.stat.exists and panel_image_found.rc == 1
+      notify: Restart the control app
+      changed_when: true
+
+    # Mode 0400 and the app's uid: the container's user reads them, nobody else on the VM can. They are mounted read-only. A changed secret restarts the container (it reads them at start).
+    - name: Write the app's secrets
+      ansible.builtin.copy:
+        dest: "{{ panel_secret_dir }}/{{ item.name }}"
+        content: "{{ item.value | trim }}\n"
+        owner: "{{ panel_uid }}"
+        group: "{{ panel_uid }}"
+        mode: "0400"
+      loop:
+        - { name: session_key, value: "{{ aopenpanel_panel_session_key }}" }
+        - { name: password_hash, value: "{{ aopenpanel_panel_password_hash }}" }
+        - { name: totp_secret, value: "{{ aopenpanel_panel_totp_secret }}" }
+        - { name: panel_ssh_key, value: "{{ aopenpanel_panel_ssh_key }}" }
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+      diff: false
+      notify: Restart the control app
+
+    - name: Pin dellwp's host key for the app's ssh
+      ansible.builtin.copy:
+        dest: "{{ panel_secret_dir }}/known_hosts"
+        content: "{{ panel_ctl_host }} {{ panel_dellwp_hostkey.content | b64decode | trim }}\n"
+        owner: "{{ panel_uid }}"
+        group: "{{ panel_uid }}"
+        mode: "0400"
+      notify: Restart the control app
+
+    - name: Write the unit
+      ansible.builtin.template:
+        src: "{{ panel_template_dir }}/panel.service.j2"
+        dest: /etc/systemd/system/wp-panel.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart the control app
+
+    - name: Drop nginx's default site (it listens on port 80, and this VM has no use for it)
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Write the vhost
+      ansible.builtin.template:
+        src: "{{ panel_template_dir }}/panel_nginx.conf.j2"
+        dest: /etc/nginx/conf.d/wp-panel.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Let nginx check its whole configuration before anything is reloaded
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      check_mode: false
+
+    - name: Start the app and nginx, now and at boot
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        daemon_reload: true
+        enabled: true
+        state: started
+      loop: [wp-panel, nginx]
+
+    - name: Apply queued restarts and reloads now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the app to listen on loopback
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8000
+        timeout: 90
+
+    - name: Ask for the login page through nginx, with the certificate checked against the name
+      ansible.builtin.uri:
+        url: "https://{{ panel_domain }}/login"
+        validate_certs: true
+        status_code: 200
+        timeout: 15
+      register: panel_login
+      retries: 5
+      delay: 3
+      until: panel_login.status == 200
+
+  handlers:
+    - name: Restart the control app
+      ansible.builtin.systemd:
+        name: wp-panel
+        daemon_reload: true
+        state: restarted
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
