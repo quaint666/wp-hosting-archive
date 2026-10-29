@@ -218,6 +218,21 @@ def software_of(site, cfg, run):
     return found
 
 
+def registry_sites(cfg, run):
+    """{name: {}} for every site that is not closed, from the registry (wp-site-provision rows: the one reader). Fails when the registry cannot be read: that is an error (exit 2), never "no sites"."""
+    p = run([cfg["tools_bin"] + "/wp-site-provision", "rows"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=cfg["timeout_s"])
+    if p.returncode != 0:
+        raise FeedError("cannot read the site registry (wp-site-provision rows failed): %s" % printable((p.stderr or p.stdout or "no output").strip(), 160))
+    return {line.split()[0]: {} for line in p.stdout.splitlines() if line.strip()}
+
+
+def with_sites(cfg, run):
+    """The sites come from the registry at every run; cfg["sites"] in the config replaces them (the tests do that)."""
+    if "sites" not in cfg:
+        cfg["sites"] = registry_sites(cfg, run)
+    return cfg
+
+
 def check_site(site, cfg, run, index):
     """(software count or None, [(kind, slug, version, entry)])."""
     software = software_of(site, cfg, run)
@@ -254,6 +269,7 @@ def cmd_update(cfg, out, opener, clock):
 
 
 def cmd_check(cfg, site, out, run, clock):
+    with_sites(cfg, run)
     if not SITE_RE.match(site or "") or site not in cfg["sites"]:
         raise FeedError("'%s' is not a site this host knows" % printable(site, 40))
     index = load_index(cfg["index_file"], cfg["max_age_days"], clock)
@@ -269,6 +285,7 @@ def cmd_check(cfg, site, out, run, clock):
 
 
 def cmd_check_all(cfg, out, run, clock, notify):
+    with_sites(cfg, run)
     index = load_index(cfg["index_file"], cfg["max_age_days"], clock)
     state = Path(cfg["state_dir"])
     rc = 0

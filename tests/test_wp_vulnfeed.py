@@ -322,6 +322,64 @@ class Check(Base):
             self.assertEqual(rc, 2, argv); self.assertIn("usage:", text)
 
 
+class Registry(Base):
+    ROWS = "alpha hold 1001 3072 2001 3072 notify\nbeta live 1002 3072 2002 3072 auto\n"
+
+    def asks(self, rc=0, out=ROWS, err=""):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, rc, out, err)
+        return run, calls
+
+    def test_the_sites_are_those_the_registry_lists_not_a_baked_in_table(self):
+        del self.cfg["sites"]
+        run, calls = self.asks()
+        self.assertEqual(v.registry_sites(self.cfg, run), {"alpha": {}, "beta": {}})
+        self.assertEqual(calls, [["/opt/bin/wp-site-provision", "rows"]])
+
+    def test_a_site_the_registry_does_not_list_is_not_a_site(self):
+        del self.cfg["sites"]
+        run, _ = self.asks()
+        rc, text = self.go("check", "gamma", run=run)
+        self.assertEqual(rc, 2)
+        self.assertIn("is not a site this host knows", text)
+
+    def test_a_registry_that_cannot_be_read_is_an_error_and_never_no_sites(self):
+        del self.cfg["sites"]
+        for command in (("check", "alpha"), ("check-all",)):
+            run, _ = self.asks(rc=1, out="", err="/srv/wp/sites/x/site.json: not valid")
+            rc, text = self.go(*command, run=run)
+            self.assertEqual(rc, 2, command)
+            self.assertIn("cannot read the site registry", text)
+            self.assertIn("not valid", text)
+
+    def test_check_all_checks_exactly_the_registrys_sites(self):
+        del self.cfg["sites"]
+        self.update()
+        self.installed("alpha"); self.installed("beta", plugins=(("safe", "1.0"),), core="7.1.3")
+        run, calls = self.asks()
+        cli = self.run_cli
+        seen = []
+
+        def both(cmd, **kw):
+            if cmd[1:2] == ["rows"]:
+                return run(cmd, **kw)
+            seen.append(cmd[1])
+            return cli(cmd, **kw)
+        rc, _ = self.go("check-all", run=both)
+        self.assertEqual(sorted(set(seen)), ["alpha", "beta"], "gamma is not in the registry: it is not checked")
+        self.assertEqual(len(calls), 1)
+
+    def test_updating_the_feed_does_not_need_the_registry(self):
+        del self.cfg["sites"]
+        run, calls = self.asks(rc=1)
+        rc, _ = self.go("update", run=run, opener=self.opener())
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+
 class CheckAll(Base):
     def setUp(self):
         super().setUp()

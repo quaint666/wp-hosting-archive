@@ -1356,10 +1356,52 @@ class Approve(Base):
         self.assert_refused(["approve", "wptest"], "on hold")
 
 
+class Registry(Base):
+    ROWS = "wptest hold 1001 2048 2001 512 notify\nshop live 1002 4096 2002 512 auto\n"
+
+    def asks(self, rc=0, out=ROWS, err="", boom=None):
+        calls = []
+
+        def run(cmd, **kw):
+            if cmd[1:] == ["rows"]:
+                calls.append(list(cmd))
+                if boom:
+                    raise boom
+                return subprocess.CompletedProcess(cmd, rc, out, err)
+            return self.host.run(cmd, **kw)
+        return run, calls
+
+    def go(self, argv, **kw):
+        self.cfg.pop("sites", None)
+        run, calls = self.asks(**kw)
+        code = imp.main(self.cfg, argv, run=run, out=self.out.append)
+        return code, "\n".join(self.out), calls
+
+    def test_the_states_and_quotas_come_from_the_registry(self):
+        del self.cfg["sites"]
+        run, calls = self.asks()
+        self.assertEqual(imp.registry_sites(self.cfg, run), {"wptest": {"state": "hold", "quota_mb": 2048}, "shop": {"state": "live", "quota_mb": 4096}})
+        self.assertEqual(calls, [["/opt/bin/wp-site-provision", "rows"]])
+
+    def test_an_import_into_a_site_that_is_live_in_the_registry_is_refused(self):
+        code, text, calls = self.go(["shop", "friend.wpress"])
+        self.assertEqual(code, 2)
+        self.assertIn("shop is live", text)
+        self.assertIn("wp-ctl ensure-state site=shop state=hold", text)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_registry_that_cannot_be_read_refuses_everything_and_says_why(self):
+        for kw in ({"rc": 1, "out": "", "err": "site.json: not valid"}, {"boom": FileNotFoundError(2, "No such file")}, {"out": "wptest hold 1001\n"}, {"out": "wptest hold 1001 x 2001 512 notify\n"}):
+            self.out.clear()
+            code, text, _ = self.go(["wptest", "friend.wpress"], **kw)
+            self.assertEqual(code, 2, kw)
+            self.assertIn("cannot read the site registry", text, kw)
+
+
 class Refusals(Base):
     def test_unknown_site_and_bad_names(self):
         self.archive()
-        self.assert_refused(["nosuch", "friend.wpress"], "is not in wp_sites")
+        self.assert_refused(["nosuch", "friend.wpress"], "has no registry record")
         self.assert_refused(["../x", "friend.wpress"], "is not a site name")
         self.assert_refused(["WPTEST", "friend.wpress"], "is not a site name")
 
@@ -2159,7 +2201,7 @@ class Wrapper(unittest.TestCase):
         compile(text, "wp-site-import", "exec")
         self.assertTrue(text.startswith("#!/usr/bin/python3 -I\n"))
         cfg = self.config(text)
-        self.assertEqual(cfg["sites"], {"alpha": {"state": "hold", "quota_mb": 4096}, "beta": {"state": v["wp_site_defaults"]["state"], "quota_mb": v["wp_site_defaults"]["quota_mb"]}})
+        self.assertNotIn("sites", cfg, "the sites are asked of the registry at every run, nothing is baked in")
         self.assertEqual((cfg["intake_dir"], cfg["backup_dir"], cfg["intake_quota_mb"], cfg["image_pin"], cfg["data_mount"]), (v["wp_intake_dir"], v["wp_backup_dir"], v["wp_intake_quota_mb"], v["wp_image_php"], v["wp_data_mount"]))
         self.assertEqual((cfg["backup_dir"], cfg["domain"], cfg["tools_bin"], cfg["php_uid"], cfg["step_timeout_s"]), (v["wp_backup_dir"], v["wp_domain"], v["wp_tools_bin"], v["wp_php_uid"], v["wp_import_step_timeout_s"]))
         self.assertEqual(cfg["approvals"], {"key_file": v["wp_approvals_dir"] + "/key", "approver_file": v["wp_approvals_dir"] + "/approver", "ntfy_conf": v["wp_ntfy_conf"], "netrc": v["wp_ntfy_netrc"],
@@ -2171,16 +2213,17 @@ class Wrapper(unittest.TestCase):
         text, v = self.render(wp_sites=[{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "hold"}])
         self.assertEqual(w.pin(self.config(text)["image_pin"]), w.ours(ROOT))
 
-    def test_no_site_means_an_empty_but_valid_table(self):
-        text, _ = self.render(wp_sites=[])
-        self.assertEqual(self.config(text)["sites"], {})
 
     def test_the_real_wrapper_runs_end_to_end_as_a_subprocess(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             lib, intake = d / "lib", d / "data/intake"
             lib.mkdir(); intake.mkdir(parents=True); (d / "data/sites/wptest").mkdir(parents=True)
-            text, _ = self.render(wp_sites=[{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "hold"}], wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
+            (d / "bin").mkdir()
+            stand_in = d / "bin/wp-site-provision"
+            stand_in.write_text("#!/bin/sh\necho 'wptest hold 1001 2048 2001 512 notify'\n")
+            stand_in.chmod(0o755)
+            text, _ = self.render(wp_tools_bin=str(d / "bin"), wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
             deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the Python modules of wp-site-import" for i in t["loop"]]
             self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_ctl.py", "wp_site_import.py", "wp_site_model.py", "wp_site_provision.py", "wp_site_renderer.py", "wp_vulnfeed.py", "wp_wpress.py"],
                          "the play must copy every module the tool imports (wp_vulnfeed.py is wp-vulnfeed's, wp_ctl.py is wp-ctl's, and wp_site_model.py, wp_site_renderer.py and wp_site_provision.py are wp-site-provision's, not its)")
@@ -2194,7 +2237,11 @@ class Wrapper(unittest.TestCase):
             self.assertIn("usage: wp-site-import", r.stdout)
             r = subprocess.run([str(tool), "nosuch", "x.wpress"], capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 2)
-            self.assertIn("is not in wp_sites", r.stdout)
+            self.assertIn("has no registry record", r.stdout)
+            stand_in.write_text("#!/bin/sh\necho 'boom' >&2\nexit 1\n")
+            r = subprocess.run([str(tool), "wptest", "x.wpress"], capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("cannot read the site registry", r.stdout)
 
 
 class Classify(unittest.TestCase):

@@ -244,12 +244,12 @@ class Wrapper(ScanBase):
         return self.env_j.get_template("wp_vulnfeed.py.j2").render(**dict(self.ctx, **over))
 
     def test_the_wrapper_is_valid_python_with_the_repos_values(self):
-        text = self.render(wp_sites=[{"name": "alpha"}, {"name": "beta", "state": "stopped"}, {"name": "gone", "state": "closed"}])
+        text = self.render()
         compile(text, "wp-vulnfeed", "exec")
         self.assertTrue(text.startswith("#!/usr/bin/python3 -I\n"))
         cfg = self.config(text)
         v = self.v
-        self.assertEqual(sorted(cfg["sites"]), ["alpha", "beta"], "a closed site is a tombstone")
+        self.assertNotIn("sites", cfg, "the sites are asked of the registry at every run, nothing is baked in")
         self.assertEqual((cfg["key_file"], cfg["index_file"], cfg["state_dir"]), (v["wp_vulnfeed_dir"] + "/key", v["wp_vulnfeed_state_dir"] + "/index.json", v["wp_vulnfeed_state_dir"]))
         self.assertEqual((cfg["feed_url"], cfg["max_age_days"], cfg["timeout_s"]), (v["wp_vulnfeed_url"], v["wp_vulnfeed_max_age_days"], v["wp_vulnfeed_cmd_timeout_s"]))
         self.assertEqual((cfg["notify_cmd"], cfg["ntfy_topic"], cfg["host_name"]), (v["wp_ntfy_notify_cmd"], v["wp_ntfy_topic"], "dellwp"))
@@ -261,9 +261,17 @@ class Wrapper(ScanBase):
         shutil.copy(ROOT / "scripts/wp_vulnfeed.py", self.tmp / "lib/wp_vulnfeed.py")
         state = self.tmp / "vstate"
         state.mkdir()
-        script = self.install("wp_vulnfeed.py.j2", "bin/wp-vulnfeed", wp_sites=[{"name": "alpha"}], wp_vulnfeed_dir=str(self.tmp / "vkey"), wp_vulnfeed_state_dir=str(state))
+        stand_in = self.tmp / "bin/wp-site-provision"
+        stand_in.write_text("#!/bin/sh\necho 'alpha hold 1001 3072 2001 3072 notify'\n")
+        stand_in.chmod(0o755)
+        script = self.install("wp_vulnfeed.py.j2", "bin/wp-vulnfeed", wp_tools_bin=str(self.tmp / "bin"), wp_vulnfeed_dir=str(self.tmp / "vkey"), wp_vulnfeed_state_dir=str(state))
         r = subprocess.run([str(script), "check", "alpha"], capture_output=True, text=True, env=self.env)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr); self.assertIn("NOT RUN", r.stdout)
+        r = subprocess.run([str(script), "check", "beta"], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 2, r.stdout); self.assertIn("is not a site this host knows", r.stdout)
+        stand_in.write_text("#!/bin/sh\necho 'the record is broken' >&2\nexit 1\n")
+        r = subprocess.run([str(script), "check", "alpha"], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr); self.assertIn("cannot read the site registry", r.stdout)
         r = subprocess.run([str(script), "update"], capture_output=True, text=True, env=self.env)
         self.assertEqual(r.returncode, 3); self.assertIn("no feed key", r.stdout)
         r = subprocess.run([str(script), "what"], capture_output=True, text=True, env=self.env)

@@ -25,7 +25,7 @@ scan, write the report, take the first backup and stop. The site stays on hold. 
 DIRECTORY until `approve` copies it in, so no step before your approval runs a line of it; `approve` also deletes the intake file and the work directory. `reset` undoes a run that is not
 approved yet, by the manifest in PLAN.json and a snapshot of wp-content taken before the load: it drops the tables, removes what the run copied or installed, and sweeps whatever else appeared
 under wp-content meanwhile (what the plugins made when they first ran, WordPress's upgrade directory), so the site's tree is what it was before the import.
-Refuses (before anything is written): a site that is not in wp_sites or not on hold; a site with a database that is not empty; a file that is not a plain *.wpress directly inside the intake directory;
+Refuses (before anything is written): a site that is not in the registry or not on hold; a site with a database that is not empty; a file that is not a plain *.wpress directly inside the intake directory;
 an archive the reader rejects (wp_wpress.judge: core newer than ours, a plugin that needs a newer PHP, an unsafe path, a multisite, a truncated file); a work directory left by an earlier run; not enough
 room in the intake quota or in the site's quota. --plan does all of that and prints the plan, writing nothing.
 The work directory is intake/work-<site>, inside the intake quota project: /srv/wp/scratch is shared with the restore drill, which sets and then removes its project limit around its own run.
@@ -175,17 +175,36 @@ def tree_bytes(path):
     return total
 
 
+def registry_sites(cfg, run):
+    """{name: {"state", "quota_mb"}} for every site that is not closed, from the registry (wp-site-provision rows: the one reader). Fails when the registry cannot be read: never "no sites"."""
+    try:
+        p = run([cfg["tools_bin"] + "/wp-site-provision", "rows"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Refuse("cannot read the site registry (wp-site-provision rows could not run): %s" % w.printable(e, 120))
+    if p.returncode != 0:
+        raise Refuse("cannot read the site registry (wp-site-provision rows failed): %s" % w.printable((p.stderr or p.stdout or "no output").strip(), 160))
+    sites = {}
+    for line in p.stdout.splitlines():
+        f = line.split()
+        if not f:
+            continue
+        if len(f) != 7 or not f[3].isdigit():
+            raise Refuse("cannot read the site registry (a row of wp-site-provision rows is not name state ids quotas policy): %s" % w.printable(line, 80))
+        sites[f[0]] = {"state": f[1], "quota_mb": int(f[3])}
+    return sites
+
+
 def check_site(cfg, site):
     if not SITE_RE.match(site or ""):
         raise Refuse("'%s' is not a site name" % site)
     s = cfg["sites"].get(site)
     if s is None:
-        raise Refuse("'%s' is not in wp_sites (add it and run dellwp/wp_sites_dellwp.yml)" % site)
+        raise Refuse("'%s' is not a site (it has no registry record: create it with wp-ctl create)" % site)
     if s["state"] != "hold":
-        raise Refuse("%s is %s: an import goes into a site on hold (python3 scripts/wp_sites.py modify %s --set state=hold)" % (site, s["state"], site))
+        raise Refuse("%s is %s: an import goes into a site on hold (wp-ctl ensure-state site=%s state=hold)" % (site, s["state"], site))
     d = Path(cfg["data_mount"]) / "sites" / site
     if not d.is_dir() or d.is_symlink():
-        raise Refuse("%s is not a real directory: run dellwp/wp_sites_dellwp.yml so the site exists" % d)
+        raise Refuse("%s is not a real directory: the site is not built (wp-ctl apply)" % d)
     if (d / "stopped.flag").exists():
         raise Refuse("%s is stopped (it has no containers): start it first" % site)
     return d
@@ -368,7 +387,7 @@ def table_prefix(site_dir):
     except OSError:
         m = None
     if not m:
-        raise Refuse("cannot read $table_prefix from %s/wp-config.php: run dellwp/wp_sites_dellwp.yml" % site_dir)
+        raise Refuse("cannot read $table_prefix from %s/wp-config.php: is the site built (wp-ctl apply)?" % site_dir)
     return m.group(1)
 
 
@@ -901,7 +920,7 @@ def run_import(cfg, site, arg, plan_only, get, tools, out, replace=False, ask=No
             raise Refuse("the unpacked copy needs %.1f MB and the intake quota has %.1f MB free (the archive itself counts): remove files from %s or raise wp_intake_quota_mb. Nothing was changed"
                          % (need / MIB, intake_free / MIB, cfg["intake_dir"]))
         if site_need > site_free:
-            raise Refuse("the files to copy in and the database need about %.1f MB and %s has %.1f MB left of its quota: raise quota_mb (wp_sites.py modify %s --set quota_mb=...). Nothing was changed" % (site_need / MIB, site, site_free / MIB, site))
+            raise Refuse("the files to copy in and the database need about %.1f MB and %s has %.1f MB left of its quota: raise quota_mb (wp-ctl set site=%s key=quota_mb value=...). Nothing was changed" % (site_need / MIB, site, site_free / MIB, site))
         if plan_only:
             show_plan(plan, site, path.name, "", path.stat().st_size, out)
             out("\nPLAN ONLY: nothing was written.")
@@ -1244,6 +1263,8 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise Refuse("another import is running")
+        if "sites" not in cfg:           # the sites, their states and quotas come from the registry at every run; cfg["sites"] in the config replaces them (the tests do that)
+            cfg["sites"] = registry_sites(cfg, run)
         command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") else "import"
         if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard") or (replace and command != "import"):
             out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped

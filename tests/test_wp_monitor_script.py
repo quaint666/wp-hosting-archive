@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -86,6 +87,14 @@ class Syntax(unittest.TestCase):
         self.assertNotIn("ntfy.sh", code)
         self.assertNotIn("curl", code)
 
+    def test_the_stand_in_is_proven_before_anything_relies_on_it_and_lives_where_programs_may_run(self):
+        self.assertIn('check "the ntfy stand-in runs and is the one found first"', TEXT)
+        self.assertNotIn("/run/", "\n".join(l for l in TEXT.splitlines() if not l.lstrip().startswith("#")), "a noexec /run would stop the stand-in")
+
+    def test_the_quota_is_filled_by_root_in_the_site_directory(self):
+        self.assertIn('fallocate -l "${add}K" "$FILL"', TEXT)
+        self.assertNotIn("setpriv", TEXT)
+
     def test_the_script_never_commits_or_edits_the_repo(self):
         code = "\n".join(l for l in TEXT.splitlines() if not l.lstrip().startswith("#"))
         for word in ("git commit", "git add", "wp_sites.py", "--commit", "sed -i", "ansible-playbook"):
@@ -100,7 +109,7 @@ class Syntax(unittest.TestCase):
         self.assertGreater(TEXT.index("printf '{ not json'"), TEXT.index('say "4. disk check'))
         self.assertGreater(TEXT.index("printf '{ not json'"), TEXT.index('say "2. update policy'))
         cleanup = re.search(r"cleanup_vm\(\) \{.*?\n\}\n", TEXT, re.S).group(0)
-        for needle in ('"$SITES/$BROKEN"', "/run/wp-monitor-rehearsal", ".monitor-rehearsal-fill", "backup-stale-$S.flag", "site-$S.level", "registry-unreadable.flag"):
+        for needle in ('"$SITES/$BROKEN"', "/var/lib/wp-monitor-rehearsal", ".monitor-rehearsal-fill", "backup-stale-$S.flag", "site-$S.level", "registry-unreadable.flag"):
             self.assertIn(needle, cleanup, needle)
         self.assertIn("trap '[ \"$CLEANED\" = yes ] || cleanup_vm", TEXT)
 
@@ -126,7 +135,7 @@ in=$(cat 2>/dev/null || true)
 case "$*" in
   *"bash -s"*)
     case "$in" in
-      *'rm -rf "$SITES/$BROKEN" /run/wp-monitor-rehearsal'*) echo "$in" >> "%(log)s.cleanup"; [ -n "${SSH_NO_CLEAN:-}" ] || echo cleaned; exit 0 ;;
+      *'rm -rf "$SITES/$BROKEN" /var/lib/wp-monitor-rehearsal'*) echo "$in" >> "%(log)s.cleanup"; [ -n "${SSH_NO_CLEAN:-}" ] || echo cleaned; exit 0 ;;
     esac
     exit ${SSH_BASH_RC:-0} ;;
   *"sudo -n true"*) exit ${SSH_SUDO_RC:-0} ;;
@@ -154,7 +163,7 @@ exit ${SSH_RC:-0}
 
     def ctl(self):
         """The wp-ctl requests that are not job polling, in order, as typed."""
-        return [re.search(r"wp-ctl (.*?)\"?$", c).group(1) for c in self.calls() if "wp-ctl " in c and c.startswith("ssh") and "job-" not in c]
+        return [re.sub(r"(req=\S+-)\d{6,}$", r"\1STAMP", re.search(r"wp-ctl (.*?)\"?$", c).group(1)) for c in self.calls() if "wp-ctl " in c and c.startswith("ssh") and "job-" not in c]
 
     def cleanups(self):
         p = Path(str(self.log) + ".cleanup")
@@ -209,8 +218,22 @@ class Flow(Harness):
         r = self.go()
         self.assertEqual(r.returncode, 0, r.stdout[-2500:])
         self.assertIn("All checks passed.", r.stdout)
-        self.assertEqual(self.ctl(), ["set site=provtest2 key=update_policy value=freeze req=mon-provtest2-freeze", "set site=provtest2 key=update_policy value=notify"])
+        self.assertEqual(self.ctl(), ["set site=provtest2 key=update_policy value=freeze req=mon-provtest2-freeze-STAMP", "set site=provtest2 key=update_policy value=notify"])
         self.untouched()
+
+    def test_a_rerun_uses_a_new_request_id_because_wp_ctl_answers_a_repeated_one_with_the_old_job(self):
+        ids = []
+        for _ in range(2):
+            self.log.unlink(missing_ok=True)
+            self.go()
+            ids.append(re.search(r"req=(mon-provtest2-freeze-\d+)", "\n".join(self.calls())).group(1))
+            time.sleep(1.1)
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_the_update_tool_is_only_run_when_the_record_says_freeze(self):
+        body = [b for _, b in snippets() if "wp-site-update" in b and "update policy freeze" in b][0]
+        self.assertIn("= freeze ]; then", body)
+        self.assertIn("was not run", body)
 
     def test_the_policy_that_is_set_back_is_the_one_the_row_had(self):
         r = self.go(env=dict(self.env, SSH_POLICY="auto"))
@@ -238,7 +261,7 @@ class Flow(Harness):
         r = self.go(env=dict(self.env, SSH_JOB_RC="1"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("set update_policy failed", r.stdout)
-        self.assertEqual(self.ctl(), ["set site=provtest2 key=update_policy value=freeze req=mon-provtest2-freeze"], "nothing after the failed step, and no set back")
+        self.assertEqual(self.ctl(), ["set site=provtest2 key=update_policy value=freeze req=mon-provtest2-freeze-STAMP"], "nothing after the failed step, and no set back")
         self.assertEqual(self.cleanups(), 1)
 
     def test_a_failing_snippet_is_counted_and_the_run_goes_on_to_the_cleanup(self):
