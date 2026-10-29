@@ -12,6 +12,10 @@
 {% if result %}<pre class="log">{{ result }}</pre>{% elif not problem %}<p>The check printed nothing.</p>{% endif %}
 </section>
 
+{% if pending and pending.get('stage') == 'reported' %}
+<p class="notice">An import of this site is waiting for a decision{% if pending.get('problems') %} and its scan was not clean{% endif %}. Its report is the picture from when it finished: after the updates, <a href="{{ url_for('import_site', name=name) }}">open the import</a> and press "Scan again".</p>
+{% endif %}
+
 <div class="grid">
 <section class="card">
 <h2>Check for updates</h2>

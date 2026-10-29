@@ -10,7 +10,7 @@
 <div class="alert" role="alert">
   <strong>The scan did not come back clean:</strong>
   <ul>{% for p in pending.get('problems') %}<li>{{ p | clip(300) }}</li>{% endfor %}</ul>
-  What to do: if it is a known vulnerability in WordPress or a plugin, update it first (<a href="{{ url_for('security', name=name) }}">Updates and security</a>), read the report again, then approve. To approve with the problems still listed you must accept them below and type the site's name.
+  What to do: if it is a known vulnerability in WordPress or a plugin, update it first (<a href="{{ url_for('security', name=name) }}">Updates and security</a>), then press "Scan again" below: the old result is replaced by a new one, and the phone notice is sent again. Then approve. To approve with the problems still listed you must accept them below and type the site's name.
 </div>
 {% elif pending and pending.get('stage') == 'reported' %}
 <p class="notice">Clean: no failed step, checksums agree, nothing found by the scanners. Approving copies in the code that was held back; the site stays on hold.</p>
@@ -23,6 +23,18 @@
 {% if problem %}<p class="error" role="alert">{{ problem | clip(400) }}</p>{% endif %}
 {% if report %}<pre class="log">{{ report }}</pre>{% elif not problem %}<p>There is no report for this site.</p>{% endif %}
 </section>
+
+{% if pending and pending.get('stage') == 'reported' %}
+<section class="card">
+<h2>Scan again</h2>
+<p class="small">The report above is a picture of the site as it was when the import finished. If you have updated the site since, this takes a new picture (checksums, ClamAV, the vulnerability index, the suspicious-pattern search), writes it over the old one and sends the phone notice again. It does not redo the import and copies nothing.</p>
+<form method="post" action="{{ url_for('import_rescan', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ 'rescan' }}">
+  <button type="submit" class="secondary">Scan again</button>
+</form>
+</section>
+{% endif %}
 
 <div class="grid">
 <section class="card">

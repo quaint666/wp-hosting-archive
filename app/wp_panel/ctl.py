@@ -98,6 +98,7 @@ def _file(v):
 ACTION_VERBS.update({
     "import-run": {"site": (True, _site), "file": (True, _file), "plan": (False, _bool), "replace": (False, _bool), "confirm_name": (False, _site)},
     "import-approve": {"site": (True, _site), "reject": (False, _text(200, REJECT_RE)), "accept_failures": (False, _bool), "confirm_name": (False, _site)},
+    "import-rescan": {"site": (True, _site)},
     "import-new": {"name": (True, _site), "label": (False, _text(100, LABEL_RE)), "file": (True, _file)},
     "update-check": {"site": (True, _site)},
     "update-apply": {"site": (True, _site)},

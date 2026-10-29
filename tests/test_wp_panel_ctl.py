@@ -63,7 +63,7 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "update-check", "update-apply"},
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply"},
                          "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
@@ -697,6 +697,7 @@ class Imports(unittest.TestCase):
         self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress", replace=True, confirm_name="alpha")["confirm_name"], "alpha")
         self.assertEqual(self.line("import-approve", site="alpha", reject="akismet,hello-dolly", accept_failures=True, confirm_name="alpha"),
                          {"verb": "import-approve", "site": "alpha", "reject": "akismet,hello-dolly", "accept_failures": True, "confirm_name": "alpha"})
+        self.assertEqual(self.line("import-rescan", site="alpha"), {"verb": "import-rescan", "site": "alpha"})
         self.assertEqual(self.line("import-reset", site="alpha", confirm_name="alpha"), {"verb": "import-reset", "site": "alpha", "confirm_name": "alpha"})
         self.assertEqual(self.line("import-discard", file="a1.wpress", if_present=False), {"verb": "import-discard", "file": "a1.wpress", "if_present": False})
 

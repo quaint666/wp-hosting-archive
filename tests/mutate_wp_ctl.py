@@ -384,6 +384,16 @@ M = [
  ("the tool's list follows a linked work directory", 'scripts/wp_site_import.py', 'if not SITE_RE.match(site) or not work.is_dir() or work.is_symlink():', 'if not SITE_RE.match(site):', 'tests/test_wp_import.py'),
  ("the tool's list calls an unfinished import reported", 'scripts/wp_site_import.py', 'stage = "reported" if rec.get("stage") == "reported" else "unfinished"', 'stage = "reported"', 'tests/test_wp_import.py'),
  ("the tool's list hides why an import is not clean", 'scripts/wp_site_import.py', '"problems": unclean_reasons(rec) if stage == "reported" else []', '"problems": []', 'tests/test_wp_import.py'),
+ ("a rescan keeps the old scan in the record", 'scripts/wp_site_import.py', '    record["scan"] = {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}\n    record["rescanned_at"]', '    record["rescanned_at"]', 'tests/test_wp_import.py'),
+ ("a rescan does not write the new report", 'scripts/wp_site_import.py', '    report = build_report(site, record, record["steps"], res, work)\n    fd = os.open(work / "REPORT.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)', '    report = build_report(site, record, record["steps"], res, work)\n    fd = os.open(os.devnull, os.O_WRONLY)', 'tests/test_wp_import.py'),
+ ("a rescan does not say it was a rescan", 'scripts/wp_site_import.py', '    if record.get("rescanned_at"):\n        lines.append', '    if False:\n        lines.append', 'tests/test_wp_import.py'),
+ ("a rescan does not send the phone notice again", 'scripts/wp_site_import.py', '    out(notify_report(cfg, site, record, work, tools))\n    return 0\n\n\ndef drop_snapshots', '    return 0\n\n\ndef drop_snapshots', 'tests/test_wp_import.py'),
+ ("a rescan works at any stage", 'scripts/wp_site_import.py', '    if record.get("stage") != "reported":\n        raise Refuse("the import of %s is at stage \'%s\', not \'reported\': let it finish, or reset it" % (site, record.get("stage")))\n    before', '    before', 'tests/test_wp_import.py'),
+ ("a rescan is not in the ledger", 'scripts/wp_site_import.py', '    ledger(cfg, site, "rescanned", record["sha256"], record["size"], record["file"])\n', '', 'tests/test_wp_import.py'),
+ ("the dispatcher's rescan runs the approve command", W, 'call.ctl.tool("wp-site-import"), "rescan", call.args["site"]', 'call.ctl.tool("wp-site-import"), "approve", call.args["site"]'),
+ ("the panel's rescan form is shown for an unfinished import too", 'app/wp_panel/templates/import_site.html', "{% if pending and pending.get('stage') == 'reported' %}\n<section class=\"card\">\n<h2>Scan again", "{% if pending %}\n<section class=\"card\">\n<h2>Scan again", 'tests/test_wp_panel.py'),
+ ("the panel's rescan is sent without the request id", 'app/wp_panel/views.py', 'ask("import-rescan", site=name, req=field("req", 80))', 'ask("import-rescan", site=name)', 'tests/test_wp_panel.py'),
+ ("the security page forgets the waiting import", 'app/wp_panel/templates/security.html', "{% if pending and pending.get('stage') == 'reported' %}", "{% if False %}", 'tests/test_wp_panel.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

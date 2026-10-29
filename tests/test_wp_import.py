@@ -8,6 +8,7 @@ back, that `reset` returns the site to the tree it had before the run, the ledge
 stand-ins, that Elementor's commands are named as discovered, or that the intake quota project holds: the first real run on dellwp does (scripts/wp_import_rehearsal_dellwp.sh is not written yet).
 Run: python3 -I tests/test_wp_import.py"""
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -1354,6 +1355,93 @@ class Approve(Base):
         self.reported()
         self.cfg["sites"]["wptest"]["state"] = "live"
         self.assert_refused(["approve", "wptest"], "on hold")
+
+
+class Rescan(Base):
+    """`rescan`: a waiting import is scanned again after the site was updated, and the new picture replaces the old one."""
+
+    def reported_with_a_finding(self):
+        self.host.fail["vuln"] = (1, "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3")
+        self.import_ok()
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertTrue(any(p.startswith("known vulnerabilities: FOUND") for p in imp.unclean_reasons(rec)))
+        self.host.calls.clear()
+
+    def test_after_the_fix_the_finding_is_gone_from_the_record_the_report_and_the_listing(self):
+        self.reported_with_a_finding()
+        self.host.fail["vuln"] = (0, "")
+        code, text = self.run_main(["rescan", "wptest"])
+        self.assertEqual(code, 0, text)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertFalse(any(p.startswith("known vulnerabilities") for p in imp.unclean_reasons(rec)))
+        self.assertEqual(rec["scan"]["vuln"], "none known")
+        report = (self.intake / "work-wptest/REPORT.txt").read_text()
+        self.assertIn("known vulnerabilities: none known", report)
+        self.assertNotIn("FOUND", report)
+        self.assertIn("scanned again at", report)
+        self.assertIn("the STEPS above are from the import itself", report)
+        code, listing = self.run_main(["list"])
+        (item,) = json.loads(listing)["imports"]
+        self.assertFalse([p for p in item["problems"] if p.startswith("known vulnerabilities")])
+        self.assertEqual((self.intake / "ledger.log").read_text().splitlines()[-1].split("\t")[2], "rescanned")
+
+    def test_a_finding_that_is_still_there_stays_and_is_said_so(self):
+        self.reported_with_a_finding()
+        code, text = self.run_main(["rescan", "wptest"])
+        self.assertEqual(code, 0, text)
+        self.assertIn("known vulnerabilities: FOUND", (self.intake / "work-wptest/REPORT.txt").read_text())
+        self.assertIn("scanned again:", text)
+        self.assertIn("known vulnerabilities: FOUND", text.split("scanned again:")[1])
+
+    def test_it_scans_but_copies_nothing_redoes_no_step_and_leaves_the_intake_file(self):
+        self.reported_with_a_finding()
+        steps_before = json.loads((self.intake / "work-wptest/PLAN.json").read_text())["steps"]
+        self.run_main(["rescan", "wptest"])
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertEqual(rec["steps"], steps_before)
+        self.assertEqual(rec["stage"], "reported")
+        self.assertFalse((self.html / "wp-content/plugins/notorg").exists())
+        self.assertTrue((self.intake / "friend.wpress").exists())
+        names = {os.path.basename(c[0]) for c in self.host.calls}
+        self.assertTrue({"wp-vulnfeed", "wp-clamscan"} <= names, names)
+        self.assertNotIn("wp-site-backup", names)
+
+    def test_the_phone_notice_is_sent_again_with_tokens_for_the_new_report(self):
+        self.reported_with_a_finding()
+        sent = []
+        orig = imp.notify_report
+        imp.notify_report = lambda cfg, site, record, work, tools: sent.append(hashlib.sha256((work / "REPORT.txt").read_bytes()).hexdigest()) or "notified"
+        try:
+            old = hashlib.sha256((self.intake / "work-wptest/REPORT.txt").read_bytes()).hexdigest()
+            code, text = self.run_main(["rescan", "wptest"])
+        finally:
+            imp.notify_report = orig
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(sent), 1)
+        self.assertNotEqual(sent[0], old, "the notice is made from the new report")
+        self.assertIn("notified", text)
+
+    def test_a_rescan_twice_says_so_once(self):
+        self.reported_with_a_finding()
+        self.run_main(["rescan", "wptest"])
+        self.run_main(["rescan", "wptest"])
+        self.assertEqual((self.intake / "work-wptest/REPORT.txt").read_text().count("scanned again at"), 1)
+
+    def test_refusals_change_nothing(self):
+        self.assert_refused(["rescan", "wptest"], "no unapproved import")
+        self.archive()
+        self.host.sql_rc, self.host.sql_err = 1, b"ERROR"
+        self.run_main(["wptest", "friend.wpress"])
+        self.assert_refused(["rescan", "wptest"], "stage 'unpacked'")
+        self.assert_refused(["rescan"], "usage")
+        self.assert_refused(["rescan", "wptest", "extra"], "usage")
+        self.assert_refused(["rescan", "wptest", "--reject", "a"], "usage")
+        self.assert_refused(["rescan", "nosuch"], "not a site")
+
+    def test_a_site_that_is_not_on_hold_is_refused(self):
+        self.reported_with_a_finding()
+        self.cfg["sites"]["wptest"]["state"] = "live"
+        self.assert_refused(["rescan", "wptest"], "on hold")
 
 
 class Registry(Base):

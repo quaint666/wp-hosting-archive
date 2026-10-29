@@ -60,7 +60,7 @@ SYSTEMD_RUN = "#!/bin/bash\n{ printf 'systemd-run'; for a in \"$@\"; do printf '
 LOGGER = "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> '%(dir)s/journal'\nexit \"$(cat '%(dir)s/logger_rc' 2>/dev/null || echo 0)\"\n"
 LIMITS = {"default": {"timeout_s": 30, "memory_mb": 512, "tasks": 256}, "password": {"timeout_s": 30}, "backup": {"timeout_s": 600}, "delete": {"timeout_s": 600, "memory_mb": 384},
           "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "update-check": {"timeout_s": 750}, "update-apply": {"timeout_s": 760, "memory_mb": 1024}, "import-new": {"timeout_s": 770, "memory_mb": 1024}, "set": {"timeout_s": 720}, "ensure-state": {"timeout_s": 730}, "install": {"timeout_s": 40},
-          "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}}
+          "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}, "import-rescan": {"timeout_s": 810, "memory_mb": 1024}}
 HOSTILE_SITES = ["../x", "Site", "a;id", "x y", "", "a" * 25, "-a", "a-", "wp test", "wptest\n", "wptest/../held", "*", "wptest\x00", "WPTEST", "a", "nosuch", "wptest ", "$(id)"]
 
 
@@ -255,6 +255,7 @@ class Argv(Base):
                 ("approve", {"verb": "import-approve", "site": "wptest"}, [b + "/wp-site-import", "approve", "wptest"], None),
                 ("approve, all options", {"verb": "import-approve", "site": "wptest", "reject": "a,b-c", "accept_failures": True, "confirm_name": "wptest"},
                  [b + "/wp-site-import", "approve", "wptest", "--reject", "a,b-c", "--accept-failures"], None),
+                ("rescan", {"verb": "import-rescan", "site": "wptest"}, [b + "/wp-site-import", "rescan", "wptest"], None),
                 ("reset", {"verb": "import-reset", "site": "wptest", "confirm_name": "wptest"}, [b + "/wp-site-import", "reset", "wptest"], "wptest\n"),
                 ("update, check", {"verb": "update-check", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--check"], None),
                 ("update, apply", {"verb": "update-apply", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--apply"], None),
@@ -911,7 +912,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "import-new", "update-check", "update-apply"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "import-new", "update-check", "update-apply", "import-rescan"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)

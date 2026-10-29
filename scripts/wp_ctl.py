@@ -713,6 +713,10 @@ def h_import_approve(call):
     return call.job([call.ctl.tool("wp-site-import"), "approve", a["site"]] + (["--reject", a["reject"]] if "reject" in a else []) + (["--accept-failures"] if a["accept_failures"] else []))
 
 
+def h_import_rescan(call):
+    return call.job([call.ctl.tool("wp-site-import"), "rescan", call.args["site"]])
+
+
 def h_import_reset(call):
     return call.job([call.ctl.tool("wp-site-import"), "reset", call.args["site"]], tty=[call.args["site"]])
 
@@ -743,6 +747,7 @@ VERBS = {
                                "confirm_name": Arg("text", rx=NAME_RE, same="site", needs="replace")}, h_import_run),
     "import-approve": Verb("job", {"site": SITE, "reject": Arg("text", required=False, rx=REJECT_RE), "accept_failures": Arg("flag"),
                                    "confirm_name": Arg("text", rx=NAME_RE, same="site", needs="accept_failures")}, h_import_approve),
+    "import-rescan": Verb("job", {"site": SITE}, h_import_rescan),
     "import-new": Verb("job", {"name": Arg("name"), "label": Arg("text", required=False, rx=LABEL_RE), "file": Arg("text", rx=IMPORT_FILE_RE)}, h_import_new),
     "update-check": Verb("job", {"site": SITE}, h_update_check),
     "update-apply": Verb("job", {"site": SITE}, h_update_apply),

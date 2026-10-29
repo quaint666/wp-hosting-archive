@@ -773,8 +773,10 @@ def build_report(site, record, steps, res, work):
     lines += ["", "CODE HELD BACK until you approve it (nothing of it has run):"]
     items = held_items(record, work)
     lines += ["  %-10s %-36s %d files" % i for i in items] or ["  none"]
-    lines += ["", "SCAN (a heuristic: a hit is a place to look, a clean result proves nothing)",
-              "  core checksums:   %s %s" % ("ok" if res["core"][0] else "FAILED", res["core"][1]),
+    lines += ["", "SCAN (a heuristic: a hit is a place to look, a clean result proves nothing)"]
+    if record.get("rescanned_at"):
+        lines.append("  scanned again at %s, after the site was changed (for instance updated); the STEPS above are from the import itself" % record["rescanned_at"])
+    lines += ["  core checksums:   %s %s" % ("ok" if res["core"][0] else "FAILED", res["core"][1]),
               "  plugin checksums: %s %s" % ("ok" if res["plugins"][0] else "FAILED", res["plugins"][1]),
               "  ClamAV:           %s" % res["clam"],
               "  known vulnerabilities: %s" % res["vuln"],
@@ -1033,6 +1035,34 @@ def run_approve(cfg, site, reject, accept_failures, tools, out):
     return 0
 
 
+def run_rescan(cfg, site, tools, out):
+    """Scan a waiting import again. The scan is a picture of the site at the moment of the import; updating the site afterwards (wp-site-update) leaves that picture saying "known vulnerabilities" about
+    code that is gone. This takes a new picture of the same things, writes it over the old one (record and REPORT.txt, and says so in the report), and sends the phone notification again, because
+    its tokens are tied to the report's hash. The steps of the import itself are not redone; neither is anything copied. A site that is no longer on hold, or an import not at 'reported', is refused."""
+    site_dir = check_site(cfg, site)
+    work = Path(cfg["intake_dir"]) / ("work-" + site)
+    if not work.is_dir() or work.is_symlink():
+        raise Refuse("there is no unapproved import of %s (%s is not a directory)" % (site, work))
+    record = read_record(work)
+    if record.get("stage") != "reported":
+        raise Refuse("the import of %s is at stage '%s', not 'reported': let it finish, or reset it" % (site, record.get("stage")))
+    before = unclean_reasons(record)
+    res = scan(site, site_dir, work, record, tools)
+    record["scan"] = {k: v for k, v in res.items() if k not in ("held_hits", "uploads_hits")}
+    record["rescanned_at"] = datetime.datetime.fromtimestamp(tools.clock(), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = build_report(site, record, record["steps"], res, work)
+    fd = os.open(work / "REPORT.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(report + "\n")
+    save_record(work, record)
+    ledger(cfg, site, "rescanned", record["sha256"], record["size"], record["file"])
+    after = unclean_reasons(record)
+    out("\n" + report)
+    out("\nscanned again: %d reason(s) not to approve from a phone before, %d now%s" % (len(before), len(after), "" if not after else " (" + "; ".join(after) + ")"))
+    out(notify_report(cfg, site, record, work, tools))
+    return 0
+
+
 def drop_snapshots(cfg, site, stamps, tag, out):
     """Remove snapshots a record names, so a turned-down import leaves the site's backups as they were. Only a stamp in this site's own backup directory, as a real directory (never a link), whose
     MANIFEST says it is this site's and carries exactly the tag asked for (tag None: no tag at all, so never a final or pre-update snapshot). .last-success is moved back to the newest snapshot that is
@@ -1273,7 +1303,7 @@ def tty_ask(prompt):
         return t.readline()
 
 
-USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan] [--replace]\n       wp-site-import list\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
+USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan] [--replace]\n       wp-site-import list\n       wp-site-import rescan <site>              (scan a waiting import again, e.g. after updating the site)\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
          "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress> [--if-present]\n"
          "       wp-site-import resolve <token>            (a signed token from the phone: approve a clean import, or deny)")
 
@@ -1303,7 +1333,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             raise Refuse("another import is running")
         if "sites" not in cfg:           # the sites, their states and quotas come from the registry at every run; cfg["sites"] in the config replaces them (the tests do that)
             cfg["sites"] = registry_sites(cfg, run)
-        command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list") else "import"
+        command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list", "rescan") else "import"
         if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard") or (replace and command != "import"):
             out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped
             return 2
@@ -1317,9 +1347,11 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             return run_discard(cfg, args[1], out, if_present)
         if args[:1] == ["report"] and len(args) == 2:
             return run_report(cfg, args[1], out)
+        if args[:1] == ["rescan"] and len(args) == 2:
+            return run_rescan(cfg, args[1], tools, out)
         if args[:1] == ["approve"] and len(args) == 2:
             return run_approve(cfg, args[1], reject, accept, tools, out)
-        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list") or reject or accept:
+        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list", "rescan") or reject or accept:
             out(USAGE)
             return 2
         return run_import(cfg, args[0], args[1], plan_only, get, tools, out, replace, ask)

@@ -57,7 +57,7 @@ class FakeCtl:
             "import-list": {"ok": True, "files": [{"name": "friend.wpress", "bytes": 5242880, "mtime": T0 - 7200, "site": None}, {"name": "used.wpress", "bytes": 1048576, "mtime": T0 - 86400 * 2, "site": "bravo"}],
                             "imports": [{"site": "bravo", "file": "used.wpress", "stage": "reported", "problems": ["known vulnerabilities: FOUND: 7 finding(s): core wordpress 7.1.3"]}]},
             "vuln-check": {"ok": True, "rc": 1, "ran": True, "out": "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3 (7 findings)\n"},
-            "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB},
+            "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB}, "import-rescan": {"ok": True, "job": JOB},
             "import-run": {"ok": True, "job": JOB},
             "import-approve": {"ok": True, "job": JOB},
             "import-reset": {"ok": True, "job": JOB},
@@ -1335,6 +1335,26 @@ class FollowUps(Base):
         self.ctl.fail["show"] = CtlError("refused", "wp-ctl refused: unknown_site", "unknown_site")
         self.text("/sites/ghost/security", 404)
 
+    def test_a_waiting_import_is_pointed_to_from_the_security_page_and_can_be_scanned_again_from_its_own(self):
+        html = self.text("/sites/bravo/security")
+        self.assertIn("An import of this site is waiting for a decision and its scan was not clean", html)
+        self.assertIn('href="/sites/bravo/import"', html)
+        self.assertNotIn("waiting for a decision", self.text("/sites/alpha/security"), "a site with no waiting import gets no notice")
+        page = self.text("/sites/bravo/import")
+        self.assertIn('action="/sites/bravo/import/rescan"', page)
+        self.assertIn("Scan again", page)
+        self.ctl.replies["import-list"]["imports"][0]["stage"] = "unfinished"
+        self.assertNotIn("/import/rescan", self.text("/sites/bravo/import"), "only a reported import can be scanned again")
+
+    def test_scan_again_starts_one_job_and_needs_the_token(self):
+        r = self.post("/sites/bravo/import/rescan", {"req": "ps1"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual(self.acted(), [("import-rescan", {"site": "bravo", "req": "ps1"})])
+        self.ctl.calls.clear()
+        for token in (False, "", "wrong"):
+            self.assertEqual(self.post("/sites/bravo/import/rescan", {"req": "ps1"}, token=token).status_code, 400)
+        self.assertEqual(self.acted(), [])
+
     def test_check_for_updates_starts_one_job_and_needs_the_token(self):
         r = self.post("/sites/alpha/updates/check", {"req": "pu1"})
         self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
@@ -1385,7 +1405,7 @@ class ReadOnly(Base):
         self.assertEqual(rules, sorted([("/", ("GET",)), ("/audit", ("GET",)), ("/import", ("GET",)), ("/import/discard", ("POST",)), ("/import/files/<file>", ("PUT",)), ("/import/run", ("POST",)),
                                         ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
                                         ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
-                                        ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
+                                        ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/rescan", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
                                         ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/sites/<name>/updates/apply", ("POST",)), ("/sites/<name>/updates/check", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),

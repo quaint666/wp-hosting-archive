@@ -307,6 +307,11 @@ def register(app):
             args["reject"] = field("reject", 250)
         return started(ask("import-approve", **args))
 
+    @app.post("/sites/<name>/import/rescan")
+    @action
+    def import_rescan(name):
+        return started(ask("import-rescan", site=name, req=field("req", 80)))
+
     @app.post("/sites/<name>/import/reset")
     @action
     def import_reset(name):
@@ -326,7 +331,9 @@ def register(app):
             if e.kind not in ("failed", "refused"):
                 raise
             problem = str(e)
-        return render_template("security.html", name=name, state=state, result=result, rc=rc, problem=problem, req=new_req())
+        _, imports, _why = intake()
+        mine = next((i for i in imports if i.get("site") == name), None)
+        return render_template("security.html", name=name, state=state, result=result, rc=rc, problem=problem, req=new_req(), pending=mine)
 
     @app.post("/sites/<name>/updates/check")
     @action
