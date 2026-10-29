@@ -746,19 +746,35 @@ class Staging(unittest.TestCase):
         return self.by[name]["ansible.posix.synchronize"]
 
     SENDS = {"Send the tools library and the Python modules": ("lib", "{{ wp_tools_lib }}/", "F0644"), "Send the tools": ("bin", "{{ wp_tools_bin }}/", "F0750"),
-             "Send the WordPress units": ("units", "/etc/systemd/system/", "F0644")}
+             "Send the WordPress units": ("units", "/etc/systemd/system/", "F0644"), "Send the site templates": ("tpl", "{{ wp_tools_lib }}/templates/", "D0755,F0644")}
 
     # the only things written on the VM by a task of their own (everything else is rendered on the controller and sent by rsync): two directories and one tmpfiles rule
     REMOTE_OWN = {"Make the tools library directory": "{{ wp_tools_lib }}", "Make the WP-CLI download cache directory": "{{ wp_cli_cache_dir }}", "Age out the WP-CLI download cache": "/etc/tmpfiles.d/wp-cli-cache.conf"}
 
+    # and the provisioning secrets: written straight to the VM, never staged (a staging directory on the controller would hold a copy of the master secret), root-only, no_log (test below)
+    REMOTE_SECRETS = ("Make the directory of the provisioning secrets", "Write the master secret for wp-site-provision", "Write the mail provider key for wp-site-provision",
+                      "Take the mail provider key away when the vault has none")
+
+    def test_the_provisioning_secrets_are_root_only_never_logged_and_only_what_the_vault_holds(self):
+        d, master, key, gone = (self.by[n] for n in self.REMOTE_SECRETS)
+        self.assertEqual((d["ansible.builtin.file"]["path"], d["ansible.builtin.file"]["mode"], d["ansible.builtin.file"]["owner"], d["ansible.builtin.file"]["group"]), ("{{ wp_provision_secret_dir }}", "0700", "root", "root"))
+        for t, dest, value in ((master, "master_secret", "{{ wp_master_secret }}"), (key, "resend_key", "{{ dellwp_wp_resend_key }}")):
+            body = t["ansible.builtin.copy"]
+            self.assertEqual((body["dest"], body["content"], body["mode"], body["owner"], body["group"]), ("{{ wp_provision_secret_dir }}/" + dest, value, "0400", "root", "root"), t["name"])
+            self.assertIs(t.get("no_log"), True, t["name"]); self.assertIs(t.get("diff"), False, t["name"])
+            self.assertNotIn("delegate_to", t, t["name"] + " is a task on the VM")
+        self.assertNotIn("when", master, "the master secret is always written")
+        self.assertEqual(key["when"], "dellwp_wp_resend_key is defined")
+        self.assertEqual((gone["ansible.builtin.file"]["state"], gone["ansible.builtin.file"]["path"], gone["when"]), ("absent", "{{ wp_provision_secret_dir }}/resend_key", "dellwp_wp_resend_key is not defined"))
+
     def test_nothing_is_written_on_the_vm_except_by_rsync_two_directories_one_tmpfiles_rule_and_the_enabled_timers(self):
         for t in self.tasks:
             for mod in ("ansible.builtin.template", "ansible.builtin.copy"):
-                if mod in t and t["name"] not in self.REMOTE_OWN:
+                if mod in t and t["name"] not in self.REMOTE_OWN and t["name"] not in self.REMOTE_SECRETS:
                     self.assertEqual((t.get("delegate_to"), t.get("become"), t.get("check_mode")), ("localhost", False, False), t["name"] + ": rendering happens on the controller, in check mode too, without sudo")
                     self.assertTrue(t[mod]["dest"].startswith("{{ wp_stage.path }}/"), t["name"] + " must write into the staging directory")
                     self.assertTrue(t["name"].startswith("Stage ") or t["name"] == "Write the lists of the staged files", t["name"])
-            if "ansible.builtin.file" in t and t["name"] not in self.REMOTE_OWN:
+            if "ansible.builtin.file" in t and t["name"] not in self.REMOTE_OWN and t["name"] not in self.REMOTE_SECRETS:
                 self.assertEqual((t.get("delegate_to"), t.get("become")), ("localhost", False), t["name"])
         for name, path in self.REMOTE_OWN.items():
             t = self.by[name]
@@ -774,7 +790,7 @@ class Staging(unittest.TestCase):
             self.assertIs(t.get("changed_when"), False, t["name"] + ": staging is rewritten every run; counting it would hide the real changed=0 of the sends")
             self.assertIs(t.get("diff"), False, t["name"] + ": a diff of every staged file buries the real differences")
 
-    def test_the_syncs_are_exactly_these_three_and_each_sends_only_what_was_staged(self):
+    def test_the_syncs_are_exactly_these_four_and_each_sends_only_what_was_staged(self):
         syncs = [t["name"] for t in self.tasks if "ansible.posix.synchronize" in t]
         self.assertEqual(sorted(syncs), sorted(self.SENDS))
         for name, (sub, dest, mode) in self.SENDS.items():
@@ -786,7 +802,8 @@ class Staging(unittest.TestCase):
             self.assertFalse([o for o in opts if "delete" in o], "nothing on the VM is ever deleted by these syncs")
             self.assertEqual((s["archive"], s["checksum"], s["perms"], s["owner"], s["group"]), (False, True, True, True, True), name)
             self.assertNotIn("delete", s); self.assertNotIn("recursive", s)
-            self.assertLess(int(mode[1:], 8) & 0o7022, 1, "no setuid, setgid, sticky or group/other write bit")
+            for part in mode.split(","):
+                self.assertLess(int(part[1:], 8) & 0o7022, 1, "no setuid, setgid, sticky or group/other write bit")
         self.assertEqual(self.sync("Send the WordPress units")["dest"], "/etc/systemd/system/")
         self.assertEqual(self.by["Send the WordPress units"]["notify"], "Reload systemd")
 
@@ -825,11 +842,13 @@ class Staging(unittest.TestCase):
         w = self.by["Write the lists of the staged files"]
         self.assertEqual(w["ansible.builtin.copy"]["dest"], "{{ wp_stage.path }}/lists/{{ item.item }}.list")
         f = self.by["Find the staged files"]
-        self.assertEqual(f["loop"], ["bin", "lib", "units"]); self.assertEqual(f["ansible.builtin.find"]["file_type"], "file")
+        self.assertEqual(f["loop"], ["bin", "lib", "units", "tpl"]); self.assertEqual(f["ansible.builtin.find"]["file_type"], "file")
+        self.assertIs(f["ansible.builtin.find"]["recurse"], True, "the site templates sit in a subdirectory")
         env = jinja2.Environment(keep_trailing_newline=True)    # Ansible puts back the newline Jinja strips
-        env.filters["basename"] = os.path.basename          # Ansible's filter
-        out = env.from_string(w["ansible.builtin.copy"]["content"]).render(item={"files": [{"path": "/x/b"}, {"path": "/x/a"}]})
-        self.assertEqual(out, "a\nb\n")
+        env.filters["relpath"] = os.path.relpath             # Ansible's filter
+        render = lambda item, paths: env.from_string(w["ansible.builtin.copy"]["content"]).render(item={"item": item, "files": [{"path": x} for x in paths]}, wp_stage={"path": "/s"})  # noqa: E731
+        self.assertEqual(render("lib", ["/s/lib/b", "/s/lib/a"]), "a\nb\n", "a flat directory lists plain file names, as it always did")
+        self.assertEqual(render("tpl", ["/s/tpl/wp/site_env.j2", "/s/tpl/compose_stack.service.j2"]), "compose_stack.service.j2\nwp/site_env.j2\n", "a nested one lists the path inside it")
 
     # --- what the rsync options really do, with the real rsync
     def run_rsync(self, sub, user_chown):
@@ -874,6 +893,21 @@ class Staging(unittest.TestCase):
         again = self.run_rsync("bin", me)
         self.assertEqual(len(again), 1); self.assertIn("wp-b", again[0])
         self.assertEqual(stat.S_IMODE((dest / "wp-b").stat().st_mode), 0o750, "a drifted mode is put back")
+
+    def test_the_site_templates_keep_their_subdirectory_and_get_directory_and_file_modes_and_a_second_run_changes_nothing(self):
+        stage, dest = self.tmp / "stage", self.tmp / "dest"
+        (stage / "tpl/wp").mkdir(parents=True); (stage / "lists").mkdir(); dest.mkdir()
+        (stage / "tpl/wp/site_env.j2").write_text("env\n"); (stage / "tpl/compose_stack.service.j2").write_text("unit\n"); (stage / "tpl/stray.j2").write_text("x\n")
+        (stage / "lists/tpl.list").write_text("compose_stack.service.j2\nwp/site_env.j2\n")
+        me = "%d:%d" % (os.getuid(), os.getgid())
+        first = self.run_rsync("tpl", me)
+        self.assertTrue(first, "something was sent")
+        self.assertEqual(sorted(str(p.relative_to(dest)) for p in dest.rglob("*")), ["compose_stack.service.j2", "wp", "wp/site_env.j2"], "the subdirectory is made, the unlisted file is not sent")
+        self.assertEqual(stat.S_IMODE((dest / "wp").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((dest / "wp/site_env.j2").stat().st_mode), 0o644)
+        self.assertEqual(self.run_rsync("tpl", me), [], "idempotent")
+        (stage / "tpl/wp/site_env.j2").write_text("changed\n")
+        self.assertEqual(len(self.run_rsync("tpl", me)), 1)
 
 
 if __name__ == "__main__":

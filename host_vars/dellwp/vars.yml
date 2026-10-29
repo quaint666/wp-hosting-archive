@@ -102,6 +102,41 @@ wp_sites:
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.
 wp_tools_bin: /usr/local/sbin
 wp_tools_lib: /usr/local/lib/wp-tools
+# wp-site-provision (templates/wp/wp_site_provision.py.j2, scripts/wp_site_provision.py): makes a site and keeps it matching its record under wp_data_mount/sites/<name>/site.json. It renders the
+# site templates itself, from copies in wp_tools_lib/templates, so it needs the master secret on the VM: root-only files in wp_provision_secret_dir, written by tasks/wp_tools_common.yml from the vault
+# (the Resend key only while the vault has one). wp_provision_platform_vars names the values the templates and the tool read; tests/test_wp_site_provision_wrapper.py fails when the list and the code
+# disagree, and a name is listed rather than found because the play also holds the master secret in a variable that starts with wp_.
+wp_provision_secret_dir: /etc/wp-tools
+wp_provision_lock_dir: /run/wp-site-provision
+wp_provision_command_timeout_s: 120
+wp_provision_probe_tries: 6
+wp_provision_probe_delay_s: 5
+wp_provision_platform_vars:
+  - wp_2fa_roles
+  - wp_backup_dir
+  - wp_backup_quota_offset
+  - wp_data_mount
+  - wp_db_stop_grace_s
+  - wp_db_uid
+  - wp_domain
+  - wp_image_db
+  - wp_image_php
+  - wp_login_limit_ip
+  - wp_login_limit_user
+  - wp_login_window_s
+  - wp_mail_per_day
+  - wp_mail_per_hour
+  - wp_mail_sender_domain
+  - wp_mu_dir
+  - wp_mu_mount
+  - wp_nginx_listen_port
+  - wp_nginx_probe_port
+  - wp_php_disable_functions
+  - wp_php_uid
+  - wp_stack_start_timeout_s
+  - wp_stack_stop_timeout_s
+  - wp_unit_dir
+  - wp_vhost_dir
 # WP-CLI unpacks a core download into /tmp: with 128 MB it unpacked 1347 of 3341 files, truncated others and still said "Success" (A/B on dellwp, 2026-10-24); 256 MB unpacked all
 # and verified. tmpfs pages count against the container's memory, and 256 MB of /tmp was proven together with 768 MB of memory, so these two move together.
 wp_cli_mem_mb: 768

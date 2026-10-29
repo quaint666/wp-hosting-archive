@@ -79,6 +79,8 @@ def site_vars(v, site):
     out.update(wp_disk_sites=" ".join("%s:%s:%s" % (x["name"], x["quota_id"], x["quota_mb"]) for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
     out.update(wp_update_policies=" ".join("%s:%s" % (x["name"], x["update_policy"]) for x in [dict(v["wp_site_defaults"], **y) for y in v["wp_sites"]]))
     out.update(inventory_hostname="dellwp", wp_s=s, wp_host="%s.%s" % (s["name"], v["wp_domain"]), wp_site_dir="%s/sites/%s" % (v["wp_data_mount"], s["name"]))
+    # what the wrapper that reads hostvars and lookup('vars', ...) (templates/wp/wp_site_provision.py.j2) needs to render at all; its content is tested in tests/test_wp_site_provision_wrapper.py
+    out.update(hostvars={"delloptiplex3040": {"proxmox_vms": [dellwp_vm()]}}, lookup=lambda kind, name: out[name])
     out["wp_secret_base"] = "%s|%s|%s" % (v["wp_master_secret"], s["name"], s["secret_rev"])
     out["wp_db_password"] = hashlib.sha256((out["wp_secret_base"] + "|db").encode()).hexdigest()
     return out

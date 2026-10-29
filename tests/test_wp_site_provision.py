@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+"""Offline tests of scripts/wp_site_provision.py (wp-site-provision): create, apply and render.
+
+The filesystem is real (a temporary tree stands in for /srv/wp, /etc/nginx/conf.d, /etc/systemd/system and /run), and so are the locks and the atomic writes. docker, nginx, systemctl, lsattr,
+chattr, repquota and setquota are one in-process stand-in (FakeHost) that KEEPS STATE (a quota project per path, a limit per project, which images exist, which units are enabled and active) and logs every call,
+so "a second apply changes nothing" means no call that changes anything, not just a quiet exit; it also checks that each call is an argument list with the clean environment and no stdin. chown is recorded
+(the tests do not run as root); the HTTP probe is a list of statuses.
+
+They prove: the steps and their order are those of tasks/wp_site_one_common.yml; every command is the argument list the play builds (the quota project and limit, the seed container's equal memory and swap);
+a repeat changes nothing; a changed record restarts the stack only when the compose file or the database settings changed and recreates only php otherwise; a vhost nginx rejects is taken back; a create
+that stops half-way is finished by apply; a refusal leaves nothing behind; the lock; the stopped, hold and live states; render tells the truth and never shows a secret; no secret is in any output or argument.
+They do not prove that docker, nginx, systemd or the quota tools behave as the stand-in does (scripts/wp_provision_rehearsal_dellwp.sh will, on the host), nor that chown works. Run: python3 -I tests/test_wp_site_provision.py"""
+import fcntl
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "scripts"))
+
+import wp_site_model as model  # noqa: E402
+import wp_site_provision as prov  # noqa: E402
+import wp_site_renderer as renderer  # noqa: E402
+import test_wp_sites_render as play  # noqa: E402
+from test_wp_site_renderer import platform  # noqa: E402
+
+MASTER = "tree-master-secret-value"
+RESEND = "re_tree_resend_value"
+
+
+class FakeHost:
+    """docker, nginx, systemctl and the quota tools in one object that keeps their state (a project per path, a limit per project, which images exist, which units are enabled and active) and logs
+    every call as one line. It is the `run` the tool is given: the real call (argument list, clean environment, no stdin, a timeout) is checked here."""
+
+    def __init__(self, path):
+        self.path, self.calls = path, []
+        self.projects, self.quota, self.images, self.enabled, self.active, self.fails = {}, {}, set(), set(), set(), {}
+
+    def failing(self, *keys):
+        for k in keys:
+            if k in self.fails:
+                return self.fails[k]
+        return None
+
+    def __call__(self, argv, capture_output=None, text=None, stdin=None, timeout=None, env=None):
+        assert isinstance(argv, list) and all(isinstance(a, str) for a in argv), argv
+        assert env == {"PATH": self.path, "LANG": "C"}, env
+        assert stdin == subprocess.DEVNULL and capture_output and text and isinstance(timeout, int), (stdin, timeout)
+        name, args = os.path.basename(argv[0]), argv[1:]
+        self.calls.append(" ".join([name] + args))
+        rc, out, err = 0, "", ""
+        bad = {"setquota": self.failing("setquota"), "nginx": self.failing("nginx"), "docker": self.failing("docker." + args[0]) if args else None,
+               "systemctl": self.failing("systemctl." + args[0], "systemctl.%s.%s" % (args[0], [a for a in args[1:] if not a.startswith("--")][0] if len(args) > 1 else "")) if args else None}.get(name)
+        if bad is not None:
+            return subprocess.CompletedProcess(argv, 1, "", bad)
+        if name == "lsattr":
+            out = "%7d ---------------e------- %s\n" % (self.projects.get(args[-1], 0), args[-1])
+        elif name == "chattr":
+            self.projects[args[-1]] = int(args[args.index("-p") + 1])
+        elif name == "repquota":
+            out = "*** Report for project quotas on device /dev/vdb\nProject         used    soft    hard  grace    used  soft  hard  grace\n" + "-" * 70 + "\n#0         --       0       0       0       0     0     0\n"
+            out += "".join("#%d      --       0       0 %8d       1     0     0\n" % (k, v) for k, v in sorted(self.quota.items()))
+        elif name == "setquota":
+            self.quota[int(args[1])] = int(args[3])
+        elif name == "docker" and args[:2] == ["image", "inspect"]:
+            rc = 0 if args[2] in self.images else 1
+        elif name == "docker" and args[0] == "pull":
+            self.images.add(args[1])
+        elif name == "docker" and args[0] == "run":
+            host = Path(args[args.index("-v") + 1].split(":")[0])
+            (host / "wp-includes").mkdir(parents=True, exist_ok=True)
+            (host / "wp-includes/version.php").write_text("<?php")
+            (host / "wp-config-docker.php").write_text("<?php")
+        elif name == "systemctl":
+            verb, flags, units = args[0], [a for a in args[1:] if a.startswith("--")], [a for a in args[1:] if not a.startswith("--")]
+            unit = units[0] if units else ""
+            if verb == "is-enabled":
+                rc = 0 if unit in self.enabled else 1
+            elif verb == "is-active":
+                rc = 0 if unit in self.active else 1
+            elif verb == "enable":
+                self.enabled.add(unit)
+                if "--now" in flags:
+                    self.active.add(unit)
+            elif verb == "disable":
+                self.enabled.discard(unit)
+                if "--now" in flags:
+                    self.active.discard(unit)
+            elif verb in ("start", "restart"):
+                self.active.add(unit)
+            elif verb == "stop":
+                self.active.discard(unit)
+        return subprocess.CompletedProcess(argv, rc, out, err)
+
+    def units(self):
+        return {u + ".enabled" for u in self.enabled} | {u + ".active" for u in self.active}
+
+
+READ_ONLY = ("lsattr", "repquota", "docker image inspect", "systemctl is-active", "systemctl is-enabled")
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wpprov-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        t = self.tmp
+        for sub in ("mount/sites", "mount/backups", "mount/mu", "conf.d", "units", "etc"):
+            (t / sub).mkdir(parents=True)
+        self.host = FakeHost("/usr/bin:/bin")
+        (t / "conf.d/wp_base.conf").write_text("# base\n")
+        self.secret = t / "etc/master_secret"
+        self.secret.write_text(MASTER + "\n")
+        self.secret.chmod(0o400)
+        self.resend = t / "etc/resend_key"
+        v = play.base_vars()
+        self.v = v
+        plat = platform()
+        plat.update(wp_data_mount=str(t / "mount"), wp_unit_dir=str(t / "units"), wp_vhost_dir=str(t / "conf.d"), wp_backup_dir=str(t / "mount/backups"), wp_mu_dir=str(t / "mount/mu"))
+        vm = play.dellwp_vm()
+        self.cfg = {
+            "data_dir": str(t / "mount/sites"), "tombstones_dir": str(t / "mount/tombstones"), "lock_dir": str(t / "lock"), "template_dir": str(HERE.parent / "templates"),
+            "master_secret_file": str(self.secret), "resend_key_file": str(self.resend), "platform": plat, "defaults": v["wp_site_defaults"],
+            "known": [{"name": "old", "port": 9101, "quota_id": 1001, "state": "closed", "update_policy": "auto"}],
+            "fit": dict(reserved_names=v["wp_reserved_names"], vm_memory_mb=vm["memory"], data_disk_gb=vm["data_disk"], ram_reserve_mb=v["wp_vm_ram_reserve_mb"], data_reserve_mb=v["wp_data_reserve_mb"],
+                        backup_quota_offset=v["wp_backup_quota_offset"], scratch_quota_id=v["wp_scratch_quota_id"], archive_quota_id=v["wp_archive_quota_id"], intake_quota_id=v["wp_intake_quota_id"]),
+            "tools": {n: "/usr/bin/" + n for n in ("lsattr", "chattr", "repquota", "setquota", "docker", "nginx", "systemctl")},
+            "path": "/usr/bin:/bin", "command_timeout_s": 30, "probe_tries": 3, "probe_delay_s": 5,
+        }
+        self.lines, self.chowns, self.statuses, self.sleeps, self.probes = [], [], [200], [], []
+        self.clock = 1793000000.0
+
+    def make(self):
+        def probe(url, host):
+            self.probes.append((url, host))
+            return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        return prov.Provisioner(self.cfg, run=self.host, sleep=self.sleeps.append, probe=probe, chown=lambda *a: self.chowns.append(a), out=self.lines.append, now=lambda: self.clock)
+
+    def calls(self):
+        return self.host.calls
+
+    def changing(self, since=0):
+        return [c for c in self.calls()[since:] if not c.startswith(READ_ONLY)]
+
+    def inject(self, what, text="boom"):
+        self.host.fails[what] = text
+
+    def clear(self, what):
+        del self.host.fails[what]
+
+    def site_dir(self, name="alpha"):
+        return Path(self.cfg["data_dir"]) / name
+
+    def record(self, name="alpha"):
+        return json.loads((self.site_dir(name) / "site.json").read_text())
+
+    def edit_record(self, name="alpha", **kw):
+        reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
+        reg.write_site({**reg.read_site(name), **kw})
+
+    def tree(self):
+        return sorted(str(p.relative_to(self.tmp)) for p in self.tmp.rglob("*") if "lock" not in p.parts)
+
+
+class Create(Base):
+    def test_the_happy_path(self):
+        rec = self.make().create("alpha")
+        self.assertEqual((rec["name"], rec["port"], rec["quota_id"], rec["state"]), ("alpha", 9102, 1002, "hold"), "above the repo's closed site")
+        self.assertEqual(self.record(), {"schema": 1, "name": "alpha", "port": 9102, "quota_id": 1002, "state": "hold", "created": "2026-10-26T07:33:20Z"})
+        d = self.site_dir()
+        for rel in (".env", "wp-config.php", "php.ini", "fpm-pool.conf", "compose.yml", "html/wp-includes/version.php", "db", "site.json"):
+            self.assertTrue((d / rel).exists(), rel)
+        self.assertFalse((d / "html/wp-config-docker.php").exists(), "the image's config template is removed")
+        self.assertFalse((d / "stopped.flag").exists())
+        self.assertTrue((self.tmp / "units/wp-alpha.service").exists())
+        self.assertTrue((self.tmp / "conf.d/wp_site_alpha.conf").exists())
+        self.assertTrue((self.tmp / "mount/backups/alpha").is_dir())
+        self.assertEqual(self.probes, [("http://127.0.0.1:%s/wp-admin/install.php" % self.cfg["platform"]["wp_nginx_listen_port"], "alpha." + self.cfg["platform"]["wp_domain"])])
+        units = self.host.units()
+        self.assertIn("wp-alpha.active", units)
+        self.assertIn("wp-backup@alpha.timer.active", units)
+        self.assertIn("wp-update@alpha.timer.active", units)
+        self.assertNotIn("wp-cron@alpha.timer.enabled", units, "cron runs only while live")
+
+    def test_the_order_is_the_plays(self):
+        self.make().create("alpha")
+        c = self.calls()
+        site, back = str(self.site_dir()), str(self.tmp / "mount/backups/alpha")
+        order = [next(i for i, x in enumerate(c) if x.startswith(prefix)) for prefix in (
+            "lsattr -dp " + site, "lsattr -dp " + back, "docker run", "docker image inspect", "systemctl daemon-reload", "systemctl enable wp-alpha", "systemctl restart wp-alpha",
+            "nginx -t", "systemctl reload nginx", "systemctl enable --now wp-backup@alpha.timer")]
+        self.assertEqual(order, sorted(order), c)
+        self.assertEqual(c.count("systemctl restart wp-alpha"), 1)
+        self.assertNotIn("systemctl reload wp-alpha", c, "a first start uses the new files already")
+
+    def test_the_commands_are_the_plays_argument_lists(self):
+        self.make().create("alpha")
+        c, d, back, mount = self.calls(), str(self.site_dir()), str(self.tmp / "mount/backups/alpha"), str(self.tmp / "mount")
+        self.assertIn("chattr -R +P -p 1002 " + d, c)
+        self.assertIn("setquota -P 1002 0 %d 0 0 %s" % (3072 * 1024, mount), c)
+        self.assertIn("chattr -R +P -p %d %s" % (1002 + self.v["wp_backup_quota_offset"], back), c)
+        self.assertIn("setquota -P %d 0 %d 0 0 %s" % (1002 + self.v["wp_backup_quota_offset"], 3072 * 1024, mount), c)
+        run = next(x for x in c if x.startswith("docker run")).split(" ")
+        self.assertEqual(run[run.index("--memory") + 1], run[run.index("--memory-swap") + 1], "--memory-swap equals --memory")
+        self.assertEqual(run[run.index("-v") + 1], d + "/html:/var/www/html")
+        self.assertIn(self.v["wp_image_php"], run)
+        self.assertNotIn("latest", " ".join(c))
+        self.assertIn("docker pull " + self.v["wp_image_php"], c)
+        self.assertIn("docker pull " + self.v["wp_image_db"], c)
+
+    def test_the_files_have_the_plays_modes_and_owners(self):
+        self.make().create("alpha")
+        d, p = self.site_dir(), self.cfg["platform"]
+        mode = lambda path: (path.stat().st_mode & 0o7777)  # noqa: E731
+        self.assertEqual(mode(d / ".env"), 0o600)
+        self.assertEqual(mode(d / "wp-config.php"), 0o640)
+        self.assertEqual(mode(d / "compose.yml"), 0o644)
+        self.assertEqual(mode(d), 0o755)
+        self.assertEqual(mode(d / "db"), 0o700)
+        self.assertEqual(mode(self.tmp / "mount/backups/alpha"), 0o700)
+        owners = {str(a[0]): a[1:] for a in self.chowns}
+        self.assertEqual(owners[str(d / "db")], (p["wp_db_uid"], p["wp_db_uid"]))
+        wpconfig = [v for k, v in owners.items() if k.endswith("wp-config.php.new-%d" % os.getpid())]
+        self.assertEqual(wpconfig, [(0, p["wp_php_uid"])], "wp-config.php: root, group php")
+
+    def test_set_values_are_recorded_only_when_given(self):
+        rec = self.make().create("alpha", ["php_mem_mb=640", "label=Alpha shop", "update_policy=auto", "allow_xmlrpc=true"])
+        self.assertEqual({k: v for k, v in rec.items() if k not in ("schema", "name", "port", "quota_id", "state", "created")},
+                         {"php_mem_mb": 640, "label": "Alpha shop", "update_policy": "auto", "allow_xmlrpc": True})
+        self.assertIn("mem_limit: 640m", (self.site_dir() / "compose.yml").read_text())
+
+    def test_the_listed_platform_values_are_all_it_needs(self):
+        required, _ = renderer.needed_platform_vars(self.cfg["template_dir"])
+        self.cfg["platform"] = {k: self.cfg["platform"][k] for k in required}
+        self.make().create("alpha")                                           # a value the tool reads and the list lacks would be a KeyError here
+        self.make().apply("alpha")
+
+    def test_an_entry_of_the_repos_list_without_a_state_counts_as_on_hold(self):
+        self.cfg["known"] = [{"name": "declared", "port": 9101, "quota_id": 1001}]            # as an entry of wp_sites may be: the state comes from wp_site_defaults
+        rec = self.make().create("alpha")
+        self.assertEqual((rec["port"], rec["quota_id"]), (9102, 1002))
+        with self.assertRaises(model.Refuse) as cm:
+            self.make().create("declared")
+        self.assertIn("already exists", str(cm.exception))
+
+    def test_the_second_site_gets_the_next_numbers(self):
+        self.make().create("alpha")
+        rec = self.make().create("bravo")
+        self.assertEqual((rec["port"], rec["quota_id"]), (9103, 1003))
+
+    def test_refusals_leave_nothing_behind(self):
+        self.make().create("alpha")
+        before, tree = len(self.calls()), self.tree()
+        reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
+        reg.write_tombstone({"schema": 1, "name": "gone", "port": 9150, "quota_id": 1050, "state": "closed"})
+        tree = self.tree()
+        stray = self.site_dir("stray")
+        stray.mkdir()
+        (stray / "file").write_text("x")
+        tree = self.tree()
+        cases = [("hub", []), ("vps-hub", []), ("Bad", []), ("a", []), ("alpha", []), ("old", []), ("gone", []), ("stray", []), ("bravo", ["state=live"]), ("bravo", ["port=9200"]),
+                 ("bravo", ["name=x"]), ("bravo", ["php_mem_mb=10"]), ("bravo", ["php_mem_mb=640", "php_mem_mb=700"]), ("bravo", ["nokey"]), ("bravo", ["quota_mb=100000", "backup_quota_mb=100000"]),
+                 ("bravo", ["php_mem_mb=4096", "db_mem_mb=4096"]), ("bravo", ["label=" + "x" * 101])]
+        for name, sets in cases:
+            with self.assertRaises(model.Refuse, msg=(name, sets)):
+                self.make().create(name, sets)
+            self.assertEqual(self.tree(), tree, (name, sets))
+            self.assertEqual(len(self.calls()), before, "no command ran for a refusal: %s %s" % (name, sets))
+
+    def test_a_refusal_for_the_fit_names_the_rule(self):
+        with self.assertRaises(model.Refuse) as cm:
+            self.make().create("alpha", ["php_mem_mb=4096", "db_mem_mb=4096"])
+        self.assertIn("memory", str(cm.exception))
+
+    def test_nothing_is_made_when_the_secret_file_is_open_to_others(self):
+        self.secret.chmod(0o644)
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().create("alpha")
+        self.assertIn("readable by group or others", str(cm.exception))
+        self.assertFalse(self.site_dir().exists())
+        self.assertEqual(self.calls(), [])
+
+    def test_a_missing_nginx_base_stops_before_anything_is_made(self):
+        (self.tmp / "conf.d/wp_base.conf").unlink()
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().create("alpha")
+        self.assertIn("nginx_base_dellwp", str(cm.exception))
+        self.assertFalse(self.site_dir().exists())
+
+    def test_a_create_that_stops_half_way_is_finished_by_apply(self):
+        self.inject("docker.run", "image pull timed out")
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().create("alpha")
+        self.assertIn("recorded but not fully built", str(cm.exception))
+        self.assertIn("wp-site-provision apply alpha", str(cm.exception))
+        self.assertEqual(self.record()["name"], "alpha", "the record is kept")
+        with self.assertRaises(model.Refuse):
+            self.make().create("alpha")                                       # the name is taken: finishing it is apply's job
+        self.clear("docker.run")
+        self.make().apply("alpha")
+        self.assertTrue((self.site_dir() / "html/wp-includes/version.php").exists())
+        self.assertEqual(len([c for c in self.calls() if c.startswith("docker run")]), 2, "seeded once the second time, tried once before")
+        self.assertIn("wp-alpha", self.host.active)
+
+    def test_the_lock_refuses_a_second_run(self):
+        Path(self.cfg["lock_dir"]).mkdir()
+        fh = open(Path(self.cfg["lock_dir"]) / "registry.lock", "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            with self.assertRaises(prov.Failed) as cm:
+                self.make().create("alpha")
+            self.assertIn("lock", str(cm.exception))
+        finally:
+            fh.close()
+        self.assertFalse(self.site_dir().exists())
+
+
+class Apply(Base):
+    def setUp(self):
+        super().setUp()
+        self.make().create("alpha")
+        self.mark = len(self.calls())
+        self.lines.clear()
+
+    def test_a_repeat_changes_nothing(self):
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), [])
+        self.assertEqual(self.lines, ["alpha already matches its record; nothing changed"])
+        self.assertEqual(len(self.probes), 2, "the probe still runs: it is the proof, not a change")
+
+    def test_a_compose_change_restarts_the_stack(self):
+        self.edit_record(php_mem_mb=640)
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl restart wp-alpha"])
+
+    def test_a_new_secret_revision_changes_the_database_password_and_restarts_the_stack(self):
+        before = (self.site_dir() / ".env").read_text()
+        self.edit_record(secret_rev=2)
+        self.make().apply("alpha")
+        self.assertNotEqual((self.site_dir() / ".env").read_text(), before)
+        self.assertEqual(self.changing(self.mark), ["systemctl restart wp-alpha"], "the database takes its password from .env: the whole stack restarts")
+
+    def test_the_data_is_flushed_before_a_file_replaces_the_old_one(self):
+        order = []
+        real_fsync, real_replace = os.fsync, os.replace
+        os.fsync = lambda fd: (order.append("fsync"), real_fsync(fd))[1]
+        os.replace = lambda a, b: (order.append("replace"), real_replace(a, b))[1]
+        try:
+            self.edit_record(allow_xmlrpc=True)
+            order.clear()
+            self.make().apply("alpha")
+        finally:
+            os.fsync, os.replace = real_fsync, real_replace
+        self.assertGreaterEqual(len(order), 4)
+        for i in range(0, len(order), 2):
+            self.assertEqual(order[i:i + 2], ["fsync", "replace"], order)
+
+    def test_apply_refuses_when_the_sites_no_longer_fit(self):
+        self.cfg["fit"]["vm_memory_mb"] = 1000
+        with self.assertRaises(model.Refuse) as cm:
+            self.make().apply("alpha")
+        self.assertIn("memory", str(cm.exception))
+        self.assertEqual(self.changing(self.mark), [])
+
+    def test_a_timer_that_is_enabled_but_not_running_is_started(self):
+        self.host.active.discard("wp-backup@alpha.timer")
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl enable --now wp-backup@alpha.timer"])
+
+    def test_a_timer_that_runs_when_it_should_not_is_stopped(self):
+        self.host.enabled.add("wp-cron@alpha.timer")
+        self.host.active.add("wp-cron@alpha.timer")
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl disable --now wp-cron@alpha.timer"], "cron runs only while live")
+
+    def test_a_database_setting_change_restarts_the_stack(self):
+        self.edit_record(db_mem_mb=300)
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl restart wp-alpha"])
+
+    def test_a_change_to_a_mounted_file_recreates_only_php(self):
+        self.edit_record(allow_app_passwords=True)
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl reload wp-alpha"])
+
+    def test_the_upload_limit_reloads_php_and_nginx(self):
+        self.edit_record(upload_mb=128)
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl reload wp-alpha", "nginx -t", "systemctl reload nginx"])
+
+    def test_a_quota_change_is_applied_to_the_project(self):
+        self.edit_record(quota_mb=4096)
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["setquota -P 1002 0 %d 0 0 %s" % (4096 * 1024, self.tmp / "mount")])
+
+    def test_a_project_that_drifted_is_put_back(self):
+        self.host.projects[str(self.site_dir())] = 77
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["chattr -R +P -p 1002 " + str(self.site_dir())])
+
+    def test_a_stack_that_is_down_is_started(self):
+        self.host.active.discard("wp-alpha")
+        self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), ["systemctl start wp-alpha"])
+
+    def test_a_vhost_nginx_rejects_is_taken_back(self):
+        old = (self.tmp / "conf.d/wp_site_alpha.conf").read_text()
+        self.edit_record(upload_mb=128)
+        self.inject("nginx", "emerald syntax error")
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().apply("alpha")
+        self.assertIn("previous one was put back", str(cm.exception))
+        self.assertIn("emerald syntax error", str(cm.exception))
+        self.assertEqual((self.tmp / "conf.d/wp_site_alpha.conf").read_text(), old)
+        self.assertNotIn("systemctl reload nginx", self.calls()[self.mark:])
+        self.clear("nginx")
+        self.make().apply("alpha")                                            # the next run writes the new vhost again
+        self.assertIn("client_max_body_size 128m", (self.tmp / "conf.d/wp_site_alpha.conf").read_text())
+
+    def test_a_first_vhost_nginx_rejects_is_removed(self):
+        (self.tmp / "conf.d/wp_site_alpha.conf").unlink()
+        self.inject("nginx")
+        with self.assertRaises(prov.Failed):
+            self.make().apply("alpha")
+        self.assertFalse((self.tmp / "conf.d/wp_site_alpha.conf").exists())
+        self.assertNotIn("systemctl reload nginx", self.calls()[self.mark:])
+
+    def test_a_probe_that_never_answers_fails_with_the_reason(self):
+        self.statuses[:] = [502]
+        self.edit_record(upload_mb=128)
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().apply("alpha")
+        self.assertIn("last status 502", str(cm.exception))
+        self.assertEqual(self.sleeps, [5, 5], "three tries, a pause between them")
+
+    def test_a_probe_that_answers_late_passes(self):
+        self.statuses[:] = [0, 503, 200]
+        self.make().apply("alpha")
+
+    def test_stopped(self):
+        self.edit_record(state="stopped")
+        (self.site_dir() / "maintenance.flag").write_text("")
+        self.probes.clear()
+        self.make().apply("alpha")
+        self.assertTrue((self.site_dir() / "stopped.flag").exists())
+        self.assertFalse((self.site_dir() / "maintenance.flag").exists(), "the backup's maintenance flag goes once the stack is down")
+        self.assertEqual(self.probes, [], "no probe for a stack that is not running")
+        units = self.host.units()
+        for gone in ("wp-alpha.active", "wp-alpha.enabled", "wp-backup@alpha.timer.active", "wp-update@alpha.timer.enabled"):
+            self.assertNotIn(gone, units)
+        self.edit_record(state="hold")
+        self.make().apply("alpha")
+        self.assertFalse((self.site_dir() / "stopped.flag").exists())
+        self.assertIn("wp-alpha", self.host.active, "starting again is only a state change")
+
+    def test_live_starts_the_cron_timer_and_opens_the_vhost(self):
+        hold = (self.tmp / "conf.d/wp_site_alpha.conf").read_text()
+        self.edit_record(state="live")
+        self.make().apply("alpha")
+        self.assertIn("wp-cron@alpha.timer", self.host.active)
+        self.assertNotEqual((self.tmp / "conf.d/wp_site_alpha.conf").read_text(), hold)
+        self.edit_record(state="hold")
+        self.make().apply("alpha")
+        self.assertNotIn("wp-cron@alpha.timer", self.host.active)
+        self.assertEqual((self.tmp / "conf.d/wp_site_alpha.conf").read_text(), hold)
+
+    def test_a_site_without_a_record_is_refused(self):
+        with self.assertRaises(model.Refuse):
+            self.make().apply("bravo")
+        for bad in ("../x", "A", "a b", "", "x;id"):
+            with self.assertRaises(model.Refuse, msg=bad):
+                self.make().apply(bad)
+
+    def test_a_corrupt_record_stops_apply(self):
+        (self.site_dir() / "site.json").write_text("{nope")
+        with self.assertRaises(prov.Failed):
+            self.make().apply("alpha")
+        self.assertEqual(self.changing(self.mark), [])
+
+    def test_a_link_where_a_file_goes_is_refused(self):
+        (self.site_dir() / "php.ini").unlink()
+        os.symlink("/etc/passwd", self.site_dir() / "php.ini")
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().apply("alpha")
+        self.assertIn("is a link", str(cm.exception))
+
+    def test_mail_send_needs_the_provider_key_file(self):
+        self.edit_record(mail_mode="send")
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().apply("alpha")
+        self.assertIn("dellwp_wp_resend_key", str(cm.exception))
+        self.resend.write_text(RESEND + "\n")
+        self.resend.chmod(0o400)
+        self.make().apply("alpha")
+        self.assertIn(RESEND, (self.site_dir() / "wp-config.php").read_text())
+
+    def test_no_secret_in_any_output_or_argument(self):
+        self.edit_record(php_mem_mb=700)
+        self.make().apply("alpha")
+        pw = renderer.db_password(renderer.secret_base(MASTER, "alpha", 1))
+        blob = "\n".join(self.lines + self.calls())
+        for secret in (MASTER, pw):
+            self.assertNotIn(secret, blob)
+
+    def test_a_failed_command_reports_what_failed(self):
+        self.edit_record(php_mem_mb=700)
+        self.inject("systemctl.restart", "Job for wp-alpha.service failed")
+        with self.assertRaises(prov.Failed) as cm:
+            self.make().apply("alpha")
+        self.assertIn("systemctl restart failed", str(cm.exception))
+        self.assertIn("Job for wp-alpha.service failed", str(cm.exception))
+
+    def test_a_write_that_fails_leaves_the_old_file_and_no_temp(self):
+        self.edit_record(php_mem_mb=700)
+        old = (self.site_dir() / "compose.yml").read_text()
+        real = os.replace
+        os.replace = lambda *a: (_ for _ in ()).throw(OSError("disk full"))
+        try:
+            with self.assertRaises(OSError):
+                self.make().apply("alpha")
+        finally:
+            os.replace = real
+        self.assertEqual((self.site_dir() / "compose.yml").read_text(), old)
+        self.assertEqual([p.name for p in self.site_dir().iterdir() if ".new-" in p.name], [])
+
+    def test_the_lock_refuses_a_second_apply(self):
+        Path(self.cfg["lock_dir"]).mkdir(exist_ok=True)
+        fh = open(Path(self.cfg["lock_dir"]) / "site-alpha.lock", "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            with self.assertRaises(prov.Failed):
+                self.make().apply("alpha")
+        finally:
+            fh.close()
+
+
+class Render(Base):
+    def setUp(self):
+        super().setUp()
+        self.make().create("alpha")
+
+    def test_everything_matches_after_an_apply(self):
+        rows, text = self.make().render("alpha", True)
+        self.assertEqual({s for _, s in rows}, {"same"})
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(text, [])
+
+    def test_a_changed_file_shows_its_difference(self):
+        ini = self.site_dir() / "php.ini"
+        ini.write_text(ini.read_text().replace("memory_limit", "memory_limitX"))
+        rows, text = self.make().render("alpha", True)
+        self.assertEqual([p.rsplit("/", 1)[1] for p, s in rows if s == "differs"], ["php.ini"])
+        self.assertTrue(any(line.startswith("+") and "memory_limit" in line for line in text), text)
+        self.assertEqual(self.make().render("alpha", False)[1], [], "no text without --diff")
+
+    def test_a_secret_file_is_compared_by_hash_and_never_shown(self):
+        env = self.site_dir() / ".env"
+        env.write_text("MARIADB_PASSWORD=totally-different\n")
+        rows, text = self.make().render("alpha", True)
+        self.assertEqual([p.rsplit("/", 1)[1] for p, s in rows if s == "differs"], [".env"])
+        blob = "\n".join(text)
+        self.assertIn("secret file: no text shown", blob)
+        self.assertNotIn("totally-different", blob)
+        self.assertNotIn(renderer.db_password(renderer.secret_base(MASTER, "alpha", 1)), blob)
+
+    def test_a_missing_file_and_a_drifted_mode(self):
+        (self.tmp / "conf.d/wp_site_alpha.conf").unlink()
+        os.chmod(self.site_dir() / "compose.yml", 0o666)
+        rows, text = self.make().render("alpha", True)
+        status = {p.rsplit("/", 1)[1]: s for p, s in rows}
+        self.assertEqual((status["wp_site_alpha.conf"], status["compose.yml"]), ("missing", "differs"))
+        self.assertTrue(any("mode 666" in line for line in text), text)
+
+    def test_render_changes_nothing(self):
+        mark, tree = len(self.calls()), self.tree()
+        self.make().render("alpha", True)
+        self.assertEqual(self.calls()[mark:], [])
+        self.assertEqual(self.tree(), tree)
+
+    def test_no_record_is_refused(self):
+        with self.assertRaises(model.Refuse):
+            self.make().render("bravo")
+
+
+class Cli(Base):
+    def invoke(self, *argv):
+        out, err = [], []
+        rc = prov.main(self.cfg, list(argv), out=out.append, err=err.append, run=self.host, sleep=self.sleeps.append, probe=lambda url, host: 200, chown=lambda *a: self.chowns.append(a), now=lambda: self.clock)
+        return rc, out, err
+
+    def test_exit_codes(self):
+        rc, out, err = self.invoke("create", "alpha", "--set", "php_mem_mb=640")
+        self.assertEqual((rc, err), (0, []))
+        self.assertIn("alpha is built and on hold; WordPress is not installed in it", out)
+        self.assertEqual(self.invoke("apply", "alpha")[0], 0)
+        self.assertEqual(self.invoke("render", "alpha")[0], 0)
+        (self.site_dir() / "php.ini").write_text("x")
+        self.assertEqual(self.invoke("render", "alpha", "--diff")[0], 1, "a difference is a failure, for a script")
+        rc, out, err = self.invoke("create", "hub")
+        self.assertEqual(rc, 2)
+        self.assertIn("refused", err[0])
+        self.assertEqual(self.invoke("apply", "bravo")[0], 2)
+        self.inject("systemctl.restart")
+        self.edit_record(php_mem_mb=700)
+        self.assertEqual(self.invoke("apply", "alpha")[0], 1)
+
+    def test_bad_usage_is_a_refusal(self):
+        for argv in ([], ["nosuchverb"], ["create"], ["create", "a", "extra"], ["apply"]):
+            with io.StringIO() as buf, unittest.mock.patch("sys.stderr", buf):
+                rc, _, _ = self.invoke(*argv)
+            self.assertEqual(rc, 2, argv)
+
+
+import unittest.mock  # noqa: E402
+
+if __name__ == "__main__":
+    unittest.main()

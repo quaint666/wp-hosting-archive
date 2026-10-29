@@ -1,0 +1,54 @@
+#!/usr/bin/python3 -I
+# Managed by Ansible (templates/wp/wp_site_provision.py.j2). Make a WordPress site and keep it matching its record:   wp-site-provision create <name> [--set key=value ...] | apply <name> | render <name> [--diff]
+# The logic is {{ wp_tools_lib }}/wp_site_provision.py (copied from scripts/ in the repo, where tests/test_wp_site_provision.py runs it); this file only carries the values from the repo. The templates it
+# renders are the copies in {{ wp_tools_lib }}/templates; the master secret is read from {{ wp_provision_secret_dir }}, never from this file. Root only (0750). `known` is the list of sites still
+# declared in host_vars/dellwp/vars.yml (wp_sites): their names, ports and quota ids are never given to a new site, whether or not they exist.
+import json
+import sys
+
+sys.path.insert(0, "{{ wp_tools_lib }}")
+import wp_site_provision  # noqa: E402
+
+{% set wp_vm = hostvars['delloptiplex3040'].proxmox_vms | selectattr('name', 'eq', inventory_hostname) | first %}
+{% set platform = {} %}
+{% for name in wp_provision_platform_vars %}
+{% set _ = platform.update({name: lookup('vars', name)}) %}
+{% endfor %}
+{% set config = {
+  "data_dir": wp_data_mount ~ "/sites",
+  "tombstones_dir": wp_data_mount ~ "/tombstones",
+  "lock_dir": wp_provision_lock_dir,
+  "template_dir": wp_tools_lib ~ "/templates",
+  "master_secret_file": wp_provision_secret_dir ~ "/master_secret",
+  "resend_key_file": wp_provision_secret_dir ~ "/resend_key",
+  "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  "command_timeout_s": wp_provision_command_timeout_s | int,
+  "probe_tries": wp_provision_probe_tries | int,
+  "probe_delay_s": wp_provision_probe_delay_s | int,
+  "tools": {
+    "docker": "/usr/bin/docker",
+    "nginx": "/usr/sbin/nginx",
+    "systemctl": "/usr/bin/systemctl",
+    "lsattr": "/usr/bin/lsattr",
+    "chattr": "/usr/bin/chattr",
+    "repquota": "/usr/sbin/repquota",
+    "setquota": "/usr/sbin/setquota",
+  },
+  "defaults": wp_site_defaults,
+  "known": wp_sites,
+  "fit": {
+    "reserved_names": wp_reserved_names,
+    "vm_memory_mb": wp_vm.memory | int,
+    "data_disk_gb": wp_vm.data_disk | int,
+    "ram_reserve_mb": wp_vm_ram_reserve_mb | int,
+    "data_reserve_mb": wp_data_reserve_mb | int,
+    "backup_quota_offset": wp_backup_quota_offset | int,
+    "scratch_quota_id": wp_scratch_quota_id | int,
+    "archive_quota_id": wp_archive_quota_id | int,
+    "intake_quota_id": wp_intake_quota_id | int,
+  },
+  "platform": platform,
+} %}
+# JSON text inside a Python string: true and false are not Python, and a double encoding keeps every value exact.
+CONFIG = json.loads({{ config | tojson | tojson }})
+sys.exit(wp_site_provision.main(CONFIG, sys.argv[1:]))

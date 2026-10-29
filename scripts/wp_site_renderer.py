@@ -18,8 +18,8 @@ import jinja2.meta
 SITE_NAMES = frozenset({"wp_s", "wp_host", "wp_site_dir", "wp_secret_base", "wp_db_password"})
 UNIT_PARAMS = frozenset({"compose_stack_description", "compose_stack_dir", "compose_stack_start_timeout_s", "compose_stack_stop_timeout_s", "compose_stack_reload_service"})
 OPTIONAL = frozenset({"dellwp_wp_resend_key"})                                # read by site_wp-config.php.j2 only inside `mail_mode == 'send'`
-# What the renderer itself reads (host name, paths, the unit's timeouts and the group of wp-config.php), beyond what the templates read.
-OWN_NEEDS = frozenset({"wp_domain", "wp_data_mount", "wp_unit_dir", "wp_vhost_dir", "wp_stack_start_timeout_s", "wp_stack_stop_timeout_s", "wp_php_uid"})
+# What the renderer and the provisioning tool read themselves (host name, paths, the unit's timeouts, the group of wp-config.php, the backup directory and its project id offset), beyond what the templates read.
+OWN_NEEDS = frozenset({"wp_domain", "wp_data_mount", "wp_unit_dir", "wp_vhost_dir", "wp_stack_start_timeout_s", "wp_stack_stop_timeout_s", "wp_php_uid", "wp_backup_dir", "wp_backup_quota_offset"})
 TEMPLATES = ("wp/site_env.j2", "wp/site_wp-config.php.j2", "wp/site_php.ini.j2", "wp/site_fpm_pool.conf.j2", "wp/site_compose.yml.j2", "wp/site_nginx.conf.j2", "compose_stack.service.j2")
 
 

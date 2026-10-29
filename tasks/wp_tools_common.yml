@@ -7,8 +7,8 @@
 # Check mode cannot show: the image pull, or whether a tool works once installed.
 #
 # HOW THE FILES GET THERE. Every task on the VM costs a round trip (1.3 s with pipelining), and this file used to make one per tool, unit and module (44 s of a 66 s run). The tasks named "Stage ..."
-# now render into a temporary directory ON THE CONTROLLER (delegate_to localhost, become false, check_mode false: rendering is harmless and must happen in check mode too), and three
-# synchronize tasks send the staged files with rsync: the tools, the library with the Python modules, and the units. The owner and the modes are rsync options (--chown, --chmod), and each
+# now render into a temporary directory ON THE CONTROLLER (delegate_to localhost, become false, check_mode false: rendering is harmless and must happen in check mode too), and four
+# synchronize tasks send the staged files with rsync: the tools, the library with the Python modules, the site templates, and the units. The owner and the modes are rsync options (--chown, --chmod), and each
 # sync names its files with --files-from, so rsync never touches the destination directory itself (/usr/local/sbin is root:staff and is not ours). Nothing is deleted on the VM.
 
 - name: Pull the WP-CLI image
@@ -58,7 +58,7 @@
     path: "{{ wp_stage.path }}/{{ item }}"
     state: directory
     mode: "0700"
-  loop: [bin, lib, units, lists]
+  loop: [bin, lib, units, lists, tpl, tpl/wp]
   delegate_to: localhost
   become: false
   check_mode: false
@@ -89,6 +89,9 @@
     - wp_site_import.py
     - wp_vulnfeed.py
     - wp_ctl.py
+    - wp_site_model.py
+    - wp_site_renderer.py
+    - wp_site_provision.py
   delegate_to: localhost
   become: false
   check_mode: false
@@ -121,6 +124,7 @@
     - { src: wp_clamav_update.sh.j2, dest: wp-clamav-update }
     - { src: wp_vulnfeed.py.j2, dest: wp-vulnfeed }
     - { src: wp_ctl.py.j2, dest: wp-ctl }
+    - { src: wp_site_provision.py.j2, dest: wp-site-provision }
   loop_control:
     label: "{{ item.dest }}"
   delegate_to: localhost
@@ -131,6 +135,27 @@
   vars:
     wp_update_policies: >-
       {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
+
+# wp-site-provision renders a site's files on the VM, from these templates, with its own Jinja: they are staged with `copy`, not `template`, so they arrive as they are in the repo (the same files the sites
+# play renders with Ansible; tests/test_wp_site_renderer.py proves both give the same text). The names are listed in scripts/wp_site_renderer.py TEMPLATES.
+- name: Stage the site templates the provisioning tool renders
+  ansible.builtin.copy:
+    src: "{{ shared_template_dir }}/{{ item }}"
+    dest: "{{ wp_stage.path }}/tpl/{{ item }}"
+    mode: "0600"
+  loop:
+    - wp/site_env.j2
+    - wp/site_wp-config.php.j2
+    - wp/site_php.ini.j2
+    - wp/site_fpm_pool.conf.j2
+    - wp/site_compose.yml.j2
+    - wp/site_nginx.conf.j2
+    - compose_stack.service.j2
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  diff: false
 
 # The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
 # ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
@@ -284,7 +309,8 @@
   ansible.builtin.find:
     paths: "{{ wp_stage.path }}/{{ item }}"
     file_type: file
-  loop: [bin, lib, units]
+    recurse: true
+  loop: [bin, lib, units, tpl]
   register: wp_staged
   delegate_to: localhost
   become: false
@@ -295,7 +321,7 @@
 - name: Write the lists of the staged files
   ansible.builtin.copy:
     dest: "{{ wp_stage.path }}/lists/{{ item.item }}.list"
-    content: "{{ item.files | map(attribute='path') | map('basename') | sort | join('\n') }}\n"
+    content: "{{ item.files | map(attribute='path') | map('relpath', wp_stage.path ~ '/' ~ item.item) | sort | join('\n') }}\n"
     mode: "0600"
   loop: "{{ wp_staged.results }}"
   loop_control:
@@ -322,6 +348,21 @@
       - "--files-from={{ wp_stage.path }}/lists/lib.list"
       - "--chown=root:root"
       - "--chmod=F0644"
+
+- name: Send the site templates
+  ansible.posix.synchronize:
+    src: "{{ wp_stage.path }}/tpl/"
+    dest: "{{ wp_tools_lib }}/templates/"
+    archive: false
+    checksum: true
+    perms: true
+    owner: true
+    group: true
+    use_ssh_args: true
+    rsync_opts:
+      - "--files-from={{ wp_stage.path }}/lists/tpl.list"
+      - "--chown=root:root"
+      - "--chmod=D0755,F0644"
 
 - name: Send the tools
   ansible.posix.synchronize:
@@ -388,3 +429,41 @@
     name: wp-archive-purge.timer
     enabled: true
     state: started
+
+# The master secret and the provider key on the VM, for wp-site-provision (templates/wp/wp_site_provision.py.j2): the sites' database passwords and salts derive from the master secret, so the tool that makes a
+# site on the VM needs it there. Root only, 0400, in a directory only root enters; the tool refuses a file anyone else can read. The values never appear in a log (no_log) or a diff. The provider key exists only
+# while the vault has one: when it is removed from the vault the file goes, so the VM does not keep a key the repo no longer holds. Check mode shows that the files would change, not what is in them.
+- name: Make the directory of the provisioning secrets
+  ansible.builtin.file:
+    path: "{{ wp_provision_secret_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Write the master secret for wp-site-provision
+  ansible.builtin.copy:
+    dest: "{{ wp_provision_secret_dir }}/master_secret"
+    content: "{{ wp_master_secret }}"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+  diff: false
+
+- name: Write the mail provider key for wp-site-provision
+  ansible.builtin.copy:
+    dest: "{{ wp_provision_secret_dir }}/resend_key"
+    content: "{{ dellwp_wp_resend_key }}"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+  diff: false
+  when: dellwp_wp_resend_key is defined
+
+- name: Take the mail provider key away when the vault has none
+  ansible.builtin.file:
+    path: "{{ wp_provision_secret_dir }}/resend_key"
+    state: absent
+  when: dellwp_wp_resend_key is not defined
