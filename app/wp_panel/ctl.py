@@ -59,7 +59,7 @@ class Ctl:
 
     def command(self):
         """The ssh argument list. No remote command: the key is forced to wp-ctl on dellwp. Nothing is asked of a user, an agent or a terminal, and no forwarding is set up."""
-        return [self.ssh, "-T", "-i", self.key_file,
+        return [self.ssh, "-T", "-F", "/dev/null", "-i", self.key_file,
                 "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no", "-o", "StrictHostKeyChecking=yes",
                 "-o", "UserKnownHostsFile=" + self.known_hosts, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
                 "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR",

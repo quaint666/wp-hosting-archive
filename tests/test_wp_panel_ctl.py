@@ -145,6 +145,7 @@ class Command(unittest.TestCase):
                      "ForwardAgent=no", "ClearAllForwardings=yes", "ConnectTimeout=10"):
             self.assertIn(need, cmd)
         self.assertIn("-T", cmd)
+        self.assertEqual(cmd[cmd.index("-F") + 1], "/dev/null", "no ssh_config of the system or the user is read: every option is on this command line")
         self.assertEqual(cmd[cmd.index("-i") + 1], "/run/secrets/panel_key")
         self.assertNotIn("StrictHostKeyChecking=no", cmd)
         self.assertNotIn("StrictHostKeyChecking=accept-new", cmd)
