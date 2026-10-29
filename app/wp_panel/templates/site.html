@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}{% endblock %}
+{% block body %}
+<h1>{{ name | clip(40) }}</h1>
+<p><a href="{{ url_for('sites') }}">All sites</a></p>
+<h2>What dellwp reports</h2>
+{% if status %}
+<table class="kv">{% for k, v in status.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(300) }}</td></tr>{% endfor %}</table>
+{% else %}<p>Nothing reported for this site.</p>{% endif %}
+<h2>Its registry record</h2>
+{% if registry_error %}<p class="error" role="alert">{{ registry_error | clip(300) }}</p>{% endif %}
+{% if registry %}
+<table class="kv">{% for k, v in registry.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(500) }}</td></tr>{% endfor %}</table>
+{% elif not registry_error %}<p>No record.</p>{% endif %}
+{% endblock %}

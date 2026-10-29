@@ -1,0 +1,11 @@
+# The control app's Python packages, pinned (tests/test_wp_panel*.py run against these; the gate installs them from this file, the image from this file too). Renovate tracks pip requirements.
+# Hashes are not pinned yet (pip --require-hashes): a follow-up before the image is built for real.
+Flask==3.1.3
+Werkzeug==3.1.9
+Jinja2==3.1.6
+MarkupSafe==3.0.2
+itsdangerous==2.2.0
+blinker==1.9.0
+click==8.3.3
+pyotp==2.10.0
+gunicorn==26.2.0

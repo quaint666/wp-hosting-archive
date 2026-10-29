@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block body %}
+<h1>Audit</h1>
+<p>The last {{ lines }} lines of dellwp's audit file, newest last. The file is append-only on dellwp; this page cannot change it.</p>
+{% if rows %}
+<table>
+  <thead><tr><th>Time</th><th>Phase</th><th>Verb</th><th>Site</th><th>Error</th><th>Other</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.get('ts', '') | clip(30) }}</td><td>{{ r.get('phase', '') | clip(20) }}</td><td>{{ r.get('verb', '') | clip(30) }}</td>
+    <td>{{ r.get('site', '') | clip(40) }}</td><td>{{ r.get('error', '') | clip(40) }}</td><td class="small">{{ r.get('rest', '') | clip(300) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p>The audit file is empty.</p>{% endif %}
+{% endblock %}

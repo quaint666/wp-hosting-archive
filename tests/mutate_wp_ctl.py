@@ -10,6 +10,8 @@ there); an entry whose text is no longer in the file is reported as NOT APPLICAB
 
 Last full run 2026-10-28: 76 entries, all caught but two: 33 (the control-character check on text arguments, which every argument pattern already makes redundant: kept as defence in depth) and 61
 (the lock on the job table; the test now uses a slow clock to widen the race window and catches it). Entries added since were run on their own and caught. Not part of CI (it takes minutes).
+Entries 202 onward are the control app's and need Flask: run the harness with the interpreter that has app/requirements.txt installed. 208 (a login code of any shape is looked at) is an EQUIVALENT mutant:
+a code of the wrong shape can never be the right code, so that check is defence in depth and no test can tell it is gone.
 """
 import shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -224,6 +226,45 @@ M = [
  ("the offset range is wider than the dispatcher's", 'app/wp_panel/ctl.py', '_int(0, 2 ** 40)', '_int(0, 2 ** 80)', 'tests/test_wp_panel_ctl.py'),
  ('a switch counts as a number', 'app/wp_panel/ctl.py', 'isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi', 'isinstance(v, int) and lo <= v <= hi', 'tests/test_wp_panel_ctl.py'),
  ('the site pattern lets a double hyphen through', 'app/wp_panel/ctl.py', 'and NAME_RE.fullmatch(v) is not None and "--" not in v', 'and NAME_RE.fullmatch(v) is not None', 'tests/test_wp_panel_ctl.py'),
+ ('the login is never locked', 'app/wp_panel/auth.py', '    if wait:\n        return "locked", wait', '    if False:\n        return "locked", wait', 'tests/test_wp_panel.py'),
+ ('the lock needs five hundred failures', 'app/wp_panel/auth.py', 'max_fails=5,', 'max_fails=500,', 'tests/test_wp_panel.py'),
+ ('old failures never expire', 'app/wp_panel/auth.py', 'if now - t < self.window_s]', 'if True]', 'tests/test_wp_panel.py'),
+ ('a code can be used twice', 'app/wp_panel/auth.py', '            if step <= s["last_step"]:\n                return False', '            if False:\n                return False', 'tests/test_wp_panel.py'),
+ ('a good login does not clear the failures', 'app/wp_panel/auth.py', 's["last_step"], s["fails"], s["locked_until"] = step, [], 0', 's["last_step"], s["fails"], s["locked_until"] = step, s["fails"], s["locked_until"]', 'tests/test_wp_panel.py'),
+ ('a code from five steps away is accepted', 'app/wp_panel/auth.py', 'for step in (base - 1, base, base + 1):', 'for step in range(base - 5, base + 6):', 'tests/test_wp_panel.py'),
+ ('a code of any shape is looked at', 'app/wp_panel/auth.py', 're.fullmatch(r"[0-9]{6}", code)', 're.fullmatch(r".*", code)', 'tests/test_wp_panel.py'),
+ ('the password is not checked', 'app/wp_panel/auth.py', 'pw_ok = check_password_hash(settings.password_hash, pw) and pw != ""', 'pw_ok = True', 'tests/test_wp_panel.py'),
+ ('a wrong login is not counted', 'app/wp_panel/auth.py', '    throttle.record_failure()\n    return "wrong", 0', '    return "wrong", 0', 'tests/test_wp_panel.py'),
+ ('a page needs no login', 'app/wp_panel/app.py', '        if not logged_in():\n            session.clear()', '        if False:\n            session.clear()', 'tests/test_wp_panel.py'),
+ ('the session never ends', 'app/wp_panel/app.py', 'and 0 <= clock() - iat < settings.session_s', 'and True', 'tests/test_wp_panel.py'),
+ ('a true switch counts as a login time', 'app/wp_panel/app.py', 'isinstance(iat, (int, float)) and not isinstance(iat, bool) and ', 'isinstance(iat, (int, float)) and ', 'tests/test_wp_panel.py'),
+ ('the cookie is not Secure', 'app/wp_panel/app.py', 'SESSION_COOKIE_SECURE=True', 'SESSION_COOKIE_SECURE=False', 'tests/test_wp_panel.py'),
+ ('the cookie is not SameSite Strict', 'app/wp_panel/app.py', 'SESSION_COOKIE_SAMESITE="Strict"', 'SESSION_COOKIE_SAMESITE="Lax"', 'tests/test_wp_panel.py'),
+ ('the cookie is readable by a script', 'app/wp_panel/app.py', 'SESSION_COOKIE_HTTPONLY=True', 'SESSION_COOKIE_HTTPONLY=False', 'tests/test_wp_panel.py'),
+ ('a form needs no token', 'app/wp_panel/app.py', '        if not hmac.compare_digest(sent.encode(), csrf_token().encode()):', '        if False:', 'tests/test_wp_panel.py'),
+ ('the token is not renewed at login', 'app/wp_panel/app.py', 'session.update(uid="operator", iat=int(clock()), csrf=secrets.token_urlsafe(32))', 'session.update(uid="operator", iat=int(clock()))', 'tests/test_wp_panel.py'),
+ ('the old session survives a login', 'app/wp_panel/app.py', '            session.clear()                              # a new session', '            pass                              # a new session', 'tests/test_wp_panel.py'),
+ ('a page may be framed', 'app/wp_panel/app.py', '    "X-Frame-Options": "DENY",\n', '', 'tests/test_wp_panel.py'),
+ ('the policy allows anything', 'app/wp_panel/app.py', "default-src 'none'; ", 'default-src *; ', 'tests/test_wp_panel.py'),
+ ('pages are cached', 'app/wp_panel/app.py', '    "Cache-Control": "no-store",\n', '', 'tests/test_wp_panel.py'),
+ ('a big body is read', 'app/wp_panel/app.py', 'MAX_BODY = 16 * 1024 ', 'MAX_BODY = 16 * 1024 * 1024 ', 'tests/test_wp_panel.py'),
+ ('an error page shows the exception', 'app/wp_panel/app.py', 'message="The app hit an error it did not expect.', 'message=str(exc) + " The app hit an error it did not expect.', 'tests/test_wp_panel.py'),
+ ('a locked answer has no wait time', 'app/wp_panel/app.py', '            response.headers["Retry-After"] = str(wait)\n', '', 'tests/test_wp_panel.py'),
+ ('an unknown site is not a 404', 'app/wp_panel/views.py', 'NOT_FOUND = {"unknown_site", "unknown_job"}', 'NOT_FOUND = set()', 'tests/test_wp_panel.py'),
+ ('an unreachable dellwp is not a 503', 'app/wp_panel/views.py', '"unreachable": 503', '"unreachable": 500', 'tests/test_wp_panel.py'),
+ ('the audit asks for too many lines by default', 'app/wp_panel/views.py', 'request.args.get("lines", "50")', 'request.args.get("lines", "500")', 'tests/test_wp_panel.py'),
+ ('the job status is asked before the log', 'app/wp_panel/views.py', '        log = ask("job-log", job=job, offset=offset)          # first: a bad offset or job stops here, before the second question is asked\n        status = ask("job-status", job=job)', '        status = ask("job-status", job=job)\n        log = ask("job-log", job=job, offset=offset)', 'tests/test_wp_panel.py'),
+ ('a short session key is accepted', 'app/wp_panel/config.py', 'if key and len(key) < 32:', 'if False:', 'tests/test_wp_panel.py'),
+ ('a plain password is accepted as the hash', 'app/wp_panel/config.py', 'r"(scrypt|pbkdf2):[^\\s]+"', 'r".+"', 'tests/test_wp_panel.py'),
+ ('a tiny authenticator secret is accepted', 'app/wp_panel/config.py', '{16,128}', '{1,128}', 'tests/test_wp_panel.py'),
+ ('a site name is shown as markup', 'app/wp_panel/templates/sites.html', "{{ r.get('site', '') | clip(40) }}</a>", "{{ r.get('site', '') | clip(40) | safe }}</a>", 'tests/test_wp_panel.py'),
+ ('a job log is shown as markup', 'app/wp_panel/templates/job.html', "{{ log.get('data', '') }}", "{{ log.get('data', '') | safe }}", 'tests/test_wp_panel.py'),
+ ('a record value is shown as markup', 'app/wp_panel/templates/site.html', '<td>{{ v | clip(500) }}</td>', '<td>{{ v | clip(500) | safe }}</td>', 'tests/test_wp_panel.py'),
+ ('a page runs a script', 'app/wp_panel/templates/base.html', '</main>', '</main><script>1</script>', 'tests/test_wp_panel.py'),
+ ('one worker per cpu thread', 'app/gunicorn.conf.py', 'workers = 2 * len(os.sched_getaffinity(0)) + 1', 'workers = len(os.sched_getaffinity(0))', 'tests/test_wp_panel_server.py'),
+ ('a request line of any length', 'app/gunicorn.conf.py', 'limit_request_line = 4094', 'limit_request_line = 40940', 'tests/test_wp_panel_server.py'),
+ ('a header of any size', 'app/gunicorn.conf.py', 'limit_request_field_size = 8190', 'limit_request_field_size = 81900', 'tests/test_wp_panel_server.py'),
+ ('the access log holds cookies', 'app/gunicorn.conf.py', "%(s)s %(b)s %(L)s'", "%(s)s %(b)s %(L)s %({cookie}i)s'", 'tests/test_wp_panel_server.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Sites{% endblock %}
+{% block body %}
+<h1>Sites</h1>
+{% if rows %}
+<table>
+  <thead><tr><th>Site</th><th>Recorded state</th><th>What nginx does</th><th>Unit</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td><a href="{{ url_for('site', name=r.get('site', '')) }}">{{ r.get('site', '') | clip(40) }}</a></td>
+    {% set d = r.get('deployed', '') %}
+    <td><span class="badge {{ 'state-' ~ d if d in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ d | clip(20) }}</span></td>
+    <td>{{ r.get('actual', '') | clip(20) }}</td>
+    <td>{{ r.get('unit', '') | clip(20) }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>There are no sites on dellwp.</p>
+{% endif %}
+{% endblock %}

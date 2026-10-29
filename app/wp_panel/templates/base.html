@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}WordPress hosting{% endblock %} · dellwp</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+</head>
+<body>
+{% if logged_in() %}
+<header class="bar">
+  <strong class="brand">dellwp</strong>
+  <nav>
+    <a href="{{ url_for('sites') }}">Sites</a>
+    <a href="{{ url_for('jobs') }}">Jobs</a>
+    <a href="{{ url_for('audit') }}">Audit</a>
+  </nav>
+  <form method="post" action="{{ url_for('logout') }}" class="logout">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit">Log out</button>
+  </form>
+</header>
+{% endif %}
+<main>
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>
