@@ -223,7 +223,7 @@ class Backup(Base):
         self.assertEqual(self.snapshots(), [])
         self.assertFalse((self.backups / "wptest/.last-success").exists())
 
-    # --- a site with no tables at all: only a FINAL backup, only if it never had a real snapshot
+    # --- a site with no tables at all: a FINAL backup always; the nightly job only if it never had a real snapshot
     EMPTY_DUMP = "-- MariaDB dump\n-- Dump completed on 2026-10-24 20:15:00\n"
 
     def empty_site(self, tables="0"):
@@ -285,19 +285,26 @@ class Backup(Base):
         self.assertIn("no wp_options table", r.stderr)
         self.assertEqual(self.snapshots(), [])
 
-    def test_a_site_that_ever_had_a_real_snapshot_never_gets_an_empty_final_one(self):
+    def test_a_site_that_had_a_real_snapshot_and_lost_its_tables_still_gets_an_empty_final_one(self):
         self.assertEqual(self.backup("20261023T201500Z").returncode, 0)
         self.empty_site()
         r = self.backup("20261024T201500Z", "--tag=final")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("no wp_options table", r.stderr)
-        self.assertEqual(self.snapshots(), ["20261023T201500Z"], "the real backup is untouched")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("an empty final snapshot is taken (empty=yes)", r.stdout)
+        self.assertIn("1 older real snapshot(s) stay on disk", r.stdout)
+        self.assertEqual(self.snapshots(), ["20261023T201500Z", "20261024T201500Z"], "the real backup is untouched")
+
+    def test_an_empty_final_snapshot_of_a_site_with_no_real_ones_does_not_mention_older_ones(self):
+        self.empty_site()
+        r = self.backup("20261024T201500Z", "--tag=final")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("older real", r.stdout)
 
     def test_a_snapshot_without_a_manifest_counts_as_real_so_the_rule_errs_on_keeping_data(self):
         d = self.backups / "wptest/20261023T201500Z"
         (d / "files").mkdir(parents=True); (d / "db.sql.gz").write_text("x")
         self.empty_site()
-        self.assertNotEqual(self.backup("20261024T201500Z", "--tag=final").returncode, 0)
+        self.assertNotEqual(self.backup("20261024T201500Z").returncode, 0)
 
     def test_an_earlier_empty_snapshot_does_not_count_as_real(self):
         self.empty_site()

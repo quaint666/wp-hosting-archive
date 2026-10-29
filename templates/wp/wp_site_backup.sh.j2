@@ -56,16 +56,18 @@ gzip -t "$partial/db.sql.gz" || die "the dump fails gzip's integrity check"
 case "$(gzip -dc "$partial/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the dump has no completion marker (truncated?)" ;; esac
 empty=no
 if [ "$(gzip -dc "$partial/db.sql.gz" | grep -c '^CREATE TABLE `wp_options`' || true)" -ne 1 ]; then
-  # A database with no tables at all is accepted in ONE case (the FINAL backup is taken as an empty snapshot, the nightly one is skipped as a success): a site that has never had a real snapshot (a site created empty, or reset after an import was turned down). Nothing is
-  # being replaced, so nothing can be lost, and without this such a site could not be stopped and so never deleted. Every other case keeps the refusal: a nightly backup of an emptied database would
+  # A database with no tables at all is accepted in TWO cases. The FINAL backup is taken as an empty snapshot even when older real snapshots exist (a site left half-imported, or reset after an import was turned down, must still be
+  # stoppable, and a stop prunes nothing but older finals; NOTE wp-site-delete archives only the newest final and removes the rest, so delete such a site only after restoring or keeping what you need).
+  # The nightly one is skipped as a success on a site that has never had a real snapshot. Every other case keeps the refusal: a nightly backup of an emptied database would
   # rotate the real backups out, and "tables but no wp_options" is damage, not emptiness. The snapshot says empty=yes in its MANIFEST.
   tables=$(table_count "$site") || die "could not count the tables of $site"
   real=0
   while read -r s_; do grep -qx 'empty=yes' "$dest/$s_/MANIFEST" 2>/dev/null || real=$((real + 1)); done \
     < <(find "$dest" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n')
-  if [ "$tables" = 0 ] && [ "$real" = 0 ] && { [ -z "$tag" ] || [ "$tag" = final ]; }; then
+  if [ "$tables" = 0 ] && { [ "$tag" = final ] || { [ "$real" = 0 ] && [ -z "$tag" ]; }; }; then
     if [ "$tag" = final ]; then
-      empty=yes; echo "note: $site has no tables and has never had a real backup: an empty final snapshot is taken (empty=yes)"
+      empty=yes; echo "note: $site has no tables: an empty final snapshot is taken (empty=yes)"
+      [ "$real" = 0 ] || echo "note: $real older real snapshot(s) stay on disk, but deleting the site archives only this final one"
     else
       # The nightly job on a site that is waiting for an import: nothing exists to lose and nothing to rotate out, so it is not a failure. (An emptied database of a site that HAS real backups is
       # still refused below, and the alert stands.)
