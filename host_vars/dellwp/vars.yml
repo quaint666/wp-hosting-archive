@@ -1,5 +1,9 @@
 ---
 # host_vars/dellwp/vars.yml: values of the WordPress VM that more than one play needs (the secrets are in vault_wp.yml).
+# The control app's VM may open ssh here, and only that (the key it logs in with is forced to the wp-ctl dispatcher: tasks/wp_ctl_common.yml). The hub, the AOpen, the Dell and this VM name it:
+# four layers that must agree (templates/nftables/_vm_input.j2).
+vm_nft_extra_tcp:
+  - { src: "{{ hostvars['aopenpanel']['overlay_ip'] }}", ports: [22], comment: "ssh: the control app on aopenpanel (wp-ctl, forced command)" }
 # The loopback port the catch-all and every site's vhost listen on. terraform/cloudflare/main.tf (wp_origin) must match it: Terraform cannot read this file.
 wp_nginx_listen_port: 8080
 # A second loopback port on every vhost, for the update job's health probe: the same server block, so the probe exercises the same rules a visitor meets, but the maintenance flag

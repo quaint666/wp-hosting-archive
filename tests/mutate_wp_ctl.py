@@ -17,7 +17,7 @@ import shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp", "app"]
+KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp", "app", "opnsense", "hp705g4", "aopenvms"]
 W = "scripts/wp_ctl.py"
 M = [
  ("a site need not exist", W, 'if not NAME_RE.fullmatch(value) or value not in known_sites(ctl.cfg):', 'if not NAME_RE.fullmatch(value):'),
@@ -303,6 +303,24 @@ M = [
  ('a file open to others is read', 'scripts/wp_panel_credentials.py', '    if path.stat().st_mode & 0o077:', '    if False:', 'tests/test_wp_panel_credentials.py'),
  ('the salt is eight characters', 'scripts/wp_panel_credentials.py', 'for _ in range(16))', 'for _ in range(8))', 'tests/test_wp_panel_credentials.py'),
  ('a linked file is read', 'scripts/wp_panel_credentials.py', '    if not path.is_file() or path.is_symlink():', '    if not path.is_file():', 'tests/test_wp_panel_credentials.py'),
+ ('the panel VM gets the free address', 'inventory.yml', '      overlay_ip: 10.8.0.68\n', '      overlay_ip: 10.8.0.69\n', 'tests/test_wp_panel_network.py'),
+ ("the panel VM takes the watcher's id", 'host_vars/aopen/vars.yml', '    vmid: 304\n', '    vmid: 303\n', 'tests/test_wp_panel_network.py'),
+ ('the panel VM is given four gigabytes', 'host_vars/aopen/vars.yml', '    memory: 2048\n    cores: 2\n    disk: 15\n', '    memory: 4096\n    cores: 2\n    disk: 15\n', 'tests/test_wp_panel_network.py'),
+ ('the whole AOpen block may reach dellwp', 'opnsense/wireguard_hub_rules.yml', 'name: "aopen control app to dellwp: ssh (wp-ctl)", src: "{{ hub_aopen_panel_vm }}"', 'name: "aopen control app to dellwp: ssh (wp-ctl)", src: "{{ hub_aopen_vm_net }}"', 'tests/test_wp_panel_network.py'),
+ ('the hub rule comes after the block', 'opnsense/wireguard_hub_rules.yml', '{ seq: 60, name: "aopen control app', '{ seq: 95, name: "aopen control app', 'tests/test_wp_panel_network.py'),
+ ("the AOpen's bridge may start more than ssh to dellwp", 'host_vars/aopen/vars.yml', '    - { dest: "{{ hostvars[\'dellwp\'][\'overlay_ip\'] }}", proto: tcp, ports: [22] }', '    - { dest: "{{ hostvars[\'dellwp\'][\'overlay_ip\'] }}", proto: tcp, ports: [22, 8080] }', 'tests/test_wp_panel_network.py'),
+ ('the Dell lets the panel into the apps bridge too', 'host_vars/delloptiplex3040/vars.yml', 'proto: tcp, ports: [22], bridges: [vmbr2] }\n', 'proto: tcp, ports: [22], bridges: [vmbr1, vmbr2] }\n', 'tests/test_wp_panel_network.py'),
+ ('dellwp opens more than ssh to the panel', 'host_vars/dellwp/vars.yml', 'ports: [22], comment: "ssh: the control app', 'ports: [22, 80], comment: "ssh: the control app', 'tests/test_wp_panel_network.py'),
+ ('the control node cannot reach the page at the host', 'host_vars/aopen/vars.yml', 'ports: [22, 443, "{{ ports.pbs }}"]', 'ports: [22, "{{ ports.pbs }}"]', 'tests/test_wp_panel_network.py'),
+ ("the HP may reach 443 on the AOpen's VMs", 'host_vars/aopen/vars.yml', 'ports: [22, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'ports: [22, 443, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'tests/test_wp_panel_network.py'),
+ ('the whole overlay may open the page', 'host_vars/aopenpanel/vars.yml', 'src: "{{ wg_control_node_overlay_ip }}", ports: [443]', 'src: "{{ overlay_cidr }}", ports: [443]', 'tests/test_wp_panel_network.py'),
+ ("the page's name is another service's", 'group_vars/all/services.yml', 'lab_domain: "wp-panel.lab.example.com"', 'lab_domain: "grafana.lab.example.com"', 'tests/test_wp_panel_network.py'),
+ ('the renewal hook skips the panel', 'hp705g4/certbot_timer_setup_hp705g4.yml', '      - "{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"\n', '', 'tests/test_wp_panel_network.py'),
+ ('the private key is world readable', 'aopenvms/deploy_le_cert_aopenpanel.yml', 'mode: "0640"', 'mode: "0644"', 'tests/test_wp_panel_network.py'),
+ ('the private key is logged', 'aopenvms/deploy_le_cert_aopenpanel.yml', '      no_log: true\n      diff: false\n', '      diff: false\n', 'tests/test_wp_panel_network.py'),
+ ('prometheus does not label the panel', 'hp705g4/prometheus_hp705g4.yml', '                    host: aopenpanel\n', '                    host: aopenpanelx\n', 'tests/test_wp_panel_network.py'),
+ ('docker is not installed on the panel', 'aopenvms/docker_setup_aopenvms.yml', '  hosts: aopendrill,aopenwatch,aopenpanel\n', '  hosts: aopendrill,aopenwatch\n', 'tests/test_wp_panel_network.py'),
+ ("the hp does not trust the panel's host key", 'hp705g4/cert_orchestration_key_setup_hp705g4.yml', '    - name: Ensure the control app VM\'s host key is trusted (root)\n      ansible.builtin.lineinfile:\n        path: /root/.ssh/known_hosts\n        regexp: "^{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] | regex_escape() }} "\n', '    - name: Ensure the control app VM\'s host key is trusted (root)\n      ansible.builtin.lineinfile:\n        path: /root/.ssh/known_hosts_unused\n        regexp: "^{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] | regex_escape() }} "\n', 'tests/test_wp_panel_network.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
@@ -311,6 +329,7 @@ with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
     root.mkdir()
     for d in KEEP:
         shutil.copytree(REPO / d, root / d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy(REPO / "inventory.yml", root / "inventory.yml")
     for i, (label, rel, old, new, *suite) in enumerate(M):
         if only and str(i) not in only:
             continue
