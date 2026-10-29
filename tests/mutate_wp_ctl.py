@@ -45,7 +45,7 @@ M = [
  ("a failing tool exits 0", W, 'return 0 if reply.get("ok") else (1 if reply.get("ran") else 2)', 'return 0'),
  ("a refusal exits 1", W, 'return 0 if reply.get("ok") else (1 if reply.get("ran") else 2)', 'return 0 if reply.get("ok") else 1'),
  ("reserved names allowed", W, '    if name in cfg["reserved_names"]:', '    if False:'),
- ("closed names reusable", W, '    if name in cfg["closed_sites"]:', '    if False:'),
+ ("closed names reusable", W, '    if name in closed_names(cfg):', '    if False:'),
  ("a linked directory counts as a site", W, 'if e.is_dir(follow_symlinks=False) and NAME_RE.fullmatch(e.name) and os.path.isfile', 'if e.is_dir() and NAME_RE.fullmatch(e.name) and os.path.isfile'),
  ("a record is trusted without a valid directory name", W, 'if e.is_dir(follow_symlinks=False) and NAME_RE.fullmatch(e.name) and os.path.isfile', 'if e.is_dir(follow_symlinks=False) and os.path.isfile'),
  ("JSON flags may be text", W, '            if not isinstance(value, bool):\n                raise Refuse("bad_type", "%s must be true or false" % key)', '            if False:\n                raise Refuse("bad_type", "%s must be true or false" % key)'),
@@ -141,6 +141,19 @@ M = [
  ("an unchanged value is written and applied again", "scripts/wp_site_provision.py", '            if new == rec:\n', '            if False:\n', "tests/test_wp_site_provision.py"),
  ("the templates are not rendered before the write", "scripts/wp_site_provision.py", '                self.files(model.merged(self.defaults, new))\n            if before:', '                pass\n            if before:', "tests/test_wp_site_provision.py"),
  ("the record is written before the final backup", "scripts/wp_site_provision.py", '            if before:\n                before(rec)\n            self.registry.write_site(new)', '            self.registry.write_site(new)\n            if before:\n                before(rec)', "tests/test_wp_site_provision.py"),
+ # step 3b: close, the tombstone check and the delete hook
+ ("the registry's tombstones are not read", W, '                    found.add(e.name[:-5])\n', '                    pass\n'),
+ ("a linked tombstone counts", W, 'if e.is_file(follow_symlinks=False) and e.name.endswith(".json")', 'if e.is_file() and e.name.endswith(".json")'),
+ ("the repo's closed list is forgotten", W, '    found = set(cfg["closed_sites"])\n    try:\n        with os.scandir(cfg["tombstones_dir"])', '    found = set()\n    try:\n        with os.scandir(cfg["tombstones_dir"])'),
+ ("a tombstone name is not checked", W, 'and NAME_RE.fullmatch(e.name[:-5]):', 'and True:'),
+ ("wrapper: no tombstone directory", "templates/wp/wp_ctl.py.j2", '    "tombstones_dir": "{{ wp_data_mount }}/tombstones",\n', ''),
+ ("close keeps the record", "scripts/wp_site_provision.py", '            self.registry.site_file(name).unlink()\n', '', "tests/test_wp_site_provision.py"),
+ ("close writes no tombstone", "scripts/wp_site_provision.py", '            self.registry.write_tombstone(rec)\n            self.registry.site_file(name).unlink()', '            self.registry.site_file(name).unlink()', "tests/test_wp_site_provision.py"),
+ ("closing twice is an error", "scripts/wp_site_provision.py", 'if tomb.is_file() and not tomb.is_symlink():', 'if False:', "tests/test_wp_site_provision.py"),
+ ("delete never closes the registry", "templates/wp/wp_site_delete.sh.j2", '"$PROVISION" close "$site" </dev/null || die', 'true || die', "tests/test_wp_delete.py"),
+ ("a failed close does not stop the delete", "templates/wp/wp_site_delete.sh.j2", '|| die "the registry could not close', '|| echo "the registry could not close', "tests/test_wp_delete.py"),
+ ("a linked record counts", "templates/wp/wp_site_delete.sh.j2", ' && [ ! -L "$dir/site.json" ]; then\n  "$PROVISION"', '; then\n  "$PROVISION"', "tests/test_wp_delete.py"),
+ ("a site with no record is asked of the registry", "templates/wp/wp_site_delete.sh.j2", 'if [ -f "$dir/site.json" ] && [ ! -L', 'if [ ! -L', "tests/test_wp_delete.py"),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

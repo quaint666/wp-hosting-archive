@@ -80,7 +80,7 @@ class Base(unittest.TestCase):
         self.script("logger", LOGGER)
         self.t = time.time()
         self.audit_file = self.tmp / "log" / "audit.jsonl"
-        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tools_bin": str(self.bin), "path": "/usr/bin:/bin",
+        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tombstones_dir": str(self.tmp / "tombstones"), "tools_bin": str(self.bin), "path": "/usr/bin:/bin",
                     "logger": str(self.bin / "logger"), "systemd_run": str(self.bin / "systemd-run"), "panel_user": "wpctl", "job_keep_days": 14, "max_request_bytes": 65536,
                     "limits": LIMITS, "reserved_names": ["hub", "mail", "bloomy"], "closed_sites": ["oldsite"], "sites": ["wptest", "held"]}
         self.env = {"SUDO_USER": "wpctl", "LEAK_ME": "must-not-reach-the-tools", "SUDO_COMMAND": "/usr/local/sbin/wp-ctl"}
@@ -894,6 +894,25 @@ class Provisioning(Base):
                 self.assertEqual((rc, reply["error"]), (2, code))
         self.assertEqual((self.calls(), self.jobs()), ([], []))
 
+    def test_a_name_closed_in_the_registry_is_never_reused_and_odd_files_in_the_tombstone_directory_are_ignored(self):
+        tomb = self.tmp / "tombstones"
+        tomb.mkdir()
+        (tomb / "gone.json").write_text("{}")
+        (tomb / "Bad_Name.json").write_text("{}")
+        (tomb / "notes.txt").write_text("x")
+        (tomb / "linked.json").symlink_to(tomb / "gone.json")
+        (tomb / "dir.json").mkdir()
+        self.assertEqual(wp_ctl.closed_names(self.cfg), {"oldsite", "gone"}, "the repo's list and the registry's tombstones; a link, a directory, a bad name and other files do not count")
+        for verb in ({"verb": "create", "name": "gone"}, {"verb": "check-name", "name": "gone"}):
+            rc, reply = self.call(verb)
+            self.assertEqual((rc, reply["error"]), (2, "name_was_used"), verb)
+        self.assertEqual(self.call({"verb": "check-name", "name": "linked"})[0], 0, "a link is not a tombstone")
+        self.assertEqual((self.calls(), self.jobs()), ([], []))
+
+    def test_a_missing_tombstone_directory_is_no_tombstones(self):
+        self.assertEqual(wp_ctl.closed_names(self.cfg), {"oldsite"})
+        self.assertEqual(self.call({"verb": "create", "name": "fresh"})[0], 0)
+
     def test_a_label_of_one_or_a_hundred_characters_is_accepted(self):
         for n, label in enumerate(("x", "y" * 100, "two words")):
             rc, reply = self.call({"verb": "create", "name": "fresh%d" % n, "label": label})
@@ -1106,7 +1125,8 @@ class Wrapper(Base):
             self.assertEqual(cfg[key], v[var], key)
         wp_ctl.check_limits(cfg, wp_ctl.VERBS)       # the repo's own table passes the dispatcher's check: every verb named exists and every job and the upload have a timeout of their own
         self.assertEqual(cfg["data_dir"], v["wp_data_mount"] + "/sites")
-        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tools_bin", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
+        self.assertEqual(cfg["tombstones_dir"], v["wp_data_mount"] + "/tombstones", "the directory wp-site-provision close writes to")
+        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tombstones_dir", "tools_bin", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
                   "reserved_names", "closed_sites", "sites"}
         self.assertEqual(set(cfg), needed, "every key the dispatcher reads, and no stray one")
 

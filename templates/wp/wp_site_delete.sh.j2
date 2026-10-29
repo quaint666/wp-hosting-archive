@@ -11,10 +11,13 @@
 # after it, or the vhost is put back and the tool stops), the site's directory and its backups, and the limits of its two quota projects. The archive is
 # {{ wp_archive_dir }}/<site>-<snapshot stamp>/ with db.sql.gz, wp-content.tar.gz and a MANIFEST that says when it expires; wp-archive-purge removes it then. Run again after an interruption it resumes:
 # an archive that is already there and verifies is used, and every removal tolerates what is already gone. The Proxmox backups of the whole VM keep older copies for months and cannot be purged per site.
-# After this the repo must say the site is closed (state: closed; scripts/wp_sites.py delete does it): the play then keeps the tombstone clean.
+# After this the repo must say the site is closed (state: closed; scripts/wp_sites.py delete does it): the play then keeps the tombstone clean. A site that has a registry record
+# (<dir>/site.json, made by wp-site-provision) leaves its tombstone in the registry instead: `wp-site-provision close` runs after the archive is verified and before anything is removed,
+# so the name, the port and the quota id are never given out again. Nothing in the repo needs to change for such a site.
 set -eu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
+readonly PROVISION='{{ wp_tools_bin }}/wp-site-provision'
 readonly ARCHIVE='{{ wp_archive_dir }}'
 readonly KEEP_DAYS='{{ wp_archive_keep_days }}'
 readonly UNIT_DIR='{{ wp_unit_dir }}'
@@ -107,6 +110,10 @@ if [ "$resume" = no ]; then
 fi
 
 # --- 3. the removal. Every step tolerates what is already gone, so an interrupted run can be run again.
+# A site with a registry record is closed in the registry first: from here on its name, port and quota id are taken for good, whatever happens to the rest.
+if [ -f "$dir/site.json" ] && [ ! -L "$dir/site.json" ]; then
+  "$PROVISION" close "$site" </dev/null || die "the registry could not close $site (see above); the archive $final is complete and nothing was removed. Run this again"
+fi
 log "removing the site"
 for t in cron backup update; do systemctl disable --now "wp-$t@$site.timer" </dev/null >/dev/null 2>&1 || true; done
 systemctl disable --now "$unit" </dev/null >/dev/null 2>&1 || true

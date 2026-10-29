@@ -192,6 +192,19 @@ def known_sites(cfg):
     return found
 
 
+def closed_names(cfg):
+    """Names that were closed: the repo's list and the registry's tombstones, <tombstones_dir>/<name>.json (a name is never reused, wherever it was closed)."""
+    found = set(cfg["closed_sites"])
+    try:
+        with os.scandir(cfg["tombstones_dir"]) as it:
+            for e in it:
+                if e.is_file(follow_symlinks=False) and e.name.endswith(".json") and NAME_RE.fullmatch(e.name[:-5]):
+                    found.add(e.name[:-5])
+    except OSError:
+        pass
+    return found
+
+
 def target(args):
     """The site a request is about: the existing site it names, or for a verb that makes one the name it proposes."""
     return args.get("site") or args.get("name")
@@ -205,7 +218,7 @@ def check_new_name(cfg, name):
         raise Refuse("reserved_name", "%s is already used under the domain by something else" % name)
     if name in known_sites(cfg):
         raise Refuse("name_taken", "there is a site called %s" % name)
-    if name in cfg["closed_sites"]:
+    if name in closed_names(cfg):
         raise Refuse("name_was_used", "a closed site was called %s and its name is never reused" % name)
 
 

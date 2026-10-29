@@ -38,6 +38,12 @@ if [ -f "$SHIM/tar_corrupt" ] && [ "$3" = -czf ]; then truncate -s 20 "$4"; fi
 exit $rc
 """
 STAMP = "20261024T150001Z"
+# wp-site-provision close: logs what stood at the moment it was called (is the archive complete, is anything removed yet) and can be made to fail
+PROVISION = '''#!/bin/bash
+echo "provision $* archive=$([ -f "$ARCHIVE_DIR/wptest-%s/MANIFEST" ] && echo complete || echo no) site=$([ -d "$SITE_DIR" ] && echo present || echo gone) vhost=$([ -e "$VHOST_DIR/wp_site_wptest.conf" ] && echo present || echo gone)" >> "$SHIM/calls"
+[ -f "$SHIM/provision_fail" ] && { echo "the registry is unreadable" >&2; exit 1; }
+exit 0
+''' % "20261024T150001Z"
 
 
 class Delete(Base):
@@ -47,7 +53,9 @@ class Delete(Base):
         self.archive = self.data / "archive"; self.archive.mkdir()
         self.units = self.tmp / "units"; self.units.mkdir()
         self.vhosts = self.tmp / "vhosts"; self.vhosts.mkdir()
-        self.env.update(ARCHIVE_DIR=str(self.archive), VHOST_DIR=str(self.vhosts))
+        self.env.update(ARCHIVE_DIR=str(self.archive), VHOST_DIR=str(self.vhosts), SITE_DIR=str(self.site))
+        provision = self.tmp / "bin" / "wp-site-provision"
+        provision.write_text(PROVISION); provision.chmod(0o755)
         for name, body in (("systemctl", SYSTEMCTL), ("docker", DOCKER), ("nginx", NGINX), ("setquota", SETQUOTA), ("lsattr", LSATTR), ("gzip", GZIP), ("tar", TAR),
                            ("logger", '#!/bin/bash\necho "$*" >> "$SHIM/logger.log"\n')):
             self.shim(name, body)
@@ -154,6 +162,60 @@ class Delete(Base):
             self.assertTrue(p.exists(), "%s belongs to another site" % p)
         self.assertIn("ntfy", "ntfy" if self.log("ntfy.log") else ""); self.assertEqual(len(self.log("ntfy.log").splitlines()), 1); self.assertIn(str(f), self.log("ntfy.log"))
         self.assertIn("site=wptest", self.log("logger.log"))
+
+    def registered(self):
+        (self.site / "site.json").write_text("{}")
+
+    def test_a_site_with_a_registry_record_is_closed_there_after_the_archive_is_complete_and_before_anything_is_removed(self):
+        self.registered()
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.calls()
+        closes = [c for c in calls if c.startswith("provision ")]
+        self.assertEqual(closes, ["provision close wptest archive=complete site=present vhost=present"], "once, with the archive verified and the site still whole")
+        self.assertLess(calls.index(closes[0]), min(i for i, c in enumerate(calls) if c.startswith(("systemctl", "docker rm", "nginx", "setquota"))), "before the first removal")
+        self.assertFalse(self.site.exists())
+
+    def test_a_site_without_a_record_is_deleted_the_old_way_and_the_registry_is_not_asked(self):
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [])
+
+    def test_a_record_that_is_a_link_is_not_a_record(self):
+        elsewhere = self.tmp / "elsewhere.json"
+        elsewhere.write_text("{}")
+        (self.site / "site.json").symlink_to(elsewhere)
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [])
+        self.assertTrue(elsewhere.exists(), "the link was not followed")
+
+    def test_a_registry_that_cannot_close_the_site_stops_the_delete_before_anything_is_removed_and_a_rerun_finishes_it(self):
+        self.registered()
+        self.put("provision_fail", "")
+        r = self.delete()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("the registry could not close wptest", r.stderr)
+        self.assertIn("the registry is unreadable", r.stderr)
+        self.assertTrue(self.final().is_dir() and (self.final() / "MANIFEST").exists(), "the archive is complete")
+        for p in (self.site, self.bk, self.vhost, self.unit, self.site / "stopped.flag"):
+            self.assertTrue(p.exists(), "%s was removed although the registry did not close the site" % p)
+        self.assertEqual([c for c in self.calls() if c.startswith(("systemctl", "docker rm", "nginx", "setquota"))], [], "nothing was asked of the host")
+        (self.tmp / "shim" / "provision_fail").unlink()
+        self.tty.write_text("wptest\n")
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.site.exists())
+
+    def test_the_resumption_of_a_delete_does_not_close_the_site_again(self):
+        self.registered()
+        self.delete()
+        self.vhost.write_text("server { }\n"); self.unit.write_text("[Unit]\n")
+        self.tty.write_text("")
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("finishing the clean-up", r.stdout)
+        self.assertEqual(len([c for c in self.calls() if c.startswith("provision ")]), 1)
 
     def test_the_archive_is_complete_before_the_first_thing_is_removed_and_nginx_is_checked_before_it_reloads(self):
         self.delete()

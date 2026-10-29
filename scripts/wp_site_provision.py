@@ -5,6 +5,7 @@
     wp-site-provision apply  <name>                         make the VM match the site's record; safe to run again, and the way to finish a create that stopped half-way
     wp-site-provision set    <name> key=value [...]         change editable fields of the record and apply them (label and note are only recorded)
     wp-site-provision state  <name> hold|live|stopped       move the site to that state (model.plan_state: the moves that exist); the final backup is taken before it stops
+    wp-site-provision close  <name>                         leave the site's tombstone and remove its record (wp-site-delete does this before it removes the site's files; safe to repeat)
     wp-site-provision render <name> [--diff]                compare what the templates give today with the files on the VM (read-only; a secret file is compared by hash, never shown)
 
 The logic of tasks/wp_site_one_common.yml, step for step and in its order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
@@ -234,6 +235,27 @@ class Provisioner:
                 self.out("taking the final backup of %s" % name)
                 self.cmd("backup", name, "--tag=final", timeout=self.cfg["backup_timeout_s"])
         return self.change(name, {"state": target}, check=check, before=backup)
+
+    def close(self, name):
+        """Leave the site's tombstone and remove its record, so its name, port and quota id are never given out again. wp-site-delete calls this after its archive is verified and before it removes
+        anything. The tombstone is written first (atomically) and the record removed second; if that is interrupted between the two, the registry reports the site as broken until this runs again, and
+        running it again finishes it. A site with no record and a tombstone is already closed."""
+        if not model.NAME_RE.fullmatch(name):
+            raise model.Refuse("'%s' is not a site name" % name)
+        with self.lock("registry"), self.lock("site-" + name):
+            try:
+                rec = self.registry.read_site(name)
+            except model.RegistryError as e:
+                raise Failed(str(e))
+            if rec is None:
+                tomb = self.registry.tombstone_file(name)
+                if tomb.is_file() and not tomb.is_symlink():
+                    self.out("%s is already closed; nothing changed" % name)
+                    return
+                raise model.Refuse("%s has no site record and no tombstone" % name)
+            self.registry.write_tombstone(rec)
+            self.registry.site_file(name).unlink()
+            self.out("closed %s: its tombstone is %s" % (name, self.registry.tombstone_file(name)))
 
     # ---------------------------------------------------------------------------------------------------------------------------------- apply
     def apply(self, name):
@@ -488,6 +510,8 @@ def main(cfg, argv, out=print, err=None, **kw):
     sw = sub.add_parser("state")
     sw.add_argument("name")
     sw.add_argument("target", choices=("hold", "live", "stopped"))
+    cl = sub.add_parser("close")
+    cl.add_argument("name")
     r = sub.add_parser("render")
     r.add_argument("name")
     r.add_argument("--diff", action="store_true")
@@ -506,6 +530,8 @@ def main(cfg, argv, out=print, err=None, **kw):
             prov.set(args.name, args.pairs)
         elif args.verb == "state":
             prov.state(args.name, args.target)
+        elif args.verb == "close":
+            prov.close(args.name)
         else:
             rows, text = prov.render(args.name, args.diff)
             for path, status in rows:
