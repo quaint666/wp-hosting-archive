@@ -255,13 +255,17 @@ class Ctl:
                     p.stdin.write(chunk)
                     digest.update(chunk)
                     sent += len(chunk)
-                p.stdin.close()
             except BrokenPipeError:
                 pass                                                          # dellwp stopped reading (a refusal): its answer says why
             except BaseException:
                 p.kill()
                 p.wait()
                 raise
+            try:
+                p.stdin.close()
+            except (OSError, ValueError):
+                pass
+            p.stdin = None                                                    # before Python 3.13 communicate() flushes a stdin that is already closed and raises ValueError
             out, err = p.communicate()
         finally:
             timer.cancel()

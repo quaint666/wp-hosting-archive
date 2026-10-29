@@ -639,6 +639,20 @@ class Stream(unittest.TestCase):
             self.client().stream("import-receive", gen(), popen=spy, file="a1.wpress")
         self.assertIsNotNone(seen[0].poll(), "the process was stopped and waited for, not left running")
 
+    def test_it_works_where_communicate_refuses_a_stdin_that_is_closed(self):
+        """Python before 3.13 raises ValueError('flush of closed file') when communicate() is given a Popen whose stdin the caller closed (the CI runner has 3.12). The client must not leave it closed."""
+        class Strict(subprocess.Popen):
+            def communicate(self, *a, **kw):
+                if self.stdin is not None and self.stdin.closed:
+                    raise ValueError("flush of closed file")
+                return super().communicate(*a, **kw)
+        got = self.client().stream("import-receive", iter([b"abc" * 100]), popen=Strict, file="a1.wpress")
+        self.assertEqual(got["bytes"], 300)
+        self.mode("refuse")
+        with self.assertRaises(ctl.CtlError) as cm:
+            self.client().stream("import-receive", (b"x" * 65536 for _ in range(400)), popen=Strict, file="a1.wpress")
+        self.assertEqual(cm.exception.kind, "refused")
+
     def test_a_stalled_ssh_is_stopped_after_the_time_limit(self):
         self.mode("hang")
         old = ctl.STREAM_TIMEOUT_S
