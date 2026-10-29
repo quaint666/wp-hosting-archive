@@ -7,8 +7,8 @@
 #   3. refuse   a second create of the same name, a reserved name and an apply of a site that does not exist are refused (exit status 2) and change nothing
 #   4. install  `wp-ctl install`: WordPress into that site with a password you type here (hidden; only its length is shown). The password must be in no audit line, journal, job file or reply on the VM
 #   5. apply    `wp-ctl apply` on the finished site changes nothing
-# The site made in 2 stays on dellwp, on hold, because the verbs that stop and delete a registry-only site arrive with the next batch (a delete needs it stopped, with a final backup); until then it is
-# used by nothing, and the next batch's rehearsal deletes it. The parity site is deleted by step 1 and its tombstone stays in vars.yml for good (a name is never reused). Both names are used up.
+# The site made in 2 stays on dellwp, on hold, with WordPress in it: scripts/wp_state_rehearsal_dellwp.sh changes its settings and state and deletes it (a delete needs it stopped, with a final backup); until
+# then it is used by nothing. The parity site is deleted by step 1 and its tombstone stays in vars.yml for good (a name is never reused). Both names are used up.
 # Step 1 makes real commits to host_vars/dellwp/vars.yml on your current branch, which must not be main. Options:  --parity-site NAME (default parity1)  --site NAME (default provtest1)
 # --skip-parity (steps 2 to 5 only)  --yes (do not ask before starting)
 # It stops at the first step that fails badly. What it does not prove: the tool's behaviour with a site that has data, a state change (the next batch), anything the control app does, or that two creates
