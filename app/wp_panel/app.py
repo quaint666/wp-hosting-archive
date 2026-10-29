@@ -33,6 +33,23 @@ def create_app(settings, ctl, clock=time.time):
     app.extensions["panel_ctl"] = ctl
     app.extensions["panel_clock"] = clock
     throttle = auth.Throttle(settings.state_dir, clock)
+    def ago(then):
+        """'3 h ago' for a Unix time; anything that is not a time is shown as a dash."""
+        if not isinstance(then, (int, float)) or isinstance(then, bool):
+            return "-"
+        seconds = max(0, int(clock() - then))
+        for size, unit in ((86400, "d"), (3600, "h"), (60, "min")):
+            if seconds >= size:
+                return "%d %s ago" % (seconds // size, unit)
+        return "just now"
+
+    def megabytes(n):
+        if not isinstance(n, (int, float)) or isinstance(n, bool) or n < 0:
+            return "-"
+        return "%.1f MB" % (n / 1048576) if n >= 1048576 else "%d KB" % max(1, round(n / 1024)) if n else "0"
+
+    app.jinja_env.filters["ago"] = ago
+    app.jinja_env.filters["megabytes"] = megabytes
     app.jinja_env.filters["clip"] = lambda value, n=300: (str(value)[:n] + "…") if len(str(value)) > n else str(value)
 
     def csrf_token():

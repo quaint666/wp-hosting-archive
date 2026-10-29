@@ -5,6 +5,18 @@
   <div><h1>Sites</h1><p class="small">What dellwp reports for every site it hosts.</p></div>
   <a class="button" href="{{ url_for('new_site') }}">New site</a>
 </div>
+{% if waiting %}
+<div class="notice" role="status">
+  <strong>{{ waiting | length }} import{{ 's' if waiting | length != 1 }} waiting for your decision:</strong>
+  {% for i in waiting %}<a href="{{ url_for('import_site', name=i.get('site', '')) }}">{{ i.get('site', '') | clip(40) }}</a>{% if i.get('problems') %} <span class="badge bad">not clean</span>{% else %} <span class="badge ok">clean</span>{% endif %}{{ ', ' if not loop.last }}{% endfor %}
+</div>
+{% endif %}
+{% if unfinished %}
+<div class="notice" role="status">
+  <strong>Unfinished import{{ 's' if unfinished | length != 1 }}:</strong>
+  {% for i in unfinished %}<a href="{{ url_for('import_site', name=i.get('site', '')) }}">{{ i.get('site', '') | clip(40) }}</a>{{ ', ' if not loop.last }}{% endfor %}: reset them and start again.
+</div>
+{% endif %}
 {% if rows %}
 <div class="table-wrap">
 <table>

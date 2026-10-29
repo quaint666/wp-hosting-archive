@@ -7,7 +7,7 @@ Without --login it asks nothing and logs nothing in: the TLS handshake and the c
 200 with the security headers the app and nginx must send, and no version in the server banner; /sites without a login is sent to /login; the stylesheet is served; a form posted without its token is refused.
 With --login (or --login-only, which skips the checks above and only logs in) it reads the password on the first line of standard input and the authenticator code on the second (the caller reads them hidden and pipes them in: they are never an argument, an environment
 variable or a file) and walks a real session: one wrong login is refused the same way as any other; the right one opens Sites, Jobs and Audit (which asks dellwp through ssh, so this is the end-to-end proof) and the
-first job's page when there is one, and the new-site form and a site's setting, password and install forms (looked at, never submitted); with --upload-mb N it also uploads a generated file of N MB into dellwp's intake, checks the count and hash dellwp reports and removes it again (the one thing it changes); logging out ends the session. It prints one line per check ("ok: ..." or "FAIL: ...") and never a secret, a cookie or a page's content; the exit status is the number of failures."""
+first job's page when there is one, and the new-site form and a site's setting, password, install and security pages and forms (looked at, never submitted); with --upload-mb N it also uploads a generated file of N MB into dellwp's intake, checks the count and hash dellwp reports and removes it again (the one thing it changes); logging out ends the session. It prints one line per check ("ok: ..." or "FAIL: ...") and never a secret, a cookie or a page's content; the exit status is the number of failures."""
 import argparse
 import hashlib
 import http.client
@@ -175,19 +175,22 @@ def login_checks(s, password, code, upload_mb=0):
         return
     st, _, html = s.request("GET", "/sites")
     check(st == 200 and "<h1>Sites</h1>" in html, "Sites opens and lists what dellwp reports", st)
-    rows = len(re.findall(r'<a href="/sites/[^"]+">', html))
+    rows = len(re.findall(r'<a href="/sites/[a-z0-9-]+">', html))
     print("   (%d site(s) listed)" % rows, flush=True)
     if rows:
-        name = re.search(r'<a href="/sites/([^"]+)">', html).group(1)
+        name = re.search(r'<a href="/sites/([a-z0-9-]+)">', html).group(1)
         st, _, page = s.request("GET", "/sites/" + name)
         check(st == 200 and "registry record" in page.lower(), "a site's page opens", st)
         check('action="/sites/%s/set"' % name in page and 'action="/sites/%s/state"' % name in page and 'name="csrf"' in page, "the site page offers its setting and state forms (nothing is submitted)")
         st, _, sub = s.request("GET", "/sites/%s/import" % name)
         check(st == 200 and "<h2>Approve</h2>" in sub, "the site's import page opens (it asks dellwp for the report)", st)
+        st, _, sub = s.request("GET", "/sites/%s/security" % name)
+        check(st == 200 and "<h2>Known vulnerabilities</h2>" in sub and 'action="/sites/%s/updates/check"' % name in sub, "the site's updates and security page opens (it asks dellwp for the vulnerability check)", st)
         for form, needle in (("password", 'type="password"'), ("install", 'name="email"')):
             st, _, sub = s.request("GET", "/sites/%s/%s" % (name, form))
             check(st == 200 and needle in sub and 'name="csrf"' in sub, "the %s form opens (nothing is submitted)" % form, st)
     st, h, page = s.request("GET", "/import")
+    check(st == 200 and "<h2>1. Files on dellwp</h2>" in page and 'value="new" checked' in page, "the import page lists the intake and offers a new site first", st)
     check(st == 200 and '<script src="/static/upload.js" defer>' in page and "script-src 'self'" in h.get("content-security-policy", "") and "unsafe" not in h.get("content-security-policy", ""),
           "the import page opens, with the one script of this app and a policy that allows nothing else", st)
     st, _, page = s.request("GET", "/new-site")

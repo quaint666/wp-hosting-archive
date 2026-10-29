@@ -2,11 +2,63 @@
 {% block title %}Import{% endblock %}
 {% block body %}
 <div class="page-head"><div><h1>Import a .wpress</h1>
-<p class="small">Four steps: upload the file, plan it (nothing is written), run it into an empty site on hold, then read the report and approve or reset on the site's import page. A site that is not empty can be replaced: the old data is snapshotted first.</p></div></div>
+<p class="small">Upload the file once, then either make a new site from it or load it into a site that exists. Nothing is public until you move the site to live.</p></div></div>
+{% if just_uploaded %}<p class="notice" role="status">The file is on dellwp. It is chosen in step 3 below.</p>{% endif %}
+{% if intake_problem %}<p class="error" role="alert">dellwp could not say what the intake holds ({{ intake_problem | clip(200) }}). You can still upload and start an import.</p>{% endif %}
+
+{% if imports %}
+<section class="card">
+<h2>Waiting for you</h2>
+<p class="small">An import that has finished its run waits for your decision; the site stays on hold until you approve. One that stopped half-way must be reset.</p>
+<div class="table-wrap flat"><table>
+  <thead><tr><th>Site</th><th>File</th><th>State</th><th></th></tr></thead>
+  <tbody>
+  {% for i in imports %}
+  <tr>
+    <td>{{ i.get('site', '') | clip(40) }}</td>
+    <td>{{ i.get('file') or '-' | clip(100) }}</td>
+    <td>{% if i.get('stage') == 'reported' %}{% if i.get('problems') %}<span class="badge bad">not clean</span> <span class="small">{{ (i.get('problems') or [''])[0] | clip(120) }}</span>{% else %}<span class="badge ok">clean</span>{% endif %}
+        {% else %}<span class="badge warn">unfinished</span>{% endif %}</td>
+    <td><a class="button secondary" href="{{ url_for('import_site', name=i.get('site', '')) }}">{% if i.get('stage') == 'reported' %}Read the report and decide{% else %}Open{% endif %}</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+</section>
+{% endif %}
 
 <section class="card">
-<h2>1. Upload</h2>
-<form id="upload" class="login" data-url="{{ url_for('import_hub') }}/files/" data-csrf="{{ csrf_token() }}" data-max-bytes="{{ upload_max_mb * 1048576 }}">
+<h2>1. Files on dellwp</h2>
+{% if files %}
+<div class="table-wrap flat"><table>
+  <thead><tr><th>File</th><th>Size</th><th>Added</th><th>Used by</th><th></th></tr></thead>
+  <tbody>
+  {% for f in files %}
+  <tr>
+    <td>{{ f.get('name', '') | clip(100) }}</td>
+    <td>{{ f.get('bytes') | megabytes }}</td>
+    <td>{{ f.get('mtime') | ago }}</td>
+    <td>{% if f.get('site') %}<span class="badge warn">import in {{ f.get('site') | clip(40) }}</span>{% else %}<span class="muted">not used</span>{% endif %}</td>
+    <td><div class="actions">
+      {% if not f.get('site') %}
+      <a class="button secondary" href="{{ url_for('import_hub') }}?file={{ f.get('name', '') | urlencode }}#start">Use</a>
+      <form method="post" action="{{ url_for('import_discard') }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="file" value="{{ f.get('name', '') }}">
+        <button type="submit" class="danger secondary">Remove</button>
+      </form>
+      {% else %}<span class="small">approve or reset that import first</span>{% endif %}
+    </div></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}<p class="muted">No file is waiting on dellwp. Upload one below.</p>{% endif %}
+</section>
+
+<section class="card">
+<h2>2. Upload a file</h2>
+<form id="upload" class="login" data-url="{{ url_for('import_hub') }}/files/" data-reload="{{ url_for('import_hub') }}" data-csrf="{{ csrf_token() }}" data-max-bytes="{{ upload_max_mb * 1048576 }}">
   <label>File <span class="small">up to {{ upload_max_mb }} MB</span> <input type="file" id="upload-file" accept=".wpress" required></label>
   <label>Name on dellwp <span class="small">letters, digits, dot, dash, underscore; ends in .wpress</span>
     <input id="upload-name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
@@ -17,31 +69,35 @@
 <noscript><p class="error">The upload needs JavaScript. Without it, copy the file with <code>wp-ctl</code> from a shell instead.</p></noscript>
 </section>
 
-<section class="card">
-<h2>2. Plan or run</h2>
-<form method="post" action="{{ url_for('import_run') }}" class="login">
+<section class="card" id="start">
+<h2>3. Import it</h2>
+<form method="post" action="{{ url_for('import_run') }}" class="login wide">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <input type="hidden" name="req" value="{{ req }}">
-  <label>Site <select name="site" required>{% for s in sites %}<option value="{{ s }}">{{ s | clip(40) }}</option>{% endfor %}</select></label>
-  <label>File on dellwp <input name="file" id="run-file" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <label>File on dellwp
+    <input name="file" id="run-file" list="intake-files" required maxlength="100" value="{{ prefill }}" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <datalist id="intake-files">{% for f in files %}{% if not f.get('site') %}<option value="{{ f.get('name', '') }}">{% endif %}{% endfor %}</datalist>
+  </label>
   <fieldset>
-    <legend>What to do</legend>
-    <label><input type="radio" name="mode" value="plan" checked> Plan only: check the archive and print the plan; nothing is written</label>
-    <label><input type="radio" name="mode" value="run"> Import into an empty site on hold</label>
-    <label><input type="radio" name="mode" value="replace"> Replace the data of a site that has some: a snapshot is taken first. Type the site's name:</label>
-    <input name="confirm_name" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="the site's name, only for a replace">
+    <legend>What should happen</legend>
+    <label><input type="radio" name="mode" value="new" checked> <span><strong>Make a new site from it.</strong> The site is created on hold, then the file is loaded into it. Fill in the name below.</span></label>
+    <label><input type="radio" name="mode" value="run"> <span><strong>Load it into an existing empty site.</strong> A site you made earlier, with nothing in it yet.</span></label>
+    <label><input type="radio" name="mode" value="plan"> <span><strong>Only look.</strong> Check the archive against an existing site and print the plan; nothing is written.</span></label>
+    <label><input type="radio" name="mode" value="replace"> <span><strong>Replace the data of a site that has some.</strong> A snapshot of the old data is taken first. Type the site's name.</span></label>
+  </fieldset>
+  <fieldset>
+    <legend>A new site <span class="small">(for "make a new site")</span></legend>
+    <label>Name <span class="small">2 to 24 characters: letters, digits and single hyphens inside, starting with a letter. It becomes the address and cannot be changed.</span>
+      <input name="name" maxlength="24" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    <label>Label <span class="small">optional, a few words for you</span><input name="label" maxlength="100" autocomplete="off"></label>
+  </fieldset>
+  <fieldset>
+    <legend>An existing site <span class="small">(for the other three)</span></legend>
+    <label>Site <select name="site">{% for s in sites %}<option value="{{ s }}">{{ s | clip(40) }}</option>{% endfor %}</select></label>
+    <label>Its name again <span class="small">only for a replace</span>
+      <input name="confirm_name" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
   </fieldset>
   <div class="actions"><button type="submit">Start</button></div>
-</form>
-</section>
-
-<section class="card">
-<h2>Remove a file</h2>
-<p class="small">A file that was uploaded but is not wanted. dellwp refuses to remove the file of an import that is not approved or reset yet.</p>
-<form method="post" action="{{ url_for('import_discard') }}" class="inline">
-  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-  <label>File on dellwp <input name="file" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
-  <button type="submit" class="secondary">Remove from the intake</button>
 </form>
 </section>
 <script src="{{ url_for('static', filename='upload.js') }}" defer></script>

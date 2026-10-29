@@ -23,8 +23,8 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;
     client_max_body_size 1m;
 
-    # Installing WordPress and setting a password wait for the tool on dellwp (its limits are 600 and 300 seconds): the app asks wp-ctl synchronously, so nginx waits longer for these two pages only.
-    location ~ ^/sites/[a-z0-9-]+/(install|password)$ {
+    # Installing WordPress, setting a password and the vulnerability check wait for the tool on dellwp (its limits are 600, 300 and 300 seconds): the app asks wp-ctl synchronously, so nginx waits longer for these three pages only.
+    location ~ ^/sites/[a-z0-9-]+/(install|password|security)$ {
         proxy_pass http://{{ panel_bind }};
         proxy_http_version 1.1;
         proxy_set_header Host $host;

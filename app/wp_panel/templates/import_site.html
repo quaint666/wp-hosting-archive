@@ -1,8 +1,22 @@
 {% extends "base.html" %}
 {% block title %}Import · {{ name }}{% endblock %}
 {% block body %}
-<p class="crumbs"><a href="{{ url_for('site', name=name) }}">The site</a> · <a href="{{ url_for('import_hub') }}">Import a file</a></p>
-<div class="page-head"><div><h1>Import: {{ name | clip(40) }}</h1></div></div>
+<p class="crumbs"><a href="{{ url_for('site', name=name) }}">The site</a> · <a href="{{ url_for('import_hub') }}">Import a file</a> · <a href="{{ url_for('security', name=name) }}">Updates and security</a></p>
+<div class="page-head"><div><h1>Import: {{ name | clip(40) }}</h1></div>
+  {% if pending and pending.get('stage') == 'reported' %}{% if pending.get('problems') %}<span class="badge bad">not clean</span>{% else %}<span class="badge ok">clean</span>{% endif %}
+  {% elif pending %}<span class="badge warn">unfinished</span>{% endif %}</div>
+
+{% if pending and pending.get('stage') == 'reported' and pending.get('problems') %}
+<div class="alert" role="alert">
+  <strong>The scan did not come back clean:</strong>
+  <ul>{% for p in pending.get('problems') %}<li>{{ p | clip(300) }}</li>{% endfor %}</ul>
+  What to do: if it is a known vulnerability in WordPress or a plugin, update it first (<a href="{{ url_for('security', name=name) }}">Updates and security</a>), read the report again, then approve. To approve with the problems still listed you must accept them below and type the site's name.
+</div>
+{% elif pending and pending.get('stage') == 'reported' %}
+<p class="notice">Clean: no failed step, checksums agree, nothing found by the scanners. Approving copies in the code that was held back; the site stays on hold.</p>
+{% elif pending %}
+<p class="notice">This import did not finish. Reset it (below) and start again; the site goes back to what it was.</p>
+{% endif %}
 
 <section class="card">
 <h2>The report</h2>
@@ -13,13 +27,17 @@
 <div class="grid">
 <section class="card">
 <h2>Approve</h2>
-<p class="small">Approving copies in the code that is not from wordpress.org (mu-plugins, plugins and themes it does not offer) and deletes the intake file and the work directory. A report with a failed step, a bad checksum or a scan finding can only be approved by accepting its failures.</p>
+<p class="small">Approving copies in the code that is not from wordpress.org (mu-plugins, plugins and themes it does not offer) and deletes the intake file and the work directory. The site stays on hold: moving it to live is its own step.</p>
 <form method="post" action="{{ url_for('import_approve', name=name) }}" class="login">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <input type="hidden" name="req" value="{{ req ~ 'approve' }}">
-  <label>Reject these plugins or themes <span class="small">optional, slugs separated by commas</span>
+  <label>Leave these plugins or themes out <span class="small">optional, slugs separated by commas</span>
     <input name="reject" maxlength="200" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*(,[A-Za-z0-9][A-Za-z0-9._\-]*)*" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
-  <label><input type="checkbox" name="accept_failures" value="yes"> I have read the failures in the report and accept them</label>
+  <fieldset>
+    <legend>Only if the report is not clean</legend>
+    <label><input type="checkbox" name="accept_failures" value="yes"> <span>I have read the problems in the report and accept them.</span></label>
+    <label>Type the site's name to accept <input name="confirm_name" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
+  </fieldset>
   <div class="actions"><button type="submit">Approve the import</button></div>
 </form>
 </section>

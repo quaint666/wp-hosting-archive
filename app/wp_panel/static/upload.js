@@ -50,6 +50,10 @@
         bar.value = 100;
         say("Uploaded " + reply.file + ": " + reply.bytes + " bytes, sha256 " + reply.sha256 + ". dellwp reported the same count and hash.", false);
         if (runFile) { runFile.value = reply.file; }
+        if (form.dataset.reload) {
+          say("Uploaded " + reply.file + ": " + reply.bytes + " bytes, sha256 " + reply.sha256 + ". dellwp reported the same count and hash. Opening the list…", false);
+          window.setTimeout(function () { window.location.href = form.dataset.reload + "?file=" + encodeURIComponent(reply.file) + "&uploaded=1#start"; }, 1500);
+        }
       } else {
         bar.hidden = true;
         say(reply && reply.error ? reply.error : "The upload failed (status " + xhr.status + "). If you were logged out, log in again.", true);

@@ -10,7 +10,7 @@ from flask import abort, current_app, jsonify, redirect, render_template, reques
 
 from werkzeug.exceptions import ClientDisconnected
 
-from .ctl import CHUNK, JOB_RE, SET_KEYS, UPLOAD_MAX, CtlError
+from .ctl import CHUNK, FILE_RE, JOB_RE, SET_KEYS, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -88,6 +88,14 @@ def register(app):
         wrapper.__name__ = fn.__name__
         return wrapper
 
+    def intake():
+        """(files, imports, why-not) from dellwp. A page that only wants to MENTION what waits must still open when dellwp cannot say, so a failure is a sentence here, not an error page."""
+        try:
+            reply = ask("import-list")
+        except CtlError as e:
+            return [], [], str(e)
+        return ([f for f in reply.get("files", []) if isinstance(f, dict)], [i for i in reply.get("imports", []) if isinstance(i, dict)], "")
+
     @app.get("/")
     def home():
         return redirect(url_for("sites"), 302)
@@ -96,7 +104,8 @@ def register(app):
     @page
     def sites():
         rows = ask("list").get("sites", [])
-        return render_template("sites.html", rows=[r for r in rows if isinstance(r, dict)])
+        _, imports, why = intake()
+        return render_template("sites.html", rows=[r for r in rows if isinstance(r, dict)], waiting=[i for i in imports if i.get("stage") == "reported"], unfinished=[i for i in imports if i.get("stage") != "reported"], intake_problem=why)
 
     @app.get("/sites/<name>")
     @page
@@ -200,7 +209,10 @@ def register(app):
     @page
     def import_hub():
         rows = [r for r in ask("list").get("sites", []) if isinstance(r, dict) and isinstance(r.get("site"), str)]
-        return render_template("import.html", sites=[r["site"] for r in rows], req=new_req(), upload_max_mb=UPLOAD_MAX // (1024 * 1024))
+        files, imports, why = intake()
+        wanted = request.args.get("file", "")
+        return render_template("import.html", sites=[r["site"] for r in rows], req=new_req(), upload_max_mb=UPLOAD_MAX // (1024 * 1024), files=files, imports=imports, intake_problem=why,
+                               prefill=wanted if FILE_RE.fullmatch(wanted) and len(wanted) <= 100 else "", just_uploaded=request.args.get("uploaded") == "1")
 
     def discard_quietly(file):
         """Best effort, after an upload that did not end cleanly: wp-site-import cannot tell a cut-off stream from a finished file, so a short file may have been kept. If this fails too, the importer's
@@ -253,8 +265,13 @@ def register(app):
     @action
     def import_run():
         mode = field("mode", 10)
-        if mode not in ("plan", "run", "replace"):
+        if mode not in ("plan", "run", "replace", "new"):
             abort(400)
+        if mode == "new":                                   # a new site and the import into it, one job
+            args = {"name": field("name", 40), "file": field("file", 120), "req": field("req", 80)}
+            if field("label", 200):
+                args["label"] = field("label", 200)
+            return started(ask("import-new", **args))
         args = {"site": field("site", 40), "file": field("file", 120), "req": field("req", 80), "plan": mode == "plan", "replace": mode == "replace"}
         if mode == "replace":
             args["confirm_name"] = field("confirm_name", 60)
@@ -276,12 +293,16 @@ def register(app):
             if e.kind not in ("failed", "refused"):
                 raise
             report, problem = "", str(e)
-        return render_template("import_site.html", name=name, report=str(report)[-20000:], problem=problem, req=new_req())
+        _, imports, _why = intake()
+        mine = next((i for i in imports if i.get("site") == name), None)
+        return render_template("import_site.html", name=name, report=str(report)[-20000:], problem=problem, req=new_req(), pending=mine)
 
     @app.post("/sites/<name>/import/approve")
     @action
     def import_approve(name):
         args = {"site": name, "req": field("req", 80), "accept_failures": field("accept_failures", 5) == "yes"}
+        if args["accept_failures"]:
+            args["confirm_name"] = field("confirm_name", 60)       # accepting known failures is the one approval that asks for the site's name
         if field("reject", 250):
             args["reject"] = field("reject", 250)
         return started(ask("import-approve", **args))
@@ -290,6 +311,34 @@ def register(app):
     @action
     def import_reset(name):
         return started(ask("import-reset", site=name, confirm_name=field("confirm_name", 60), req=field("req", 80)))
+
+    @app.get("/sites/<name>/security")
+    @page
+    def security(name):
+        """What the site runs against the vulnerability index, and the buttons for updates. A vulnerability check that fails is shown on the page: the buttons must still be there."""
+        reply = ask("show", site=name)
+        state = (reply.get("status") or {}).get("deployed") or (reply.get("registry") or {}).get("state")
+        result, rc, problem = "", None, ""
+        try:
+            got = ask("vuln-check", site=name)
+            result, rc = str(got.get("out", ""))[-20000:], got.get("rc")
+        except CtlError as e:
+            if e.kind not in ("failed", "refused"):
+                raise
+            problem = str(e)
+        return render_template("security.html", name=name, state=state, result=result, rc=rc, problem=problem, req=new_req())
+
+    @app.post("/sites/<name>/updates/check")
+    @action
+    def updates_check(name):
+        return started(ask("update-check", site=name, req=field("req", 80)))
+
+    @app.post("/sites/<name>/updates/apply")
+    @action
+    def updates_apply(name):
+        if field("understood", 5) != "yes":
+            return render_template("error.html", status=400, title="The form was not accepted", message="Tick the box to say you know the site is paused while it updates. Nothing was changed."), 400
+        return started(ask("update-apply", site=name, req=field("req", 80)))
 
     @app.get("/jobs")
     @page

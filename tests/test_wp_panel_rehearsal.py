@@ -129,13 +129,14 @@ class Driver(Base):
         for needle in ("a wrong login is refused with the one plain message", "the right password and code log in", "Sites opens", "a site's page opens", "Jobs opens", "a job's page opens with its log",
                        "Audit opens", "logging out needs the token", "logging out works", "after logging out /sites is sent to /login", "site(s) listed",
                        "the site page offers its setting and state forms (nothing is submitted)", "the new-site form opens (nothing is submitted)", "the password form opens (nothing is submitted)", "the install form opens (nothing is submitted)",
-                       "the import page opens, with the one script of this app", "the site's import page opens"):
+                       "the import page opens, with the one script of this app", "the site's import page opens",
+                       "the site's updates and security page opens", "the import page lists the intake and offers a new site first"):
             self.assertIn(needle, r.stdout)
         for secret in (PASSWORD, c, "panel_session"):
             self.assertNotIn(secret, r.stdout + r.stderr)
         self.assertIn(("show", {"site": "alpha"}), s.ctl.calls)
         self.assertIn(("job-log", {"job": JOB, "offset": 0}), s.ctl.calls)
-        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail", "import-report"}, "the rehearsal asked for read verbs only, and submitted no form")
+        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail", "import-report", "import-list", "vuln-check"}, "the rehearsal asked for read verbs only, and submitted no form")
 
     def test_login_only_skips_the_checks_it_has_already_made(self):
         r = run_driver(self.server(), "--login-only", stdin="%s\n%s\n" % (PASSWORD, code()))

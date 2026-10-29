@@ -63,21 +63,22 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard"},
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "update-check", "update-apply"},
                          "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
             self.assertIn(theirs.kind, ("job", "inline"), verb)
             self.assertEqual(set(spec), set(theirs.args), verb)
             for name, (required, _) in spec.items():
-                optional = theirs.args[name].kind == "flag" or name == "confirm_name" and verb in ("ensure-state", "import-run")      # a flag is false when absent; these confirmations are asked for by another argument
+                optional = theirs.args[name].kind == "flag" or name == "confirm_name" and verb in ("ensure-state", "import-run", "import-approve")      # a flag is false when absent; these confirmations are asked for by another argument
                 self.assertEqual(required, theirs.args[name].required and not optional, (verb, name))
         self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS) | set(ctl.SECRET_VERBS) | set(ctl.STREAM_VERBS))
         self.assertEqual(set(ctl.STREAM_VERBS), {"import-receive"})
         self.assertEqual(wp_ctl.VERBS["import-receive"].kind, "stream")
         self.assertEqual(set(ctl.STREAM_VERBS["import-receive"]), set(wp_ctl.VERBS["import-receive"].args))
-        self.assertEqual(ctl.READ_VERBS["import-report"].keys(), wp_ctl.VERBS["import-report"].args.keys())
-        self.assertEqual(wp_ctl.VERBS["import-report"].kind, "read")
+        for verb in ("import-report", "import-list", "vuln-check"):
+            self.assertEqual(ctl.READ_VERBS[verb].keys(), wp_ctl.VERBS[verb].args.keys(), verb)
+            self.assertEqual(wp_ctl.VERBS[verb].kind, "read", verb)
 
     def test_the_import_limits_and_patterns_are_the_dispatchers_and_the_intake_quotas(self):
         self.assertEqual(ctl.REJECT_RE.pattern, wp_ctl.REJECT_RE.pattern)
@@ -694,9 +695,48 @@ class Imports(unittest.TestCase):
         self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress", plan=True, req="p1"), {"verb": "import-run", "site": "alpha", "file": "a1.wpress", "plan": True, "req": "p1"})
         self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress"), {"verb": "import-run", "site": "alpha", "file": "a1.wpress"})
         self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress", replace=True, confirm_name="alpha")["confirm_name"], "alpha")
-        self.assertEqual(self.line("import-approve", site="alpha", reject="akismet,hello-dolly", accept_failures=True), {"verb": "import-approve", "site": "alpha", "reject": "akismet,hello-dolly", "accept_failures": True})
+        self.assertEqual(self.line("import-approve", site="alpha", reject="akismet,hello-dolly", accept_failures=True, confirm_name="alpha"),
+                         {"verb": "import-approve", "site": "alpha", "reject": "akismet,hello-dolly", "accept_failures": True, "confirm_name": "alpha"})
         self.assertEqual(self.line("import-reset", site="alpha", confirm_name="alpha"), {"verb": "import-reset", "site": "alpha", "confirm_name": "alpha"})
         self.assertEqual(self.line("import-discard", file="a1.wpress", if_present=False), {"verb": "import-discard", "file": "a1.wpress", "if_present": False})
+
+    def test_the_follow_up_verbs_are_sent_as_wp_ctl_wants_them(self):
+        self.assertEqual(self.line("import-list"), {"verb": "import-list"})
+        self.assertEqual(self.line("vuln-check", site="alpha"), {"verb": "vuln-check", "site": "alpha"})
+        self.assertEqual(self.line("update-check", site="alpha", req="p1"), {"verb": "update-check", "site": "alpha", "req": "p1"})
+        self.assertEqual(self.line("update-apply", site="alpha"), {"verb": "update-apply", "site": "alpha"})
+        self.assertEqual(self.line("import-new", name="newshop", file="a1.wpress", label="Shop", req="p1"), {"verb": "import-new", "name": "newshop", "file": "a1.wpress", "label": "Shop", "req": "p1"})
+        self.assertEqual(self.line("import-new", name="newshop", file="a1.wpress"), {"verb": "import-new", "name": "newshop", "file": "a1.wpress"})
+
+    def test_a_read_takes_no_request_id_and_import_list_takes_no_argument(self):
+        self.refused("import-list", site="alpha")
+        self.refused("import-list", req="p1")
+        self.refused("vuln-check", site="alpha", req="p1")
+        self.refused("vuln-check")
+        for site in ("", "A", "a--b", "../x", None, 5):
+            self.refused("vuln-check", site=site)
+            self.refused("update-check", site=site)
+            self.refused("update-apply", site=site)
+
+    def test_a_new_site_needs_a_site_name_a_file_name_and_at_most_a_label(self):
+        for name in ("", "A", "a", "a--b", "-ab", "x" * 25, "../x", None, 5):
+            self.refused("import-new", name=name, file="a1.wpress")
+        for file in ("", "a", "a.zip", "../a.wpress", ".h.wpress", "a b.wpress", None):
+            self.refused("import-new", name="newshop", file=file)
+        for label in ("", " x", "x ", "x" * 101, "a\nb"):
+            self.refused("import-new", name="newshop", file="a1.wpress", label=label)
+        self.refused("import-new", name="newshop")
+        self.refused("import-new", file="a1.wpress")
+        self.refused("import-new", name="newshop", file="a1.wpress", site="alpha")
+
+    def test_accepting_the_failures_needs_the_name_typed_and_nothing_else_takes_one(self):
+        for typed in ("", "bravo", "Alpha", "alpha ", None):
+            self.refused("import-approve", site="alpha", accept_failures=True, confirm_name=typed)
+        self.refused("import-approve", site="alpha", accept_failures=True)
+        self.refused("import-approve", site="alpha", confirm_name="alpha")
+        self.refused("import-approve", site="alpha", accept_failures=False, confirm_name="alpha")
+        self.line("import-approve", site="alpha")
+        self.line("import-approve", site="alpha", reject="a,b")
 
     def test_a_replace_needs_the_name_typed_and_nothing_else_takes_one(self):
         for typed in ("", "bravo", "Alpha", "alpha ", None):

@@ -152,7 +152,7 @@ class Vhost(unittest.TestCase):
 
     def test_it_proxies_everything_to_the_app_on_loopback_and_says_the_request_was_https(self):
         locs = self.locations()
-        self.assertEqual([(kind, path) for kind, path, _ in locs], [("~", "^/sites/[a-z0-9-]+/(install|password)$"), ("~", "^/import/files/[A-Za-z0-9._-]+$"), ("", "/")],
+        self.assertEqual([(kind, path) for kind, path, _ in locs], [("~", "^/sites/[a-z0-9-]+/(install|password|security)$"), ("~", "^/import/files/[A-Za-z0-9._-]+$"), ("", "/")],
                          "the slow pages, the upload, the catch-all; a new location is a decision of its batch")
         self.assertEqual(re.findall(r"proxy_pass (\S+);", self.code), ["http://127.0.0.1:8000"] * 3)
         for kind, path, block in locs:
@@ -162,8 +162,8 @@ class Vhost(unittest.TestCase):
             self.assertIn("proxy_http_version 1.1;", block, path)
         self.assertNotIn("$proxy_add_x_forwarded_for", self.code)
 
-    def test_install_and_password_wait_longer_than_the_tool_may_run(self):
-        slow = dict((path, block) for _, path, block in self.locations())["^/sites/[a-z0-9-]+/(install|password)$"]
+    def test_install_password_and_the_vulnerability_check_wait_longer_than_the_tool_may_run(self):
+        slow = dict((path, block) for _, path, block in self.locations())["^/sites/[a-z0-9-]+/(install|password|security)$"]
         self.assertIn("proxy_read_timeout 700s;", slow, "longer than wp-ctl's 600 s for install")
         self.assertNotIn("proxy_request_buffering", slow)
 

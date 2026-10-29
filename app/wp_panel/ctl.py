@@ -3,7 +3,7 @@
 The ssh key on the control VM is forced to `sudo -n /usr/local/sbin/wp-ctl` in dellwp's authorized_keys, so this client names no remote command: whatever it sends arrives as the request on wp-ctl's
 standard input, and wp-ctl checks the verb against its own allowlist and every argument against its own rules. That is the real lock. This module is a second one on the app's side: it refuses a verb
 that is not in READ_VERBS or ACTION_VERBS, an argument the verb does not take, and a value that does not look the way wp-ctl wants it, BEFORE anything is sent, so a bug in a page cannot ask for more
-than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (batch 11: create, set, ensure-state; batch 12: delete, and the
+than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (follow-ups: import-list, vuln-check, update-check, update-apply, import-new; batch 11: create, set, ensure-state; batch 12: delete, and the
 two that take a password, SECRET_VERBS: password, install; batch 13: the import verbs, and the one upload, STREAM_VERBS: import-receive, whose bytes follow the request line on the same standard input). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent
 twice runs once. A secret verb sends the request line and then the password as a second line on the same standard input (wp-ctl hands it to the tool through a file in a RAM disk): the password is never an
 argument, never in the request line, and never in a message of this module; what comes back is scrubbed here again before it is shown.
@@ -34,7 +34,7 @@ UPLOAD_MAX = 3072 * 1024 * 1024                                              # t
 CHUNK = 64 * 1024
 STREAM_TIMEOUT_S = 14400 + 600                                               # wp-ctl's own limit for import-receive (14400) and a margin
 RECEIVED_RE = re.compile(r"^received ([0-9a-f]{64}) ([0-9]+) (\S+)$")        # the one line wp-site-import receive prints
-TIMEOUTS = {"password": 330, "install": 660}                                  # seconds an answer may take: wp-ctl's own limit for the verb (300, 600) and a margin; every other verb uses timeout_s
+TIMEOUTS = {"password": 330, "install": 660, "vuln-check": 330}                                  # seconds an answer may take: wp-ctl's own limit for the verb (300, 600) and a margin; every other verb uses timeout_s
 
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # the site-name rule of scripts/wp_site_model.py and scripts/wp_ctl.py
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")                      # the job id wp-ctl makes (scripts/wp_ctl.py JOB_RE)
@@ -59,6 +59,8 @@ READ_VERBS = {
     "list": {},
     "show": {"site": (True, _site)},
     "import-report": {"site": (True, _site)},
+    "import-list": {},
+    "vuln-check": {"site": (True, _site)},
     "jobs": {},
     "job-status": {"job": (True, _job)},
     "job-log": {"job": (True, _job), "offset": (False, _int(0, 2 ** 40))},
@@ -95,7 +97,10 @@ def _file(v):
 
 ACTION_VERBS.update({
     "import-run": {"site": (True, _site), "file": (True, _file), "plan": (False, _bool), "replace": (False, _bool), "confirm_name": (False, _site)},
-    "import-approve": {"site": (True, _site), "reject": (False, _text(200, REJECT_RE)), "accept_failures": (False, _bool)},
+    "import-approve": {"site": (True, _site), "reject": (False, _text(200, REJECT_RE)), "accept_failures": (False, _bool), "confirm_name": (False, _site)},
+    "import-new": {"name": (True, _site), "label": (False, _text(100, LABEL_RE)), "file": (True, _file)},
+    "update-check": {"site": (True, _site)},
+    "update-apply": {"site": (True, _site)},
     "import-reset": {"site": (True, _site), "confirm_name": (True, _site)},
     "import-discard": {"file": (True, _file), "if_present": (False, _bool)},
 })
@@ -115,6 +120,11 @@ def _rules(verb, args):
     """What the argument table cannot say: going live needs the site's own name typed (wp-ctl: confirm_name, equal to the site), and nothing else takes one."""
     if verb == "delete" and not (args.get("confirm_name") == args.get("site") == args.get("confirm_again")):
         raise CtlError("not_allowed", "a delete needs the site's name typed twice, exactly")
+    if verb == "import-approve":
+        if args.get("accept_failures") is True and args.get("confirm_name") != args.get("site"):
+            raise CtlError("not_allowed", "accepting the failures of an import needs the site's name typed exactly")
+        if args.get("accept_failures") is not True and "confirm_name" in args:
+            raise CtlError("not_allowed", "only accepting failures is confirmed by the name")
     if verb == "import-reset" and args.get("confirm_name") != args.get("site"):
         raise CtlError("not_allowed", "a reset needs the site's name typed exactly")
     if verb == "import-run":

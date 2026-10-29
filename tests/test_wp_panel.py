@@ -54,6 +54,10 @@ class FakeCtl:
             "job-status": {"ok": True, "state": "done", "rc": 0},
             "job-log": {"ok": True, "job": JOB, "data": "line one\nline two\n", "offset": 18, "state": "done", "rc": 0},
             "import-report": {"ok": True, "rc": 0, "ran": True, "out": "Import report for alpha\n  plugins: 3 reinstalled\n"},
+            "import-list": {"ok": True, "files": [{"name": "friend.wpress", "bytes": 5242880, "mtime": T0 - 7200, "site": None}, {"name": "used.wpress", "bytes": 1048576, "mtime": T0 - 86400 * 2, "site": "bravo"}],
+                            "imports": [{"site": "bravo", "file": "used.wpress", "stage": "reported", "problems": ["known vulnerabilities: FOUND: 7 finding(s): core wordpress 7.1.3"]}]},
+            "vuln-check": {"ok": True, "rc": 1, "ran": True, "out": "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3 (7 findings)\n"},
+            "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB},
             "import-run": {"ok": True, "job": JOB},
             "import-approve": {"ok": True, "job": JOB},
             "import-reset": {"ok": True, "job": JOB},
@@ -136,7 +140,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -423,7 +427,7 @@ class Pages(Base):
         html = self.text("/sites")
         for needle in ("alpha", "bravo", "live", "hold", "/sites/alpha"):
             self.assertIn(needle, html)
-        self.assertEqual(self.ctl.calls[-1], ("list", {}))
+        self.assertEqual(self.ctl.calls[-2:], [("list", {}), ("import-list", {})])
 
     def test_the_site_page_shows_the_status_and_the_record(self):
         html = self.text("/sites/alpha")
@@ -921,6 +925,7 @@ class Imports(Base):
         self.assertIn('xhr.setRequestHeader("X-CSRF", form.dataset.csrf);', js, "the token the page was drawn with goes in the header")
         self.assertIn("xhr.send(file)", js, "the file itself is the body: no FormData, no multipart")
         self.assertNotIn("FormData", js)
+        self.assertIn('"?file=" + encodeURIComponent(reply.file) + "&uploaded=1#start"', js, "after an upload the page opens again with the file chosen and listed")
 
     def test_the_hub_lists_the_sites_and_hands_the_script_the_token_and_the_limit(self):
         html = self.text("/import")
@@ -1036,7 +1041,7 @@ class Imports(Base):
             for token in (False, "", "wrong"):
                 with self.subTest(path=path, token=token):
                     self.assertEqual(self.post(path, data, token=token).status_code, 400)
-        self.assertEqual([c for c in self.ctl.calls if c[0].startswith("import-") and c[0] != "import-report"], [])
+        self.assertEqual([c for c in self.ctl.calls if c[0].startswith("import-") and c[0] not in ("import-report", "import-list")], [])
 
     def test_the_site_page_shows_the_report_as_text_and_has_the_two_forms_with_a_token_each(self):
         self.ctl.replies["import-report"]["out"] = "<script>alert(1)</script> plugin x\n"
@@ -1063,12 +1068,12 @@ class Imports(Base):
 
     def test_approve_sends_the_rejects_and_the_acceptance_only_when_it_was_given(self):
         self.post("/sites/alpha/import/approve", {"req": "pa1"})
-        self.post("/sites/alpha/import/approve", {"req": "pa1", "reject": "akismet,hello-dolly", "accept_failures": "yes"})
-        self.post("/sites/alpha/import/approve", {"req": "pa1", "accept_failures": "on"})
+        self.post("/sites/alpha/import/approve", {"req": "pa1", "reject": "akismet,hello-dolly", "accept_failures": "yes", "confirm_name": "alpha"})
+        self.post("/sites/alpha/import/approve", {"req": "pa1", "accept_failures": "on", "confirm_name": "alpha"})
         calls = [a for v, a in self.ctl.calls if v == "import-approve"]
         self.assertEqual(calls[0], {"site": "alpha", "req": "pa1", "accept_failures": False})
-        self.assertEqual(calls[1], {"site": "alpha", "req": "pa1", "accept_failures": True, "reject": "akismet,hello-dolly"})
-        self.assertEqual(calls[2]["accept_failures"], False, "only the checkbox's own value counts")
+        self.assertEqual(calls[1], {"site": "alpha", "req": "pa1", "accept_failures": True, "confirm_name": "alpha", "reject": "akismet,hello-dolly"})
+        self.assertEqual(calls[2], {"site": "alpha", "req": "pa1", "accept_failures": False}, "only the checkbox's own value counts, and a name typed without it is not sent")
         for reject in ("a b", "a,,b", "../x", "a;b"):
             self.assertEqual(self.post("/sites/alpha/import/approve", {"req": "pa1", "reject": reject}).status_code, 400)
 
@@ -1149,6 +1154,231 @@ class UploadEndToEnd(Base):
         self.assertEqual((self.bin / "discarded").read_text(), "cut.wpress\n")
 
 
+class FollowUps(Base):
+    """After the click-through: pending imports are shown where you look, files are listed, a new site can be made from a file, the report says what to do, updates and the vulnerability check have a page."""
+
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+        self.token = self.csrf(path="/import")
+
+    def post(self, path, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.token
+        if token:
+            data["csrf"] = token
+        return self.c.post(path, data=data, base_url=BASE)
+
+    def text(self, path, status=200):
+        r = self.get(path)
+        self.assertEqual(r.status_code, status, (path, r.get_data(as_text=True)[:200]))
+        return r.get_data(as_text=True)
+
+    def acted(self):
+        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS]
+
+    # ---- the sites page mentions what waits
+    def test_the_sites_page_says_which_imports_wait_and_whether_they_are_clean(self):
+        html = self.text("/sites")
+        self.assertIn('href="/sites/bravo/import"', html)
+        self.assertIn("1 import waiting for your decision", html)
+        self.assertIn("not clean", html)
+        self.ctl.replies["import-list"]["imports"][0]["problems"] = []
+        self.assertRegex(self.text("/sites"), r'bravo</a> <span class="badge ok">clean</span>')
+
+    def test_an_unfinished_import_is_mentioned_too_and_none_means_no_banner(self):
+        self.ctl.replies["import-list"]["imports"] = [{"site": "bravo", "file": None, "stage": "unfinished", "problems": []}]
+        self.assertIn("Unfinished import", self.text("/sites"))
+        self.ctl.replies["import-list"]["imports"] = []
+        html = self.text("/sites")
+        self.assertNotIn("waiting for your decision", html)
+        self.assertNotIn("Unfinished import", html)
+
+    def test_the_sites_page_opens_even_when_dellwp_cannot_say_what_waits(self):
+        self.ctl.fail["import-list"] = CtlError("unreachable", "dellwp did not answer within 30 seconds")
+        html = self.text("/sites")
+        self.assertIn('href="/sites/alpha"', html)
+        self.assertNotIn("waiting for your decision", html)
+
+    # ---- the import page
+    def test_the_hub_lists_the_files_with_size_age_and_use_and_only_an_unused_file_can_be_removed(self):
+        html = self.text("/import")
+        self.assertIn("friend.wpress", html)
+        self.assertIn("5.0 MB", html)
+        self.assertIn("2 h ago", html)
+        self.assertIn("2 d ago", html)
+        self.assertIn("import in bravo", html)
+        self.assertIn('href="/import?file=friend.wpress#start"', html)
+        forms = re.findall(r'<form method="post" action="/import/discard".*?</form>', html, re.S)
+        self.assertEqual(len(forms), 1, "only the unused file has a remove button")
+        self.assertIn('name="file" value="friend.wpress"', forms[0])
+        self.assertRegex(forms[0], r'name="csrf" value="[^"]{20,}"')
+        self.assertNotIn('?file=used.wpress', html)
+
+    def test_the_hub_shows_the_imports_waiting_with_the_first_problem_and_a_way_to_decide(self):
+        html = self.text("/import")
+        self.assertIn("Waiting for you", html)
+        self.assertIn("Read the report and decide", html)
+        self.assertIn("known vulnerabilities: FOUND: 7 finding(s)", html)
+        self.ctl.replies["import-list"]["imports"] = []
+        self.assertNotIn("Waiting for you", self.text("/import"))
+
+    def test_the_hub_opens_when_dellwp_cannot_list_and_says_so(self):
+        self.ctl.fail["import-list"] = CtlError("unreachable", "dellwp did not answer within 30 seconds")
+        html = self.text("/import")
+        self.assertIn("could not say what the intake holds", html)
+        self.assertIn("30 seconds", html)
+        self.assertIn('name="mode"', html)
+
+    def test_a_file_name_in_the_address_is_put_in_the_form_only_when_it_is_a_plain_wpress_name(self):
+        self.assertIn('value="friend.wpress"', self.text("/import?file=friend.wpress"))
+        for bad in ("../x.wpress", "a.zip", '"><script>alert(1)</script>.wpress', "x" * 120 + ".wpress", "a b.wpress", ".h.wpress"):
+            html = self.text("/import?file=" + bad.replace("<", "%3C").replace(">", "%3E").replace('"', "%22").replace(" ", "%20"))
+            self.assertNotIn("<script>alert", html, bad)
+            self.assertNotIn('value="%s"' % bad.replace('"', "&#34;"), html, bad)
+            self.assertRegex(html, r'id="run-file"[^>]*value=""', bad)
+
+    def test_what_the_tool_lists_is_text_not_markup(self):
+        self.ctl.replies["import-list"]["files"][0]["name"] = '"><script>alert(1)</script>'
+        self.ctl.replies["import-list"]["imports"][0]["problems"] = ["<img src=x onerror=alert(1)>"]
+        html = self.text("/import")
+        self.assertNotIn("<script>alert", html)
+        self.assertNotIn("<img src=x", html)
+
+    def test_a_file_with_odd_numbers_is_shown_with_dashes_not_a_traceback(self):
+        self.ctl.replies["import-list"]["files"] = [{"name": "a.wpress", "bytes": None, "mtime": "yesterday", "site": None}, {"name": "b.wpress", "bytes": True, "mtime": True, "site": None},
+                                                    {"name": "c.wpress", "bytes": -5, "mtime": None, "site": None}, {"name": "d.wpress", "bytes": 0, "mtime": T0 + 99999, "site": None}]
+        html = self.text("/import")
+        for name in "abcd":
+            self.assertIn("%s.wpress" % name, html)
+        self.assertIn("just now", html)
+
+    # ---- start an import: a new site, or an existing one
+    def test_a_new_site_from_a_file_asks_for_one_job_with_the_name_the_label_and_the_file(self):
+        r = self.post("/import/run", {"mode": "new", "name": "newshop", "label": "New shop", "file": "friend.wpress", "req": "pn1", "site": "alpha", "confirm_name": "alpha"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual(self.acted(), [("import-new", {"name": "newshop", "file": "friend.wpress", "req": "pn1", "label": "New shop"})], "the existing site's fields are not sent")
+        self.ctl.calls.clear()
+        self.post("/import/run", {"mode": "new", "name": "newshop", "label": "", "file": "friend.wpress", "req": "pn1"})
+        self.assertEqual(self.acted(), [("import-new", {"name": "newshop", "file": "friend.wpress", "req": "pn1"})])
+
+    def test_a_new_site_needs_a_good_name_a_good_file_and_a_request_id_or_nothing_is_asked(self):
+        base = {"mode": "new", "name": "newshop", "file": "friend.wpress", "req": "pn1"}
+        for over in ({"name": ""}, {"name": "Bad"}, {"name": "a"}, {"name": "a--b"}, {"name": "x" * 25}, {"file": ""}, {"file": "../a.wpress"}, {"file": "a.zip"}, {"req": ""}, {"label": "a\nb"}, {"label": " x"}):
+            with self.subTest(over=over):
+                self.assertEqual(self.post("/import/run", dict(base, **over)).status_code, 400, over)
+        self.assertEqual(self.acted(), [])
+
+    def test_a_refusal_by_dellwp_of_a_new_site_is_shown_as_text(self):
+        self.ctl.fail["import-new"] = CtlError("refused", "wp-ctl refused: name_reserved (<b>hub</b> is reserved)", "name_reserved")
+        r = self.post("/import/run", {"mode": "new", "name": "hub", "file": "friend.wpress", "req": "pn1"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("name_reserved", r.get_data(as_text=True))
+        self.assertNotIn("<b>hub</b>", r.get_data(as_text=True))
+
+    def test_the_form_offers_the_four_things_in_plain_words_new_site_first(self):
+        html = self.text("/import")
+        modes = re.findall(r'<input type="radio" name="mode" value="([a-z]+)"( checked)?>', html)
+        self.assertEqual(modes, [("new", " checked"), ("run", ""), ("plan", ""), ("replace", "")])
+        self.assertIn("Make a new site from it", html)
+        self.assertRegex(html, r'<input name="name" maxlength="24"')
+
+    # ---- the report page says what to do
+    def test_the_report_page_of_a_site_that_is_not_clean_says_why_and_what_to_do(self):
+        html = self.text("/sites/bravo/import")
+        self.assertIn("The scan did not come back clean", html)
+        self.assertIn("known vulnerabilities: FOUND: 7 finding(s)", html)
+        self.assertIn('href="/sites/bravo/security"', html)
+        self.assertIn("accept them below and type the site", html)
+        self.assertRegex(html, r'<span class="badge bad">not clean</span>')
+
+    def test_the_report_page_of_a_clean_import_says_so_and_one_that_did_not_finish_says_reset(self):
+        self.ctl.replies["import-list"]["imports"][0]["problems"] = []
+        html = self.text("/sites/bravo/import")
+        self.assertIn("Clean: no failed step", html)
+        self.assertNotIn("did not come back clean", html)
+        self.ctl.replies["import-list"]["imports"][0]["stage"] = "unfinished"
+        self.assertIn("did not finish", self.text("/sites/bravo/import"))
+        self.assertNotIn("Clean: no failed step", self.text("/sites/alpha/import"))
+
+    def test_accepting_the_failures_needs_the_sites_name_typed_and_nothing_is_asked_without_it(self):
+        for typed in ("", "alph", "Alpha", "alpha ", "bravo"):
+            r = self.post("/sites/alpha/import/approve", {"req": "pa1", "accept_failures": "yes", "confirm_name": typed})
+            self.assertEqual(r.status_code, 400, typed)
+        self.assertEqual(self.acted(), [])
+        r = self.post("/sites/alpha/import/approve", {"req": "pa1", "accept_failures": "yes", "confirm_name": "alpha"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.acted()[-1], ("import-approve", {"site": "alpha", "req": "pa1", "accept_failures": True, "confirm_name": "alpha"}))
+
+    # ---- updates and security
+    def test_the_security_page_shows_what_the_check_found_as_text_with_a_badge(self):
+        html = self.text("/sites/alpha/security")
+        self.assertIn("vulnerabilities found", html)
+        self.assertIn("WordPress Core 4.7.0 - 7.1.3 (7 findings)", html)
+        for rc, word in ((0, "none known"), (3, "not checked")):
+            self.ctl.replies["vuln-check"]["rc"] = rc
+            self.assertIn(word, self.text("/sites/alpha/security"))
+        self.ctl.replies["vuln-check"]["out"] = "<script>alert(1)</script>"
+        self.assertNotIn("<script>alert", self.text("/sites/alpha/security"))
+
+    def test_a_check_that_fails_is_shown_on_the_page_with_the_buttons_still_there(self):
+        self.ctl.fail["vuln-check"] = CtlError("failed", "wp-ctl failed: no error code (the feed refused)", None)
+        html = self.text("/sites/alpha/security")
+        self.assertIn("the feed refused", html)
+        self.assertIn('action="/sites/alpha/updates/check"', html)
+        self.assertIn('action="/sites/alpha/updates/apply"', html)
+        self.ctl.fail["vuln-check"] = CtlError("unreachable", "dellwp did not answer within 330 seconds")
+        self.text("/sites/alpha/security", 503)
+
+    def test_an_unknown_site_is_a_404_on_its_security_page(self):
+        self.ctl.fail["show"] = CtlError("refused", "wp-ctl refused: unknown_site", "unknown_site")
+        self.text("/sites/ghost/security", 404)
+
+    def test_check_for_updates_starts_one_job_and_needs_the_token(self):
+        r = self.post("/sites/alpha/updates/check", {"req": "pu1"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual(self.acted(), [("update-check", {"site": "alpha", "req": "pu1"})])
+        self.ctl.calls.clear()
+        for token in (False, "", "wrong"):
+            self.assertEqual(self.post("/sites/alpha/updates/check", {"req": "pu1"}, token=token).status_code, 400)
+        self.assertEqual(self.acted(), [])
+
+    def test_applying_updates_needs_the_box_ticked_and_the_token(self):
+        self.assertEqual(self.post("/sites/alpha/updates/apply", {"req": "pu1"}).status_code, 400)
+        self.assertEqual(self.post("/sites/alpha/updates/apply", {"req": "pu1", "understood": "on"}).status_code, 400)
+        self.assertEqual(self.post("/sites/alpha/updates/apply", {"req": "pu1", "understood": "yes"}, token=False).status_code, 400)
+        self.assertEqual(self.acted(), [])
+        r = self.post("/sites/alpha/updates/apply", {"req": "pu1", "understood": "yes"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.acted(), [("update-apply", {"site": "alpha", "req": "pu1"})])
+
+    def test_the_security_page_forms_carry_what_the_server_wants(self):
+        html = self.text("/sites/alpha/security")
+        apply_form = re.search(r'<form method="post" action="/sites/alpha/updates/apply".*?</form>', html, re.S).group(0)
+        check_form = re.search(r'<form method="post" action="/sites/alpha/updates/check".*?</form>', html, re.S).group(0)
+        self.assertIn('<input type="checkbox" name="understood" value="yes">', apply_form)
+        for form in (apply_form, check_form):
+            self.assertRegex(form, r'name="csrf" value="[^"]{20,}"')
+            self.assertRegex(form, r'name="req" value="p[0-9a-f]{32}(apply|check)"')
+
+    def test_a_site_name_that_is_not_one_is_refused_before_anything_is_asked(self):
+        for path in ("/sites/A--b/updates/check", "/sites/x_y/updates/apply"):
+            self.assertIn(self.post(path, {"req": "pu1", "understood": "yes"}).status_code, (400, 404))
+        self.assertEqual(self.acted(), [])
+
+    def test_the_site_page_links_to_updates_and_security(self):
+        self.assertIn('href="/sites/alpha/security"', self.text("/sites/alpha"))
+
+    def test_the_audit_table_keeps_its_narrow_columns_whole(self):
+        html = self.text("/audit")
+        self.assertIn('<table class="audit">', html)
+        self.assertRegex(html, r'<td class="rest">')
+        css = self.get("/static/panel.css").get_data(as_text=True)
+        self.assertIn("table.audit td:not(.rest)", css)
+        self.assertIn("white-space: nowrap", css.split("table.audit td:not(.rest)")[1].split("}")[0])
+
+
 class ReadOnly(Base):
     def test_the_app_has_exactly_these_routes_and_none_of_them_changes_anything_on_dellwp(self):
         rules = sorted((r.rule, tuple(sorted(m for m in r.methods if m not in ("HEAD", "OPTIONS")))) for r in self.app.url_map.iter_rules())
@@ -1156,7 +1386,8 @@ class ReadOnly(Base):
                                         ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
                                         ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
                                         ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
-                                        ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
+                                        ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
+                                        ("/sites/<name>/updates/apply", ("POST",)), ("/sites/<name>/updates/check", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),
                          "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install; batch 13: the import)")
 

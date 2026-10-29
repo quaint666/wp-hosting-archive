@@ -138,3 +138,26 @@ pre.log { background: hsl(30 10% 8%); color: hsl(30 15% 88%); border-radius: .8r
   h1 { font-size: 1.6rem; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+
+/* ---- badges that say good, bad and careful whatever they are about ---- */
+.badge.ok { background: hsl(var(--ok-soft)); color: hsl(var(--ok)); }
+.badge.bad { background: hsl(var(--bad-soft)); color: hsl(var(--bad)); }
+.badge.warn { background: hsl(var(--warn-soft)); color: hsl(var(--warn)); }
+
+/* ---- a table inside a card needs no frame of its own; a long form is as wide as the card ---- */
+.table-wrap.flat { border: 0; box-shadow: none; margin: .5rem 0 0; background: transparent; }
+.table-wrap.flat th:first-child, .table-wrap.flat td:first-child { padding-left: 0; }
+td .actions { flex-wrap: nowrap; align-items: center; }
+td .actions form.inline { margin: 0; }
+.table-wrap.flat td:first-child { white-space: nowrap; }
+form.login.wide { max-width: 44rem; }
+.notice a, .alert a { font-weight: 600; }
+.alert ul { margin: .4rem 0 .6rem 1.2rem; padding: 0; }
+div.notice { padding: .75rem 1rem; margin: .5rem 0 1rem; border-radius: .7rem; border: 1px solid hsl(var(--line)); border-left: 4px solid hsl(var(--primary)); background: hsl(var(--primary-soft)); font-size: .92rem; }
+div.alert { padding: .75rem 1rem; margin: .5rem 0 1rem; border-radius: .7rem; border: 1px solid hsl(var(--bad) / .35); border-left: 4px solid hsl(var(--bad)); background: hsl(var(--bad-soft)); color: hsl(var(--bad)); font-size: .92rem; }
+fieldset legend .small { font-weight: 400; }
+fieldset label span { display: block; }
+
+/* ---- the audit: five narrow columns that never break inside a word, and one wide one that does ---- */
+table.audit td:not(.rest), table.audit th:not(:last-child) { white-space: nowrap; }
+table.audit td.rest { font-family: var(--mono); font-size: .8rem; min-width: 20rem; overflow-wrap: anywhere; color: hsl(var(--muted)); }

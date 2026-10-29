@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Updates and security · {{ name }}{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('site', name=name) }}">{{ name | clip(40) }}</a></p>
+<div class="page-head"><div><h1>Updates and security</h1></div>
+  {% if rc == 0 %}<span class="badge ok">none known</span>{% elif rc == 1 %}<span class="badge bad">vulnerabilities found</span>{% elif rc == 3 %}<span class="badge warn">not checked</span>{% endif %}</div>
+
+<section class="card">
+<h2>Known vulnerabilities</h2>
+<p class="small">What this site runs (WordPress, plugins, themes), compared with the Wordfence vulnerability index. A hit is a place to look; a clean result proves nothing. "Not checked" means the index is missing or too old to trust, which is never a pass.</p>
+{% if problem %}<p class="error" role="alert">{{ problem | clip(400) }}</p>{% endif %}
+{% if result %}<pre class="log">{{ result }}</pre>{% elif not problem %}<p>The check printed nothing.</p>{% endif %}
+</section>
+
+<div class="grid">
+<section class="card">
+<h2>Check for updates</h2>
+<p class="small">Lists what wordpress.org offers for this site and changes nothing. The result is in the job's log.</p>
+<form method="post" action="{{ url_for('updates_check', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ 'check' }}">
+  <button type="submit" class="secondary">Check for updates</button>
+</form>
+</section>
+
+<section class="card">
+<h2>Apply all updates now</h2>
+<p class="small">Everything wordpress.org offers, major plugin and theme updates included. A snapshot is taken first; the site answers 503 while it updates; if it does not come back healthy the snapshot is put back by itself and you are told. A new major WordPress release is only ever reported, never applied here.</p>
+{% if state == 'stopped' %}<p class="notice">This site is stopped: move it to hold first.</p>{% endif %}
+<form method="post" action="{{ url_for('updates_apply', name=name) }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ 'apply' }}">
+  <label><input type="checkbox" name="understood" value="yes"> <span>I know the site is paused while it updates.</span></label>
+  <div class="actions"><button type="submit">Apply the updates</button></div>
+</form>
+</section>
+</div>
+{% endblock %}
