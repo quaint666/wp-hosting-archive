@@ -33,6 +33,9 @@ from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_sites.py)
 USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                        # an existing WordPress user (wp-site-password)
+ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                        # the administrator wp-site-install creates (the tool's own rule)
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                         # what wp-site-install accepts as an email address
+LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")                          # a site's label: 1 to 100 characters, no leading or trailing space (the registry's rule; control characters are refused before this)
 IMPORT_FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")           # what wp-site-import accepts in the intake directory
 REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
@@ -182,6 +185,11 @@ def known_sites(cfg):
     except OSError:
         pass
     return found
+
+
+def target(args):
+    """The site a request is about: the existing site it names, or for a verb that makes one the name it proposes."""
+    return args.get("site") or args.get("name")
 
 
 def check_new_name(cfg, name):
@@ -365,7 +373,7 @@ def find_job(ctl, req):
 def start_job(ctl, verb_name, args, plan, rec):
     """Write the job's request, take the site's lock once to see that it is free, and start the unit that runs this program again with --run-job. With a request id the whole step is one:
     the same request again returns the job it started; the same id for anything else is refused."""
-    site = args["site"]
+    site = target(args)
     table = take_lock(ctl, "_jobs", wait=True)
     try:
         if rec.get("req"):
@@ -585,6 +593,37 @@ def h_delete(call):
     return call.job([call.ctl.tool("wp-site-delete"), call.args["site"]], tty=[call.args["confirm_again"]])
 
 
+def registered(call):
+    """The site's directory must hold a registry record: the provisioning tool works from it. A site the Ansible play still builds has none until it is migrated."""
+    if not os.path.isfile(os.path.join(call.ctl.cfg["data_dir"], call.args["site"], "site.json")):
+        raise Refuse("not_registered", "%s has no registry record; the play still builds it, so wp-site-provision cannot change it" % call.args["site"])
+
+
+def h_create(call):
+    """A new, empty site on hold (no WordPress in it yet: `install` does that). The name is checked here as `check-name` does, and again by the tool, which also allocates the ports and ids."""
+    a = call.args
+    check_new_name(call.ctl.cfg, a["name"])
+    return call.job([call.ctl.tool("wp-site-provision"), "create", a["name"]] + (["--set", "label=" + a["label"]] if "label" in a else []))
+
+
+def h_apply(call):
+    registered(call)
+    return call.job([call.ctl.tool("wp-site-provision"), "apply", call.args["site"]])
+
+
+def h_install(call):
+    """WordPress into an empty site. The password is the one line after the request, as for `password`; the title, user and email are options of the tool, so it asks only for the password (twice, from its terminal file)."""
+    a = call.args
+    line, complete = read_line(call.fd, 1024)
+    try:
+        pw = line.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Refuse("bad_password", "the password is not text")
+    if not complete or CONTROL_RE.search(pw) or len(pw) < MIN_PASSWORD or len(pw) > MAX_TEXT:
+        raise Refuse("bad_password", "send the new password as one line of %d to %d characters, without control characters" % (MIN_PASSWORD, MAX_TEXT))
+    return call.reply([call.ctl.tool("wp-site-install"), a["site"], "--title=" + a["title"], "--user=" + a["user"], "--email=" + a["email"]], tty=[pw, pw], scrub=(pw,))
+
+
 def h_password(call):
     """The password is the one line after the request: checked here so a wrong one never reaches the tool, and never put in an argument, the audit or a log."""
     line, complete = read_line(call.fd, 1024)
@@ -633,6 +672,9 @@ VERBS = {
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
     "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),
+    "create": Verb("job", {"name": Arg("name"), "label": Arg("text", required=False, rx=LABEL_RE)}, h_create),
+    "apply": Verb("job", {"site": SITE}, h_apply),
+    "install": Verb("secret", {"site": SITE, "title": Arg("text", rx=LABEL_RE), "user": Arg("text", rx=ADMIN_NAME_RE), "email": Arg("text", rx=EMAIL_RE)}, h_install, lock=True),
     "import-receive": Verb("stream", {"file": Arg("text", rx=IMPORT_FILE_RE)}, h_import_receive),
     "import-discard": Verb("inline", {"file": Arg("text", rx=IMPORT_FILE_RE), "if_present": Arg("flag")}, h_import_discard),
     "import-run": Verb("job", {"site": SITE, "file": Arg("text", rx=IMPORT_FILE_RE), "plan": Arg("flag"), "replace": Arg("flag"),
@@ -654,7 +696,7 @@ def dispatch(ctl, name, raw, req, coerce, fd):
         if verb is None:
             raise Refuse("unknown_verb", "no such verb")
         args = parse_args(ctl, verb, raw, coerce)
-        rec.update(site=args.get("site"), args={k: v for k, v in args.items() if k != "site"} or None)
+        rec.update(site=target(args), args={k: v for k, v in args.items() if k not in ("site", "name")} or None)
         call = Call(ctl, name, args, rec, fd)
         if verb.kind == "read":
             return verb.handler(call)

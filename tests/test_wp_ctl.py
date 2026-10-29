@@ -58,6 +58,7 @@ exit 0
 SYSTEMD_RUN = "#!/bin/bash\n{ printf 'systemd-run'; for a in \"$@\"; do printf ' [%%s]' \"$a\"; done; printf '\\n'; } >> '%(dir)s/calls.log'\nexit \"$(cat '%(dir)s/sd_rc' 2>/dev/null || echo 0)\"\n"
 LOGGER = "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> '%(dir)s/journal'\nexit \"$(cat '%(dir)s/logger_rc' 2>/dev/null || echo 0)\"\n"
 LIMITS = {"default": {"timeout_s": 30, "memory_mb": 512, "tasks": 256}, "password": {"timeout_s": 30}, "backup": {"timeout_s": 600}, "delete": {"timeout_s": 600, "memory_mb": 384},
+          "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "install": {"timeout_s": 40},
           "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}}
 HOSTILE_SITES = ["../x", "Site", "a;id", "x y", "", "a" * 25, "-a", "a-", "wp test", "wptest\n", "wptest/../held", "*", "wptest\x00", "WPTEST", "a", "nosuch", "wptest ", "$(id)"]
 
@@ -72,7 +73,7 @@ class Base(unittest.TestCase):
         for site in ("wptest", "held"):
             (self.data / site).mkdir()
         self.shim = self.tmp / "seen"
-        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-ctl"):
+        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-ctl"):
             self.script(name, TOOL)
         self.script("wp-sites-status", STATUS)
         self.script("systemd-run", SYSTEMD_RUN)
@@ -774,7 +775,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset"})
+                                             "import-approve", "import-reset", "create", "apply", "install"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)
@@ -844,6 +845,131 @@ class Reads(Base):
                 else:
                     self.assertEqual((rc, reply["error"]), (2, code))
         self.assert_nothing_happened()
+
+
+class Provisioning(Base):
+    """create, apply and install: the verbs over wp-site-provision and wp-site-install."""
+
+    def registered(self, name="regsite"):
+        (self.data / name).mkdir(exist_ok=True)
+        (self.data / name / "site.json").write_text("{}")
+
+    def install_req(self, **kw):
+        return dict({"verb": "install", "site": "wptest", "title": "My shop", "user": "owner", "email": "owner@example.org"}, **kw)
+
+    def test_create_and_apply_start_jobs_with_exactly_the_tools_argument_list(self):
+        self.registered()
+        b = str(self.bin)
+        for label, req, argv in (("create", {"verb": "create", "name": "fresh"}, [b + "/wp-site-provision", "create", "fresh"]),
+                                 ("create with a label", {"verb": "create", "name": "fresh2", "label": "Aunt May's shop"}, [b + "/wp-site-provision", "create", "fresh2", "--set", "label=Aunt May's shop"]),
+                                 ("apply", {"verb": "apply", "site": "regsite"}, [b + "/wp-site-provision", "apply", "regsite"])):
+            with self.subTest(label):
+                rc, reply = self.call(req)
+                self.assertEqual((rc, reply["ok"]), (0, True), reply)
+                spec = self.spec(reply["job"])
+                self.assertEqual(spec["argv"], argv)
+                self.assertEqual(spec["site"], req.get("name") or req["site"], "the job is about the new site, so it takes that name's lock")
+                self.assertFalse((self.state / "jobs" / reply["job"] / "tty").exists())
+        self.assertEqual([c for c in self.calls() if not c.startswith("systemd-run")], [], "starting a job runs no tool")
+
+    def test_the_audit_names_the_new_site_and_the_job_unit_gets_the_verbs_own_limits(self):
+        rc, reply = self.call({"verb": "create", "name": "fresh", "label": "Shop"})
+        first = self.audit()[0]
+        self.assertEqual((first["phase"], first["verb"], first["site"], first["args"]), ("intent", "create", "fresh", {"label": "Shop"}))
+        self.assertIn("[--property=RuntimeMaxSec=1000]", self.calls()[0], "700 s plus the unit grace")
+        self.registered()
+        self.call({"verb": "apply", "site": "regsite"})
+        self.assertIn("[--property=RuntimeMaxSec=1010]", self.calls()[1])
+
+    def test_a_create_that_breaks_a_naming_rule_or_carries_anything_else_is_refused_and_runs_nothing(self):
+        self.registered("reg")
+        for label, req, code in (("reserved", {"name": "hub"}, "reserved_name"), ("a site", {"name": "wptest"}, "name_taken"), ("a registry-only site", {"name": "reg"}, "name_taken"),
+                                 ("a closed site", {"name": "oldsite"}, "name_was_used"), ("upper case", {"name": "Fresh"}, "invalid_name"), ("one letter", {"name": "a"}, "invalid_name"),
+                                 ("no name", {}, "missing_argument"), ("a setting the verb does not take", {"name": "fresh", "quota_mb": 5}, "unknown_argument"),
+                                 ("--set smuggled in the name", {"name": "fresh --set x=1"}, "invalid_name"), ("a label with a leading space", {"name": "fresh", "label": " x"}, "bad_value"),
+                                 ("a label with a control character", {"name": "fresh", "label": "a\nb"}, "bad_value"), ("a label of 101 characters", {"name": "fresh", "label": "x" * 101}, "bad_value"),
+                                 ("an empty label", {"name": "fresh", "label": ""}, "bad_value"), ("a label that is a number", {"name": "fresh", "label": 5}, "bad_type")):
+            with self.subTest(label):
+                rc, reply = self.call(dict({"verb": "create"}, **req))
+                self.assertEqual((rc, reply["error"]), (2, code))
+        self.assertEqual((self.calls(), self.jobs()), ([], []))
+
+    def test_a_label_of_one_or_a_hundred_characters_is_accepted(self):
+        for n, label in enumerate(("x", "y" * 100, "two words")):
+            rc, reply = self.call({"verb": "create", "name": "fresh%d" % n, "label": label})
+            self.assertEqual((rc, reply["ok"]), (0, True), label)
+
+    def test_apply_needs_a_registry_record_and_an_existing_site(self):
+        rc, reply = self.call({"verb": "apply", "site": "wptest"})
+        self.assertEqual((rc, reply["error"]), (2, "not_registered"), "a site the play still builds")
+        rc, reply = self.call({"verb": "apply", "site": "nosuch"})
+        self.assertEqual((rc, reply["error"]), (2, "unknown_site"))
+        link = self.tmp / "elsewhere"
+        link.mkdir()
+        (link / "site.json").write_text("{}")
+        (self.data / "viasymlink").symlink_to(link)
+        self.assertEqual(self.call({"verb": "apply", "site": "viasymlink"})[1]["error"], "unknown_site")
+        self.assertEqual((self.calls(), self.jobs()), ([], []))
+
+    def test_a_repeated_create_is_the_same_job_and_two_creates_of_one_name_do_not_overlap(self):
+        req = {"verb": "create", "name": "fresh", "req": "r1"}
+        first = self.call(req)[1]
+        again = self.call(req)[1]
+        self.assertEqual((again["job"], again.get("duplicate")), (first["job"], True))
+        fd = wp_ctl.take_lock(wp_ctl.Ctl(self.cfg, self.env, self.clock, subprocess.run), "other")
+        self.addCleanup(os.close, fd)
+        rc, reply = self.call({"verb": "create", "name": "other"})
+        self.assertEqual((rc, reply["error"]), (2, "busy"))
+        rc, reply = self.call({"verb": "create", "name": "fresh", "req": "r1", "label": "different"})
+        self.assertEqual((rc, reply["error"]), (2, "req_reused"))
+
+    def test_a_create_job_runs_the_tool_and_records_its_exit_code(self):
+        rc, reply = self.call({"verb": "create", "name": "fresh"})
+        self.assertEqual(self.run_job(reply["job"]), 0)
+        self.assertEqual(self.calls()[-1], "wp-site-provision [create] [fresh]")
+        self.assertEqual((self.state / "jobs" / reply["job"] / "exit").read_text(), "0\n")
+        self.assertEqual(self.audit()[-1]["site"], "fresh")
+        self.control("rc", 1)
+        rc, reply = self.call({"verb": "create", "name": "fresh2"})
+        self.run_job(reply["job"])
+        self.assertEqual((self.state / "jobs" / reply["job"] / "exit").read_text(), "1\n")
+
+    def test_install_gives_the_tool_its_options_and_the_password_only_through_the_terminal_file(self):
+        rc, reply = self.call(self.install_req(), extra=(CANARY + "\n").encode())
+        self.assertEqual((rc, reply["ok"]), (0, True), reply)
+        self.assertEqual(self.calls(), ["wp-site-install [wptest] [--title=My shop] [--user=owner] [--email=owner@example.org]"])
+        self.assertEqual(self.tty_seen(), ["%s\n%s\n" % (CANARY, CANARY)], "asked twice, as the tool does")
+        self.assertEqual([p.read_text().strip() for p in self.shim.glob("tty.mode.*")], ["600"])
+        self.assertEqual(sorted(p.name for p in self.run.glob("*")), [], "the terminal file is removed")
+
+    def test_the_install_password_is_in_no_audit_line_journal_log_or_reply(self):
+        self.control("leak", 1)
+        rc, reply = self.call(self.install_req(), extra=(CANARY + "\n").encode())
+        self.assertNotIn(CANARY, json.dumps(reply))
+        self.assertIn("REDACTED", reply["out"])
+        for p in self.tmp.rglob("*"):
+            if p.is_file() and p.parent != self.stdin_dir and not p.name.startswith("tty.seen."):
+                self.assertNotIn(CANARY.encode(), p.read_bytes(), "the password is in " + str(p))
+
+    def test_a_bad_install_request_is_refused_before_the_tool(self):
+        for label, req, extra, code in (("no password", {}, b"", "bad_password"), ("short password", {}, b"short\n", "bad_password"), ("control character", {}, b"abcdefghijklmnop\x07\n", "bad_password"),
+                                        ("user too short", {"user": "ab"}, CANARY.encode() + b"\n", "bad_value"), ("user with a space", {"user": "my user"}, CANARY.encode() + b"\n", "bad_value"),
+                                        ("not an email", {"email": "owner"}, CANARY.encode() + b"\n", "bad_value"), ("email with a space", {"email": "a b@example.org"}, CANARY.encode() + b"\n", "bad_value"),
+                                        ("no title", {"title": ""}, CANARY.encode() + b"\n", "bad_value"), ("no site", {"site": "nosuch"}, CANARY.encode() + b"\n", "unknown_site"),
+                                        ("a password as an argument", {"password": CANARY}, CANARY.encode() + b"\n", "unknown_argument")):
+            with self.subTest(label):
+                rc, reply = self.call(self.install_req(**req), extra=extra)
+                self.assertEqual((rc, reply["error"]), (2, code))
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(sorted(p.name for p in self.run.glob("*")), [])
+        self.assertNotIn(CANARY, self.audit_file.read_text(), "not even the refused attempt that carried it as an argument")
+
+    def test_install_holds_the_sites_lock(self):
+        fd = wp_ctl.take_lock(wp_ctl.Ctl(self.cfg, self.env, self.clock, subprocess.run), "wptest")
+        self.addCleanup(os.close, fd)
+        rc, reply = self.call(self.install_req(), extra=(CANARY + "\n").encode())
+        self.assertEqual((rc, reply["error"]), (2, "busy"))
+        self.assertEqual(self.calls(), [])
 
 
 class CommandLine(Base):

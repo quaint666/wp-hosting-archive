@@ -101,6 +101,18 @@ M = [
  ("the key file loses its owner", "tasks/wp_ctl_common.yml", '    dest: "/var/lib/{{ wp_ctl_user }}/.ssh/authorized_keys"\n    owner: root\n    group: root\n    mode: "0644"', '    dest: "/var/lib/{{ wp_ctl_user }}/.ssh/authorized_keys"\n    mode: "0644"'),
  ("a delete needs only one typing", W, '"confirm_again": Arg("text", rx=NAME_RE, same="site")}', '"confirm_again": Arg("text", required=False, rx=NAME_RE, same="site")}'),
  ("the second typing is not compared", W, '"confirm_again": Arg("text", rx=NAME_RE, same="site")}', '"confirm_again": Arg("text", rx=NAME_RE)}'),
+ ("create skips the name check", W, 'check_new_name(call.ctl.cfg, a["name"])\n    return call.job', 'return call.job'),
+ ("apply works on a site with no record", W, 'def h_apply(call):\n    registered(call)', 'def h_apply(call):\n    pass'),
+ ("install password not scrubbed", W, 'tty=[pw, pw], scrub=(pw,))', 'tty=[pw, pw])'),
+ ("install asks the tool for the password once", W, '"--email=" + a["email"]], tty=[pw, pw]', '"--email=" + a["email"]], tty=[pw]'),
+ ("install holds no lock", W, 'h_install, lock=True)', 'h_install, lock=False)'),
+ ("a job is about the wrong site", W, '    site = target(args)\n    table', '    site = args.get("site") or "x"\n    table'),
+ ("the audit shows no new name", W, 'rec.update(site=target(args)', 'rec.update(site=args.get("site")'),
+ ("create passes the label as a bare setting", W, '["--set", "label=" + a["label"]]', '["--set", a["label"]]'),
+ ("any label accepted", W, r'LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")', 'LABEL_RE = re.compile(r".*")'),
+ ("any email accepted", W, r'EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")', 'EMAIL_RE = re.compile(r".*")'),
+ ("any administrator name accepted", W, r'ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")', 'ADMIN_NAME_RE = re.compile(r".*")'),
+ ("install passes the title without its option name", W, '"--title=" + a["title"]', 'a["title"]'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
