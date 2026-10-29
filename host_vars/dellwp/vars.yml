@@ -250,6 +250,8 @@ wp_ctl_limits:
   delete: { timeout_s: 3600 }
   create: { timeout_s: 1800 }
   apply: { timeout_s: 1800 }
+  set: { timeout_s: 1800 }
+  ensure-state: { timeout_s: 5400 }
   install: { timeout_s: 600 }
   import-receive: { timeout_s: 14400 }
   import-run: { timeout_s: 14400, memory_mb: 1024 }

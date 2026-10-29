@@ -58,7 +58,7 @@ exit 0
 SYSTEMD_RUN = "#!/bin/bash\n{ printf 'systemd-run'; for a in \"$@\"; do printf ' [%%s]' \"$a\"; done; printf '\\n'; } >> '%(dir)s/calls.log'\nexit \"$(cat '%(dir)s/sd_rc' 2>/dev/null || echo 0)\"\n"
 LOGGER = "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> '%(dir)s/journal'\nexit \"$(cat '%(dir)s/logger_rc' 2>/dev/null || echo 0)\"\n"
 LIMITS = {"default": {"timeout_s": 30, "memory_mb": 512, "tasks": 256}, "password": {"timeout_s": 30}, "backup": {"timeout_s": 600}, "delete": {"timeout_s": 600, "memory_mb": 384},
-          "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "install": {"timeout_s": 40},
+          "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "set": {"timeout_s": 720}, "ensure-state": {"timeout_s": 730}, "install": {"timeout_s": 40},
           "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}}
 HOSTILE_SITES = ["../x", "Site", "a;id", "x y", "", "a" * 25, "-a", "a-", "wp test", "wptest\n", "wptest/../held", "*", "wptest\x00", "WPTEST", "a", "nosuch", "wptest ", "$(id)"]
 
@@ -775,7 +775,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "install"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)
@@ -910,6 +910,82 @@ class Provisioning(Base):
         (self.data / "viasymlink").symlink_to(link)
         self.assertEqual(self.call({"verb": "apply", "site": "viasymlink"})[1]["error"], "unknown_site")
         self.assertEqual((self.calls(), self.jobs()), ([], []))
+
+    def test_set_and_ensure_state_start_jobs_with_exactly_the_tools_argument_list(self):
+        self.registered()
+        b = str(self.bin) + "/wp-site-provision"
+        for label, req, argv in (("a limit", {"verb": "set", "site": "regsite", "key": "php_mem_mb", "value": "640"}, [b, "set", "regsite", "php_mem_mb=640"]),
+                                 ("a switch", {"verb": "set", "site": "regsite", "key": "allow_xmlrpc", "value": "true"}, [b, "set", "regsite", "allow_xmlrpc=true"]),
+                                 ("a note with spaces and an equals sign", {"verb": "set", "site": "regsite", "key": "note", "value": "a = b; $(id) `x`"}, [b, "set", "regsite", "note=a = b; $(id) `x`"]),
+                                 ("clearing a note", {"verb": "set", "site": "regsite", "key": "note", "value": ""}, [b, "set", "regsite", "note="]),
+                                 ("hold", {"verb": "ensure-state", "site": "regsite", "state": "hold"}, [b, "state", "regsite", "hold"]),
+                                 ("stopped", {"verb": "ensure-state", "site": "regsite", "state": "stopped"}, [b, "state", "regsite", "stopped"]),
+                                 ("live, confirmed", {"verb": "ensure-state", "site": "regsite", "state": "live", "confirm_name": "regsite"}, [b, "state", "regsite", "live"])):
+            with self.subTest(label):
+                rc, reply = self.call(req)
+                self.assertEqual((rc, reply["ok"]), (0, True), reply)
+                self.assertEqual(self.spec(reply["job"])["argv"], argv)
+                self.assertEqual(self.spec(reply["job"])["site"], "regsite")
+        self.assertEqual([c for c in self.calls() if not c.startswith("systemd-run")], [], "starting a job runs no tool")
+
+    def test_going_live_needs_the_sites_name_and_the_other_states_do_not(self):
+        self.registered()
+        for label, req, code in (("no confirmation", {"state": "live"}, "missing_argument"), ("the wrong name", {"state": "live", "confirm_name": "wptest"}, "confirm_mismatch"),
+                                 ("an empty name", {"state": "live", "confirm_name": ""}, "bad_value"), ("the name in capitals", {"state": "live", "confirm_name": "REGSITE"}, "bad_value")):
+            with self.subTest(label):
+                rc, reply = self.call(dict({"verb": "ensure-state", "site": "regsite"}, **req))
+                self.assertEqual((rc, reply["error"]), (2, code))
+        self.assertEqual((self.calls(), self.jobs()), ([], []))
+        for state in ("hold", "stopped"):
+            self.assertEqual(self.call({"verb": "ensure-state", "site": "regsite", "state": state})[0], 0, state)
+        rc, reply = self.call({"verb": "ensure-state", "site": "regsite", "state": "hold", "confirm_name": "wptest"})
+        self.assertEqual((rc, reply["error"]), (2, "confirm_mismatch"), "a confirmation that is given must still be right")
+
+    def test_set_and_ensure_state_refuse_what_they_must_before_anything_starts(self):
+        self.registered()
+        s = {"verb": "set", "site": "regsite"}
+        e = {"verb": "ensure-state", "site": "regsite"}
+        for label, req, code in (("the port", dict(s, key="port", value="9999"), "bad_value"), ("the state", dict(s, key="state", value="live"), "bad_value"), ("the name", dict(s, key="name", value="x"), "bad_value"),
+                                 ("the quota id", dict(s, key="quota_id", value="5"), "bad_value"), ("a hidden key", dict(s, key="fpm_max_children", value="5"), "bad_value"), ("no key", dict(s, value="5"), "missing_argument"),
+                                 ("no value", dict(s, key="note"), "missing_argument"), ("a value with a control character", dict(s, key="note", value="a\nb"), "bad_value"),
+                                 ("a note of 501 characters", dict(s, key="note", value="x" * 501), "bad_value"), ("a value that is a list", dict(s, key="note", value=["x"]), "bad_type"), ("a number where text is wanted (the page sends text; the command line coerces)", dict(s, key="php_mem_mb", value=640), "bad_type"),
+                                 ("two keys at once", dict(s, key="note", value="x", upload_mb=5), "unknown_argument"), ("a site the play builds", dict(s, site="wptest", key="note", value="x"), "not_registered"),
+                                 ("a site that does not exist", dict(s, site="nosuch", key="note", value="x"), "unknown_site"), ("a state that does not exist", dict(e, state="paused"), "bad_value"),
+                                 ("closing by state", dict(e, state="closed"), "bad_value"), ("no state", e, "missing_argument"), ("a state in capitals", dict(e, state="HOLD"), "bad_value"),
+                                 ("a site the play builds", dict(e, site="wptest", state="hold"), "not_registered"), ("a site that does not exist", dict(e, site="nosuch", state="hold"), "unknown_site")):
+            with self.subTest(label):
+                rc, reply = self.call(req)
+                self.assertEqual((rc, reply["error"]), (2, code), reply)
+        self.assertEqual((self.calls(), self.jobs()), ([], []))
+
+    def test_a_note_of_the_longest_allowed_size_and_a_value_that_looks_like_an_option_are_accepted_as_values(self):
+        self.registered()
+        for value in ("x" * 500, "--yes", "-1", "=", "plain"):
+            rc, reply = self.call({"verb": "set", "site": "regsite", "key": "note", "value": value})
+            self.assertEqual((rc, reply["ok"]), (0, True), value[:20])
+            self.assertEqual(self.spec(reply["job"])["argv"][-1], "note=" + value, "one argument: the tool splits at the first equals sign")
+
+    def test_set_and_ensure_state_are_audited_with_their_arguments_and_get_their_own_limits(self):
+        self.registered()
+        self.call({"verb": "set", "site": "regsite", "key": "php_mem_mb", "value": "640"})
+        self.call({"verb": "ensure-state", "site": "regsite", "state": "live", "confirm_name": "regsite"})
+        first = self.audit()[0]
+        self.assertEqual((first["phase"], first["verb"], first["site"], first["args"]), ("intent", "set", "regsite", {"key": "php_mem_mb", "value": "640"}))
+        live = [a for a in self.audit() if a["verb"] == "ensure-state" and a["phase"] == "intent"][0]
+        self.assertEqual(live["args"], {"state": "live", "confirm_name": "regsite"})
+        self.assertIn("[--property=RuntimeMaxSec=1020]", self.calls()[0], "720 s plus the unit grace")
+        self.assertIn("[--property=RuntimeMaxSec=1030]", self.calls()[1], "730 s plus the unit grace")
+
+    def test_two_changes_to_one_site_do_not_overlap_and_a_repeat_is_the_same_job(self):
+        self.registered()
+        req = {"verb": "ensure-state", "site": "regsite", "state": "hold", "req": "r1"}
+        first = self.call(req)[1]
+        again = self.call(req)[1]
+        self.assertEqual((again["job"], again.get("duplicate")), (first["job"], True))
+        fd = wp_ctl.take_lock(wp_ctl.Ctl(self.cfg, self.env, self.clock, subprocess.run), "regsite")
+        self.addCleanup(os.close, fd)
+        rc, reply = self.call({"verb": "set", "site": "regsite", "key": "note", "value": "x"})
+        self.assertEqual((rc, reply["error"]), (2, "busy"))
 
     def test_a_repeated_create_is_the_same_job_and_two_creates_of_one_name_do_not_overlap(self):
         req = {"verb": "create", "name": "fresh", "req": "r1"}

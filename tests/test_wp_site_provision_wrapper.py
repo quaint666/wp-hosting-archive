@@ -66,7 +66,8 @@ class Wrapper(unittest.TestCase):
         self.assertEqual((c["master_secret_file"], c["resend_key_file"]), (v["wp_provision_secret_dir"] + "/master_secret", v["wp_provision_secret_dir"] + "/resend_key"))
         self.assertEqual((c["lock_dir"], c["command_timeout_s"], c["probe_tries"], c["probe_delay_s"]), (v["wp_provision_lock_dir"], v["wp_provision_command_timeout_s"], v["wp_provision_probe_tries"], v["wp_provision_probe_delay_s"]))
         self.assertEqual(c["platform"], {k: v[k] for k in v["wp_provision_platform_vars"]})
-        self.assertEqual(set(c["tools"]), {"docker", "nginx", "systemctl", "lsattr", "chattr", "repquota", "setquota"})
+        self.assertEqual(set(c["tools"]), {"docker", "nginx", "systemctl", "lsattr", "chattr", "repquota", "setquota", "backup"})
+        self.assertEqual((c["tools"]["backup"], c["backup_timeout_s"]), (v["wp_tools_bin"] + "/wp-site-backup", v["wp_ctl_limits"]["backup"]["timeout_s"]), "the final backup runs with the backup verb's own time limit")
         for path in c["tools"].values():
             self.assertTrue(path.startswith("/usr/"), path)
 

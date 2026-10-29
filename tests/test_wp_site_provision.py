@@ -40,7 +40,7 @@ class FakeHost:
     every call as one line. It is the `run` the tool is given: the real call (argument list, clean environment, no stdin, a timeout) is checked here."""
 
     def __init__(self, path):
-        self.path, self.calls = path, []
+        self.path, self.calls, self.timeouts = path, [], {}
         self.projects, self.quota, self.images, self.enabled, self.active, self.fails = {}, {}, set(), set(), set(), {}
 
     def failing(self, *keys):
@@ -55,9 +55,10 @@ class FakeHost:
         assert stdin == subprocess.DEVNULL and capture_output and text and isinstance(timeout, int), (stdin, timeout)
         name, args = os.path.basename(argv[0]), argv[1:]
         self.calls.append(" ".join([name] + args))
+        self.timeouts[self.calls[-1]] = timeout
         rc, out, err = 0, "", ""
-        bad = {"setquota": self.failing("setquota"), "nginx": self.failing("nginx"), "docker": self.failing("docker." + args[0]) if args else None,
-               "systemctl": self.failing("systemctl." + args[0], "systemctl.%s.%s" % (args[0], [a for a in args[1:] if not a.startswith("--")][0] if len(args) > 1 else "")) if args else None}.get(name)
+        bad = {"setquota": self.failing("setquota"), "nginx": self.failing("nginx"), "wp-site-backup": self.failing("backup"), "docker": self.failing("docker." + args[0]) if args else None,
+               "systemctl": self.failing("systemctl." + args[0], "systemctl.%s.%s" % (args[0], [a for a in args[1:] if not a.startswith("--")][0] if len(args) > 1 else "")) if args and name == "systemctl" else None}.get(name)
         if bad is not None:
             return subprocess.CompletedProcess(argv, 1, "", bad)
         if name == "lsattr":
@@ -130,8 +131,8 @@ class Base(unittest.TestCase):
             "known": [{"name": "old", "port": 9101, "quota_id": 1001, "state": "closed", "update_policy": "auto"}],
             "fit": dict(reserved_names=v["wp_reserved_names"], vm_memory_mb=vm["memory"], data_disk_gb=vm["data_disk"], ram_reserve_mb=v["wp_vm_ram_reserve_mb"], data_reserve_mb=v["wp_data_reserve_mb"],
                         backup_quota_offset=v["wp_backup_quota_offset"], scratch_quota_id=v["wp_scratch_quota_id"], archive_quota_id=v["wp_archive_quota_id"], intake_quota_id=v["wp_intake_quota_id"]),
-            "tools": {n: "/usr/bin/" + n for n in ("lsattr", "chattr", "repquota", "setquota", "docker", "nginx", "systemctl")},
-            "path": "/usr/bin:/bin", "command_timeout_s": 30, "probe_tries": 3, "probe_delay_s": 5,
+            "tools": {**{n: "/usr/bin/" + n for n in ("lsattr", "chattr", "repquota", "setquota", "docker", "nginx", "systemctl")}, "backup": "/usr/bin/wp-site-backup"},
+            "path": "/usr/bin:/bin", "command_timeout_s": 30, "probe_tries": 3, "probe_delay_s": 5, "backup_timeout_s": 3600,
         }
         self.lines, self.chowns, self.statuses, self.sleeps, self.probes = [], [], [200], [], []
         self.clock = 1793000000.0
@@ -540,6 +541,171 @@ class Apply(Base):
             fh.close()
 
 
+class SetAndState(Base):
+    def setUp(self):
+        super().setUp()
+        self.make().create("alpha")
+        self.mark = len(self.calls())
+        self.lines.clear()
+
+    def unchanged(self, what):
+        self.assertEqual((self.record(), self.changing(self.mark)), (self.before, []), what)
+
+    def test_set_records_the_value_and_applies_it(self):
+        self.make().set("alpha", ["php_mem_mb=640", "upload_mb=64"])
+        self.assertEqual((self.record()["php_mem_mb"], self.record()["upload_mb"]), (640, 64))
+        self.assertIn("systemctl restart wp-alpha", self.changing(self.mark), "the memory is in the compose file")
+        self.assertIn("recorded php_mem_mb=640, upload_mb=64 for alpha", self.lines)
+        self.assertEqual(self.make().render("alpha")[0] and {st for _, st in self.make().render("alpha")[0]}, {"same"}, "the VM matches the record afterwards")
+
+    def test_the_same_value_again_changes_nothing(self):
+        self.make().set("alpha", ["php_mem_mb=640"])
+        mark = len(self.calls())
+        self.make().set("alpha", ["php_mem_mb=640"])
+        self.assertEqual(self.changing(mark), [])
+        self.assertEqual(self.lines[-1], "alpha already has that; nothing changed")
+
+    def test_label_and_note_are_only_recorded(self):
+        self.make().set("alpha", ["label=Aunt May's shop", "note=her bakery"])
+        self.assertEqual((self.record()["label"], self.record()["note"]), ("Aunt May's shop", "her bakery"))
+        self.assertEqual(self.calls()[self.mark:], [], "not even a read: nothing of a label is on the VM")
+        self.make().set("alpha", ["note="])
+        self.assertEqual(self.record()["note"], "", "a note can be cleared")
+
+    def test_refusals_change_nothing(self):
+        self.before = self.record()
+        for label, sets in (("a field that is not editable", ["port=9999"]), ("the state", ["state=live"]), ("the name", ["name=other"]), ("the quota id", ["quota_id=5"]),
+                            ("a value out of range", ["php_mem_mb=99999"]), ("not a number", ["php_mem_mb=lots"]), ("a key twice", ["php_mem_mb=500", "php_mem_mb=600"]),
+                            ("no equals sign", ["php_mem_mb"]), ("nothing", []), ("a bad policy", ["update_policy=sometimes"]), ("a good one and a bad one", ["upload_mb=64", "mail_mode=maybe"])):
+            with self.subTest(label), self.assertRaises(model.Refuse):
+                self.make().set("alpha", sets)
+        self.unchanged("a refused set")
+
+    def test_a_set_that_no_longer_fits_the_vm_is_refused_before_anything_is_written(self):
+        self.before = self.record()
+        with self.assertRaises(model.Refuse) as e:
+            self.make().set("alpha", ["php_mem_mb=4096", "db_mem_mb=4096"])
+        self.assertIn("would not fit", str(e.exception))
+        self.unchanged("the fit check")
+
+    def test_a_site_without_a_record_or_a_bad_name_is_refused(self):
+        for name in ("bravo", "old", "../x", "A", ""):
+            with self.subTest(name), self.assertRaises(model.Refuse):
+                self.make().set(name, ["upload_mb=64"])
+            with self.assertRaises(model.Refuse):
+                self.make().state(name, "live")
+
+    def test_an_apply_that_fails_leaves_the_record_and_says_how_to_finish(self):
+        self.inject("systemctl.restart")
+        with self.assertRaises(prov.Failed) as e:
+            self.make().set("alpha", ["php_mem_mb=640"])
+        self.assertIn("wp-site-provision apply alpha", str(e.exception))
+        self.assertEqual(self.record()["php_mem_mb"], 640, "what was asked for is recorded; apply converges to it")
+        self.clear("systemctl.restart")
+        self.make().apply("alpha")
+        self.assertEqual({st for _, st in self.make().render("alpha")[0]}, {"same"})
+
+    def test_a_secret_file_that_cannot_be_read_stops_a_set_before_the_write(self):
+        self.before = self.record()
+        self.secret.chmod(0o444)
+        with self.assertRaises(prov.Failed):
+            self.make().set("alpha", ["upload_mb=64"])
+        self.unchanged("an unreadable master secret")
+
+    def test_hold_to_live_and_back(self):
+        hold = (self.tmp / "conf.d/wp_site_alpha.conf").read_text()
+        self.make().state("alpha", "live")
+        self.assertEqual(self.record()["state"], "live")
+        self.assertIn("wp-cron@alpha.timer", self.host.active)
+        self.assertNotEqual((self.tmp / "conf.d/wp_site_alpha.conf").read_text(), hold)
+        self.assertFalse([c for c in self.calls() if c.startswith("wp-site-backup")], "no backup for a move that does not stop the site")
+        self.make().state("alpha", "hold")
+        self.assertEqual(self.record()["state"], "hold")
+        self.assertNotIn("wp-cron@alpha.timer", self.host.active)
+        self.assertEqual((self.tmp / "conf.d/wp_site_alpha.conf").read_text(), hold)
+
+    def test_stopping_takes_the_final_backup_first_then_records_then_stops(self):
+        self.make().state("alpha", "stopped")
+        c = self.calls()
+        backup = next(i for i, x in enumerate(c) if x.startswith("wp-site-backup"))
+        self.assertEqual(c[backup], "wp-site-backup alpha --tag=final")
+        self.assertLess(backup, c.index("systemctl stop wp-alpha"))
+        self.assertEqual(self.record()["state"], "stopped")
+        self.assertTrue((self.site_dir() / "stopped.flag").exists())
+        self.assertNotIn("wp-alpha", self.host.active)
+        self.assertIn("taking the final backup of alpha", self.lines)
+        self.assertEqual(self.host.timeouts["wp-site-backup alpha --tag=final"], 3600, "the backup verb's own limit, not the 30 seconds of a quick command")
+
+    def test_a_live_site_can_be_stopped_with_the_same_backup(self):
+        self.make().state("alpha", "live")
+        mark = len(self.calls())
+        self.make().state("alpha", "stopped")
+        self.assertIn("wp-site-backup alpha --tag=final", self.calls()[mark:])
+        self.assertEqual(self.record()["state"], "stopped")
+        self.assertNotIn("wp-cron@alpha.timer", self.host.active)
+
+    def test_a_failed_final_backup_stops_nothing_and_changes_no_record(self):
+        self.before = self.record()
+        self.inject("backup", "dump failed")
+        with self.assertRaises(prov.Failed) as e:
+            self.make().state("alpha", "stopped")
+        self.assertIn("dump failed", str(e.exception))
+        self.assertEqual(self.record(), self.before)
+        self.assertIn("wp-alpha", self.host.active, "the site is still running")
+        self.assertEqual([c for c in self.changing(self.mark) if not c.startswith("wp-site-backup")], [])
+
+    def test_a_stopped_site_comes_back_on_hold_without_a_backup_and_never_straight_to_live(self):
+        self.make().state("alpha", "stopped")
+        mark = len(self.calls())
+        self.before = self.record()
+        with self.assertRaises(model.Refuse) as e:
+            self.make().state("alpha", "live")
+        self.assertIn("put it on hold first", str(e.exception))
+        self.assertEqual((self.record(), self.calls()[mark:]), (self.before, []), "a refused move reads the record and nothing else")
+        self.make().state("alpha", "hold")
+        self.assertEqual(self.record()["state"], "hold")
+        self.assertIn("wp-alpha", self.host.active)
+        self.assertFalse([c for c in self.calls()[mark:] if c.startswith("wp-site-backup")])
+
+    def test_moving_to_where_it_is_changes_nothing(self):
+        mark = len(self.calls())
+        self.make().state("alpha", "hold")
+        self.assertEqual(self.changing(mark), [])
+        self.assertEqual(self.lines[-1], "alpha already has that; nothing changed")
+        self.assertEqual([c for c in self.calls()[mark:] if c.startswith("wp-site-backup")], [])
+
+    def test_closed_and_unknown_targets_are_refused(self):
+        self.before = self.record()
+        for target in ("closed", "paused", "", "LIVE"):
+            with self.subTest(target), self.assertRaises(model.Refuse):
+                self.make().state("alpha", target)
+        self.unchanged("a refused target")
+
+    def test_a_stopped_site_that_would_not_fit_when_running_is_refused_on_its_way_back(self):
+        self.make().state("alpha", "stopped")
+        self.edit_record(php_mem_mb=4096, db_mem_mb=4096)       # the record of a stopped site may be larger than the VM: it runs nothing
+        with self.assertRaises(model.Refuse) as e:
+            self.make().state("alpha", "hold")
+        self.assertIn("would not fit", str(e.exception))
+        self.assertEqual(self.record()["state"], "stopped")
+
+    def test_the_lock_refuses_a_second_state_change(self):
+        fh = open(Path(self.cfg["lock_dir"]) / "site-alpha.lock", "w")
+        self.addCleanup(fh.close)
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with self.assertRaises(prov.Failed) as e:
+            self.make().state("alpha", "live")
+        self.assertIn("lock", str(e.exception))
+        self.assertEqual(self.record()["state"], "hold")
+
+    def test_no_secret_in_any_output_or_argument(self):
+        self.make().set("alpha", ["php_mem_mb=640"])
+        self.make().state("alpha", "stopped")
+        seen = "\n".join(self.lines + self.calls())
+        for secret in (MASTER, RESEND):
+            self.assertNotIn(secret, seen)
+
+
 class Render(Base):
     def setUp(self):
         super().setUp()
@@ -610,8 +776,24 @@ class Cli(Base):
         self.edit_record(php_mem_mb=700)
         self.assertEqual(self.invoke("apply", "alpha")[0], 1)
 
+    def test_set_and_state_exit_codes(self):
+        self.assertEqual(self.invoke("create", "alpha")[0], 0)
+        rc, out, err = self.invoke("set", "alpha", "upload_mb=64", "note=hello")
+        self.assertEqual((rc, err), (0, []))
+        self.assertEqual(self.invoke("state", "alpha", "live")[0], 0)
+        self.assertEqual(self.invoke("state", "alpha", "stopped")[0], 0)
+        rc, out, err = self.invoke("state", "alpha", "live")
+        self.assertEqual(rc, 2)
+        self.assertIn("refused", err[0])
+        self.assertEqual(self.invoke("set", "alpha", "port=1")[0], 2)
+        self.assertEqual(self.invoke("set", "bravo", "upload_mb=64")[0], 2)
+        self.inject("systemctl.start")
+        rc, out, err = self.invoke("state", "alpha", "hold")
+        self.assertEqual(rc, 1, "a failed start is a failure, not a refusal")
+        self.assertIn("wp-site-provision apply alpha", err[0])
+
     def test_bad_usage_is_a_refusal(self):
-        for argv in ([], ["nosuchverb"], ["create"], ["create", "a", "extra"], ["apply"]):
+        for argv in ([], ["nosuchverb"], ["create"], ["create", "a", "extra"], ["apply"], ["set"], ["set", "alpha"], ["state", "alpha"], ["state", "alpha", "closed"], ["state", "alpha", "live", "x"]):
             with io.StringIO() as buf, unittest.mock.patch("sys.stderr", buf):
                 rc, _, _ = self.invoke(*argv)
             self.assertEqual(rc, 2, argv)

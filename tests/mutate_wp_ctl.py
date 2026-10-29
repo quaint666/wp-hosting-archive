@@ -22,7 +22,7 @@ M = [
  ("names may start with a capital", W, 'NAME_RE = re.compile(r"^[a-z](?:', 'NAME_RE = re.compile(r"^[A-Za-z](?:'),
  ("unknown arguments accepted", W, 'if unknown:\n        raise Refuse("unknown_argument"', 'if False:\n        raise Refuse("unknown_argument"'),
  ("typed confirmation not compared", W, 'if arg.same and key in out and out[key] != out.get(arg.same):', 'if False:'),
- ("replace needs no typed name", W, 'wanted = arg.required and (not arg.needs or out.get(arg.needs))', 'wanted = arg.required and not arg.needs'),
+ ("replace needs no typed name", W, 'wanted = arg.required and (not arg.needs or out.get(arg.needs)) and', 'wanted = arg.required and not arg.needs and'),
  ("audit failure does not stop the action", W, 'if not ok and not quiet:', 'if False:'),
  ("no intent line before the action", W, '        audit(ctl, "intent", rec)\n', '        pass\n'),
  ("refusals not audited", W, '        audit(ctl, "refused", dict(rec, error=e.code), quiet=True)\n', '        pass\n'),
@@ -115,6 +115,32 @@ M = [
  ("a create repeat is refused once the site exists", W, 'if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):', 'if True:'),
  ("a create with a known request id skips every check", W, 'if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):', 'if not call.rec.get("req"):'),
  ("install passes the title without its option name", W, '"--title=" + a["title"]', 'a["title"]'),
+
+ # step 3: set and ensure-state (dispatcher suite unless a suite is named)
+ ("going live needs no confirmation", W, 'and (not arg.when or out.get(arg.when[0]) == arg.when[1])', 'and (not arg.when)'),
+ ("every state needs the confirmation", W, 'and (not arg.when or out.get(arg.when[0]) == arg.when[1])', 'and True'),
+ ("set takes any key", W, '"key": Arg("enum", values=SET_KEYS)', '"key": Arg("text", rx=ANY_RE)'),
+ ("set may change the state and the port", W, '"label", "note")   # = wp_site_model.EDITABLE', '"label", "note", "state", "port")   # = wp_site_model.EDITABLE'),
+ ("a note is cut at the general limit", W, 'len(value) > (self.limit or MAX_TEXT)', 'len(value) > MAX_TEXT'),
+ ("a site can be closed by state", W, 'STATES = ("hold", "live", "stopped")', 'STATES = ("hold", "live", "stopped", "closed")'),
+ ("set works on a site with no record", W, '    registered(call)\n    a = call.args\n    return call.job([call.ctl.tool("wp-site-provision"), "set"', '    a = call.args\n    return call.job([call.ctl.tool("wp-site-provision"), "set"'),
+ ("ensure-state works on a site with no record", W, '    registered(call)\n    return call.job([call.ctl.tool("wp-site-provision"), "state"', '    return call.job([call.ctl.tool("wp-site-provision"), "state"'),
+ ("set passes the value without its key", W, '"%s=%s" % (a["key"], a["value"])', 'a["value"]'),
+ ("ensure-state passes the site and state swapped", W, '"state", call.args["site"], call.args["state"]]', '"state", call.args["state"], call.args["site"]]'),
+ ("a stopped site may go straight to live", "scripts/wp_site_model.py", '"stopped": ("hold",)', '"stopped": ("hold", "live")', "tests/test_wp_site_model.py"),
+ ("no backup is planned before a stop", "scripts/wp_site_model.py", '(["backup"] if target == "stopped" else [])', '([] if target == "stopped" else [])', "tests/test_wp_site_model.py"),
+ ("a closed site can be moved", "scripts/wp_site_model.py", '    if current == "closed":\n        raise Refuse("the site is closed', '    if False:\n        raise Refuse("the site is closed', "tests/test_wp_site_model.py"),
+ ("a move to the same state is a change", "scripts/wp_site_model.py", '    if current == target:\n        return []', '    if False:\n        return []', "tests/test_wp_site_model.py"),
+ ("the final backup is not taken", "scripts/wp_site_provision.py", 'if "backup" in plan:', 'if False:', "tests/test_wp_site_provision.py"),
+ ("a failed final backup is ignored", "scripts/wp_site_provision.py", '"--tag=final", timeout=self.cfg["backup_timeout_s"])', '"--tag=final", timeout=self.cfg["backup_timeout_s"], check=False)', "tests/test_wp_site_provision.py"),
+ ("the final backup runs with the quick-command limit", "scripts/wp_site_provision.py", '"--tag=final", timeout=self.cfg["backup_timeout_s"])', '"--tag=final")', "tests/test_wp_site_provision.py"),
+ ("a change skips the fit check", "scripts/wp_site_provision.py", '            self.check_fit([m for m in merged if m["name"] != name] + [model.merged(self.defaults, new)])\n', '', "tests/test_wp_site_provision.py"),
+ ("the fit is judged on the old record", "scripts/wp_site_provision.py", '+ [model.merged(self.defaults, new)])\n            registry_only', '+ [model.merged(self.defaults, rec)])\n            registry_only', "tests/test_wp_site_provision.py"),
+ ("the move rules are not consulted", "scripts/wp_site_provision.py", '            if check:\n                check(rec)', '            if False:\n                check(rec)', "tests/test_wp_site_provision.py"),
+ ("a label is applied like a limit", "scripts/wp_site_provision.py", 'registry_only = set(changes) <= set(model.TEXT_KEYS)', 'registry_only = False', "tests/test_wp_site_provision.py"),
+ ("an unchanged value is written and applied again", "scripts/wp_site_provision.py", '            if new == rec:\n', '            if False:\n', "tests/test_wp_site_provision.py"),
+ ("the templates are not rendered before the write", "scripts/wp_site_provision.py", '                self.files(model.merged(self.defaults, new))\n            if before:', '                pass\n            if before:', "tests/test_wp_site_provision.py"),
+ ("the record is written before the final backup", "scripts/wp_site_provision.py", '            if before:\n                before(rec)\n            self.registry.write_site(new)', '            self.registry.write_site(new)\n            if before:\n                before(rec)', "tests/test_wp_site_provision.py"),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
@@ -123,15 +149,16 @@ with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
     root.mkdir()
     for d in KEEP:
         shutil.copytree(REPO / d, root / d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for i, (label, rel, old, new) in enumerate(M):
+    for i, (label, rel, old, new, *suite) in enumerate(M):
         if only and str(i) not in only:
             continue
+        suite = suite[0] if suite else "tests/test_wp_ctl.py"
         path = root / rel
         orig = path.read_text()
         if orig.count(old) < 1:
             print("NOT APPLICABLE (pattern missing):", i, label, flush=True); surv.append((i, label, "pattern missing")); continue
         path.write_text(orig.replace(old, new, 1))
-        r = subprocess.run([sys.executable, "-I", str(root / "tests/test_wp_ctl.py")], capture_output=True, text=True, timeout=300, cwd=str(root))
+        r = subprocess.run([sys.executable, "-I", str(root / suite)], capture_output=True, text=True, timeout=300, cwd=str(root))
         path.write_text(orig)
         ran += 1
         killed = r.returncode != 0

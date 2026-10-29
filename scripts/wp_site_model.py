@@ -97,6 +97,25 @@ def check_name(name, reserved, taken, closed):
     return None
 
 
+TRANSITIONS = {"hold": ("live", "stopped"), "live": ("hold", "stopped"), "stopped": ("hold",), "closed": ()}   # a stopped site comes back on hold, never straight to live; a site is closed only by `delete`
+
+
+def plan_state(current, target):
+    """The steps that take a site from `current` to `target`, in order: [] when it is there already, else 'backup' (the final backup, before a site stops), 'record' and 'apply'. Raises Refuse
+    with the reason for a move that is not allowed. Pure: it reads nothing and changes nothing, so every pair can be tested."""
+    if target not in ("hold", "live", "stopped"):
+        raise Refuse("'%s' is not a state a site can be put in (hold, live or stopped; a site is closed by deleting it)" % target)
+    if current not in TRANSITIONS:
+        raise Refuse("'%s' is not a state a site can be in" % current)
+    if current == "closed":
+        raise Refuse("the site is closed (a tombstone: nothing of it is on the VM); there is nothing to move")
+    if current == target:
+        return []
+    if target not in TRANSITIONS[current]:
+        raise Refuse("a %s site cannot go straight to %s: put it on %s first" % (current, target, " or ".join(TRANSITIONS[current])))
+    return (["backup"] if target == "stopped" else []) + ["record", "apply"]
+
+
 # -------------------------------------------------------------------------------------------------------------------------------------- the registry
 def check_record(rec, defaults, where="record"):
     """Raise RegistryError unless `rec` is a site record this tool could have written. Every key is known, every editable value passes its rule, the assigned numbers are integers."""

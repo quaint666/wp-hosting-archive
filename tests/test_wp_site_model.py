@@ -241,6 +241,59 @@ class Allocation(unittest.TestCase):
                 m.everything(reg, [{"name": "beta", "port": 9999, "quota_id": 1012, "state": "closed"}])
 
 
+class Transitions(unittest.TestCase):
+    ALLOWED = {("hold", "live"): ["record", "apply"], ("hold", "stopped"): ["backup", "record", "apply"], ("live", "hold"): ["record", "apply"], ("live", "stopped"): ["backup", "record", "apply"],
+               ("stopped", "hold"): ["record", "apply"]}
+
+    def test_every_pair_of_states_is_decided(self):
+        for current in m.STATES:
+            for target in ("hold", "live", "stopped"):
+                with self.subTest(current=current, target=target):
+                    if current == target and current != "closed":
+                        self.assertEqual(m.plan_state(current, target), [])
+                    elif (current, target) in self.ALLOWED:
+                        self.assertEqual(m.plan_state(current, target), self.ALLOWED[(current, target)])
+                    else:
+                        with self.assertRaises(m.Refuse):
+                            m.plan_state(current, target)
+
+    def test_a_site_is_stopped_only_after_a_backup_and_a_stopped_site_never_goes_straight_to_live(self):
+        for current in ("hold", "live"):
+            self.assertEqual(m.plan_state(current, "stopped")[0], "backup")
+        for current in ("hold", "live", "stopped"):
+            for target in ("hold", "live"):
+                self.assertNotIn("backup", m.plan_state(current, target) if (current, target) in self.ALLOWED or current == target else [])
+        with self.assertRaises(m.Refuse) as e:
+            m.plan_state("stopped", "live")
+        self.assertIn("hold first", str(e.exception))
+
+    def test_closed_is_terminal_and_is_not_a_target(self):
+        for target in ("hold", "live", "stopped", "closed"):
+            with self.assertRaises(m.Refuse) as e:
+                m.plan_state("closed", target)
+            if target != "closed":
+                self.assertIn("the site is closed", str(e.exception), "the reason names the tombstone, not a move that is merely not in the table")
+        for current in ("hold", "live", "stopped"):
+            with self.assertRaises(m.Refuse) as e:
+                m.plan_state(current, "closed")
+            self.assertIn("deleting", str(e.exception))
+
+    def test_odd_input_is_refused_not_guessed(self):
+        for current, target in (("paused", "live"), ("hold", "LIVE"), ("hold", ""), ("hold", None), (None, "live"), ("hold", ["live"])):
+            with self.subTest(current=current, target=target), self.assertRaises(m.Refuse):
+                m.plan_state(current, target)
+
+    def test_the_table_and_the_states_agree(self):
+        self.assertEqual(set(m.TRANSITIONS), set(m.STATES))
+        for current, targets in m.TRANSITIONS.items():
+            self.assertTrue(set(targets) <= set(m.STATES) - {"closed", current}, current)
+
+    def test_the_dispatcher_offers_exactly_the_keys_and_states_the_model_knows(self):
+        self.assertEqual(set(wp_ctl.SET_KEYS), set(m.EDITABLE), "the dispatcher's list of editable keys is the model's")
+        self.assertEqual(set(wp_ctl.STATES), set(m.STATES) - {"closed"})
+        self.assertLessEqual(max(spec[1] for spec in m.EDITABLE.values() if spec[0] == "text"), wp_ctl.SET_VALUE_MAX)
+
+
 class Fit(unittest.TestCase):
     """The fit check against the play's assert, expression by expression."""
 

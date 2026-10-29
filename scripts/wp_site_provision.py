@@ -3,6 +3,8 @@
 
     wp-site-provision create <name> [--set key=value ...]   record a new site (always on hold, empty: no WordPress yet) and apply it
     wp-site-provision apply  <name>                         make the VM match the site's record; safe to run again, and the way to finish a create that stopped half-way
+    wp-site-provision set    <name> key=value [...]         change editable fields of the record and apply them (label and note are only recorded)
+    wp-site-provision state  <name> hold|live|stopped       move the site to that state (model.plan_state: the moves that exist); the final backup is taken before it stops
     wp-site-provision render <name> [--diff]                compare what the templates give today with the files on the VM (read-only; a secret file is compared by hash, never shown)
 
 The logic of tasks/wp_site_one_common.yml, step for step and in its order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
@@ -131,16 +133,22 @@ class Provisioner:
             raise model.Refuse("the sites would not fit this VM: " + "; ".join(broken))
 
     # --------------------------------------------------------------------------------------------------------------------------------- create
-    def create(self, name, sets=()):
+    @staticmethod
+    def parse_sets(sets):
+        """{key: value} from key=value items, each key once and each value through the rule of its field."""
         values = {}
         for item in sets:
             key, eq, raw = item.partition("=")
             if not eq or key in values:
-                raise model.Refuse("--set %s: give each key once, as key=value" % item)
+                raise model.Refuse("%s: give each key once, as key=value" % item)
             value, why = model.validate_value(key, raw)
             if why:
-                raise model.Refuse("--set %s: %s" % (key, why))
+                raise model.Refuse("%s: %s" % (key, why))
             values[key] = value
+        return values
+
+    def create(self, name, sets=()):
+        values = self.parse_sets(sets)
         with self.lock("registry"), self.lock("site-" + name):
             try:
                 everything = model.everything(self.registry, self.known)
@@ -168,6 +176,64 @@ class Provisioner:
             except Failed as e:
                 raise Failed("%s is recorded but not fully built: %s. Fix that and run: wp-site-provision apply %s" % (name, e, name))
         return rec
+
+    # ----------------------------------------------------------------------------------------------------------------------------- set and state
+    def change(self, name, changes, check=None, before=None):
+        """Put `changes` into the site's record and make the VM match: the one path of `set` and `state`. `check(rec)` runs first, on the record as it is, and may refuse. Everything else that can be
+        refused is refused before anything is written (the new record is valid, the sites still fit, the secrets and templates render); `before(rec)` runs after those checks and before the write (the
+        final backup: if it fails the record is untouched). If the apply then fails the record stays changed, as after a create that stops half-way, and the error says to run apply. Returns the
+        steps `apply` took."""
+        if not model.NAME_RE.fullmatch(name):
+            raise model.Refuse("'%s' is not a site name" % name)
+        with self.lock("registry"), self.lock("site-" + name):
+            try:
+                rec = self.registry.read_site(name)
+                merged = self.all_merged()
+            except model.RegistryError as e:
+                raise Failed(str(e))
+            if rec is None:
+                raise model.Refuse("%s has no site record (create it first)" % name)
+            if check:
+                check(rec)
+            new = {**rec, **changes}
+            if new == rec:
+                self.out("%s already has that; nothing changed" % name)
+                return []
+            model.check_record(new, self.defaults, "new record for %s" % name)
+            self.check_fit([m for m in merged if m["name"] != name] + [model.merged(self.defaults, new)])
+            registry_only = set(changes) <= set(model.TEXT_KEYS)
+            if not registry_only:
+                self.preflight()
+                self.files(model.merged(self.defaults, new))
+            if before:
+                before(rec)
+            self.registry.write_site(new)
+            self.out("recorded %s for %s" % (", ".join("%s=%s" % (k, changes[k]) for k in sorted(changes)), name))
+            if registry_only:
+                return []
+            try:
+                return self.apply_locked(name)
+            except Failed as e:
+                raise Failed("%s is recorded but the VM does not match yet: %s. Fix that and run: wp-site-provision apply %s" % (name, e, name))
+
+    def set(self, name, sets):
+        values = self.parse_sets(sets)
+        if not values:
+            raise model.Refuse("give at least one key=value")
+        return self.change(name, values)
+
+    def state(self, name, target):
+        """Move a site to hold, live or stopped (model.plan_state says which moves exist). Before it stops, the final backup is taken, and a failed backup stops everything: the record is not changed."""
+        plan = []
+
+        def check(rec):
+            plan[:] = model.plan_state(rec["state"], target)
+
+        def backup(rec):
+            if "backup" in plan:
+                self.out("taking the final backup of %s" % name)
+                self.cmd("backup", name, "--tag=final", timeout=self.cfg["backup_timeout_s"])
+        return self.change(name, {"state": target}, check=check, before=backup)
 
     # ---------------------------------------------------------------------------------------------------------------------------------- apply
     def apply(self, name):
@@ -416,6 +482,12 @@ def main(cfg, argv, out=print, err=None, **kw):
     c.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="one of: " + ", ".join(model.EDITABLE))
     a = sub.add_parser("apply")
     a.add_argument("name")
+    st = sub.add_parser("set")
+    st.add_argument("name")
+    st.add_argument("pairs", nargs="+", metavar="KEY=VALUE", help="one of: " + ", ".join(model.EDITABLE))
+    sw = sub.add_parser("state")
+    sw.add_argument("name")
+    sw.add_argument("target", choices=("hold", "live", "stopped"))
     r = sub.add_parser("render")
     r.add_argument("name")
     r.add_argument("--diff", action="store_true")
@@ -430,6 +502,10 @@ def main(cfg, argv, out=print, err=None, **kw):
             out("%s is built and on hold; WordPress is not installed in it" % args.name)
         elif args.verb == "apply":
             prov.apply(args.name)
+        elif args.verb == "set":
+            prov.set(args.name, args.pairs)
+        elif args.verb == "state":
+            prov.state(args.name, args.target)
         else:
             rows, text = prov.render(args.name, args.diff)
             for path, status in rows:

@@ -42,6 +42,10 @@ JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 BACKUP_TAGS = ("pre-update", "final", "pre-import")
+SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
+STATES = ("hold", "live", "stopped")
+ANY_RE = re.compile(r".*", re.S)                                              # `set` takes any text here: the tool holds the rule of each field, and a refusal of it is a refusal of the job
+SET_VALUE_MAX = 500                                                           # the longest value of any field (a site's note)
 LIMIT_KEYS = ("timeout_s", "memory_mb", "tasks")
 MIN_PASSWORD = 14                                                             # wp-site-password enforces it again
 MAX_TEXT = 200
@@ -62,10 +66,11 @@ class Refuse(Exception):
 
 class Arg:
     """One argument of a verb. kind: site (an existing site), text (matches rx), enum (one of values), int (lo..hi), flag (a boolean, false when absent), name (a proposed site name).
-    `same` names another argument this one must equal (the typed confirmation); with `needs` it is only required while that flag is true."""
+    `same` names another argument this one must equal (the typed confirmation); with `needs` it is only required while that flag is true, and with `when` = (key, value) only while that argument
+    has that value. `limit` is the longest a text may be (MAX_TEXT when absent)."""
 
-    def __init__(self, kind, required=True, values=(), rx=None, lo=0, hi=0, same=None, needs=None, default=None):
-        self.kind, self.required, self.values, self.rx, self.lo, self.hi, self.same, self.needs, self.default = kind, required, values, rx, lo, hi, same, needs, default
+    def __init__(self, kind, required=True, values=(), rx=None, lo=0, hi=0, same=None, needs=None, default=None, when=None, limit=None):
+        self.kind, self.required, self.values, self.rx, self.lo, self.hi, self.same, self.needs, self.default, self.when, self.limit = kind, required, values, rx, lo, hi, same, needs, default, when, limit
 
     def clean(self, ctl, key, value, coerce):
         if self.kind == "flag":
@@ -84,7 +89,7 @@ class Arg:
             return value
         if not isinstance(value, str):
             raise Refuse("bad_type", "%s must be text" % key)
-        if len(value) > MAX_TEXT or CONTROL_RE.search(value):
+        if len(value) > (self.limit or MAX_TEXT) or CONTROL_RE.search(value):
             raise Refuse("bad_value", "%s is too long or holds a control character" % key)
         if self.kind == "enum":
             if value not in self.values:
@@ -264,7 +269,7 @@ def parse_args(ctl, verb, raw, coerce):
         elif arg.default is not None:
             out[key] = arg.default
     for key, arg in verb.args.items():
-        wanted = arg.required and (not arg.needs or out.get(arg.needs))
+        wanted = arg.required and (not arg.needs or out.get(arg.needs)) and (not arg.when or out.get(arg.when[0]) == arg.when[1])
         if key not in out and wanted:
             raise Refuse("missing_argument", "%s is required" % key)
         if arg.same and key in out and out[key] != out.get(arg.same):
@@ -612,6 +617,19 @@ def h_apply(call):
     return call.job([call.ctl.tool("wp-site-provision"), "apply", call.args["site"]])
 
 
+def h_set(call):
+    """One editable field of a site's record, changed and applied. The key must be one of the editable ones; the tool checks the value against that field's rule and that the sites still fit."""
+    registered(call)
+    a = call.args
+    return call.job([call.ctl.tool("wp-site-provision"), "set", a["site"], "%s=%s" % (a["key"], a["value"])])
+
+
+def h_ensure_state(call):
+    """Move a site to hold, live or stopped. Going live is confirmed by the site's name (a page that is wrong cannot make a site public); the move rules and the final backup before a stop are the tool's."""
+    registered(call)
+    return call.job([call.ctl.tool("wp-site-provision"), "state", call.args["site"], call.args["state"]])
+
+
 def h_install(call):
     """WordPress into an empty site. The password is the one line after the request, as for `password`; the title, user and email are options of the tool, so it asks only for the password (twice, from its terminal file)."""
     a = call.args
@@ -675,6 +693,8 @@ VERBS = {
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),
     "create": Verb("job", {"name": Arg("name"), "label": Arg("text", required=False, rx=LABEL_RE)}, h_create),
     "apply": Verb("job", {"site": SITE}, h_apply),
+    "set": Verb("job", {"site": SITE, "key": Arg("enum", values=SET_KEYS), "value": Arg("text", rx=ANY_RE, limit=SET_VALUE_MAX)}, h_set),
+    "ensure-state": Verb("job", {"site": SITE, "state": Arg("enum", values=STATES), "confirm_name": Arg("text", rx=NAME_RE, same="site", when=("state", "live"))}, h_ensure_state),
     "install": Verb("secret", {"site": SITE, "title": Arg("text", rx=LABEL_RE), "user": Arg("text", rx=ADMIN_NAME_RE), "email": Arg("text", rx=EMAIL_RE)}, h_install, lock=True),
     "import-receive": Verb("stream", {"file": Arg("text", rx=IMPORT_FILE_RE)}, h_import_receive),
     "import-discard": Verb("inline", {"file": Arg("text", rx=IMPORT_FILE_RE), "if_present": Arg("flag")}, h_import_discard),
