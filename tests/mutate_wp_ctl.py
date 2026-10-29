@@ -15,7 +15,7 @@ import shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp"]
+KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp", "app"]
 W = "scripts/wp_ctl.py"
 M = [
  ("a site need not exist", W, 'if not NAME_RE.fullmatch(value) or value not in known_sites(ctl.cfg):', 'if not NAME_RE.fullmatch(value):'),
@@ -206,6 +206,24 @@ M = [
  ('a floor entry that says live is a live site', 'scripts/wp_site_provision.py', '{**self.defaults, **k, "state": "closed"} for k in cfg["closed_floor"]', '{**self.defaults, **k} for k in cfg["closed_floor"]', 'tests/test_wp_site_provision.py'),
  ('the wrapper hands the tool no floor', 'templates/wp/wp_site_provision.py.j2', '  "closed_floor": wp_closed_floor,', '  "closed_floor": [],', 'tests/test_wp_site_provision_wrapper.py'),
  ('the floor is not used for the numbers of a new site', 'scripts/wp_site_provision.py', 'everything = model.everything(self.registry, self.floor)', 'everything = model.everything(self.registry, [])', 'tests/test_wp_site_provision.py'),
+ ('the client sends a verb that is not listed', 'app/wp_panel/ctl.py', '        if spec is None:\n            raise CtlError("not_allowed", "this page may not ask for', '        if False:\n            raise CtlError("not_allowed", "this page may not ask for', 'tests/test_wp_panel_ctl.py'),
+ ('the client sends an argument the verb does not take', 'app/wp_panel/ctl.py', '        if extra:', '        if False:', 'tests/test_wp_panel_ctl.py'),
+ ('the client does not check a value', 'app/wp_panel/ctl.py', '            if not check(args[name]):', '            if False:', 'tests/test_wp_panel_ctl.py'),
+ ('the client does not need a required argument', 'app/wp_panel/ctl.py', '                if required:\n                    raise CtlError("not_allowed", "%s needs %s"', '                if False:\n                    raise CtlError("not_allowed", "%s needs %s"', 'tests/test_wp_panel_ctl.py'),
+ ("ssh gets the app's whole environment", 'app/wp_panel/ctl.py', ', capture_output=True, timeout=self.timeout_s, env={"PATH": self.path})', ', capture_output=True, timeout=self.timeout_s)', 'tests/test_wp_panel_ctl.py'),
+ ('ssh accepts any host key', 'app/wp_panel/ctl.py', '"StrictHostKeyChecking=yes"', '"StrictHostKeyChecking=no"', 'tests/test_wp_panel_ctl.py'),
+ ('ssh may ask for a password', 'app/wp_panel/ctl.py', '"BatchMode=yes", ', '', 'tests/test_wp_panel_ctl.py'),
+ ('status 255 is not unreachable', 'app/wp_panel/ctl.py', '        if p.returncode == 255:', '        if False:', 'tests/test_wp_panel_ctl.py'),
+ ('an answer and a status that disagree are believed', 'app/wp_panel/ctl.py', '        if reply["ok"] or p.returncode == 0:', '        if False:', 'tests/test_wp_panel_ctl.py'),
+ ('two lines of answer are accepted', 'app/wp_panel/ctl.py', 'reply = json.loads(lines[0]) if len(lines) == 1 else None', 'reply = json.loads(lines[0]) if lines else None', 'tests/test_wp_panel_ctl.py'),
+ ('a refusal is reported as a failure', 'app/wp_panel/ctl.py', 'kind = "refused" if p.returncode == 2 else "failed"', 'kind = "failed"', 'tests/test_wp_panel_ctl.py'),
+ ('a host name is not checked', 'app/wp_panel/ctl.py', 'or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", value)', 'or False', 'tests/test_wp_panel_ctl.py'),
+ ('a huge answer is accepted', 'app/wp_panel/ctl.py', '        if len(out) > MAX_REPLY_BYTES:', '        if False:', 'tests/test_wp_panel_ctl.py'),
+ ('a long request is sent', 'app/wp_panel/ctl.py', '        if len(line.encode()) > MAX_REQUEST_BYTES:', '        if False:', 'tests/test_wp_panel_ctl.py'),
+ ('control characters reach the message', 'app/wp_panel/ctl.py', 're.sub(r"[\\x00-\\x1f\\x7f]", " ", first)', 'first', 'tests/test_wp_panel_ctl.py'),
+ ("the offset range is wider than the dispatcher's", 'app/wp_panel/ctl.py', '_int(0, 2 ** 40)', '_int(0, 2 ** 80)', 'tests/test_wp_panel_ctl.py'),
+ ('a switch counts as a number', 'app/wp_panel/ctl.py', 'isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi', 'isinstance(v, int) and lo <= v <= hi', 'tests/test_wp_panel_ctl.py'),
+ ('the site pattern lets a double hyphen through', 'app/wp_panel/ctl.py', 'and NAME_RE.fullmatch(v) is not None and "--" not in v', 'and NAME_RE.fullmatch(v) is not None', 'tests/test_wp_panel_ctl.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
