@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ title }}{% endblock %}
 {% block body %}
-<h1>{{ title }}</h1>
+<div class="page-head"><div><h1>{{ title }}</h1></div></div>
 {% if message %}<p class="error" role="alert">{{ message | clip(500) }}</p>{% endif %}
-<p>{% if logged_in() %}<a href="{{ url_for('sites') }}">Back to the sites</a>{% else %}<a href="{{ url_for('login') }}">Log in</a>{% endif %}</p>
+<p>{% if logged_in() %}<a class="button secondary" href="{{ url_for('sites') }}">Back to the sites</a>{% else %}<a class="button secondary" href="{{ url_for('login') }}">Log in</a>{% endif %}</p>
 {% endblock %}

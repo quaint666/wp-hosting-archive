@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Sites{% endblock %}
 {% block body %}
-<h1>Sites</h1>
-<p><a href="{{ url_for('new_site') }}">New site</a></p>
+<div class="page-head">
+  <div><h1>Sites</h1><p class="small">What dellwp reports for every site it hosts.</p></div>
+  <a class="button" href="{{ url_for('new_site') }}">New site</a>
+</div>
 {% if rows %}
+<div class="table-wrap">
 <table>
   <thead><tr><th>Site</th><th>Recorded state</th><th>What nginx does</th><th>Unit</th></tr></thead>
   <tbody>
@@ -18,7 +21,8 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
-<p>There are no sites on dellwp.</p>
+<div class="card empty">There are no sites on dellwp.</div>
 {% endif %}
 {% endblock %}

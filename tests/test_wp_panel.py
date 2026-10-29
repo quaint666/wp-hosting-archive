@@ -285,6 +285,20 @@ class Access(Base):
         self.assertIn("frame-ancestors 'none'", csp)
         self.assertNotRegex(csp, r"https?:|\*|unsafe")
 
+    def test_the_stylesheet_loads_nothing_and_keeps_dark_mode_focus_and_small_screens(self):
+        css = self.get("/static/panel.css").get_data(as_text=True)
+        for bad in ("url(", "@import", "http://", "https://", "@font-face", "expression("):
+            self.assertNotIn(bad, css, "the policy allows this one file and nothing else: " + bad)
+        for needed in ("prefers-color-scheme: dark", "prefers-reduced-motion", ":focus-visible", "max-width: 40rem"):
+            self.assertIn(needed, css)
+
+    def test_the_bar_marks_the_page_you_are_on(self):
+        c = self.logged_in()
+        for path, label in (("/sites", "Sites"), ("/sites/alpha", "Sites"), ("/new-site", "Sites"), ("/import", "Import"), ("/sites/alpha/import", "Import"), ("/jobs", "Jobs"), ("/jobs/" + JOB, "Jobs"), ("/audit", "Audit")):
+            html = self.get(path, c).get_data(as_text=True)
+            marked = re.findall(r'<a href="[^"]+" aria-current="page">([^<]+)</a>', html)
+            self.assertEqual(marked, [label], path)
+
     def test_no_page_has_an_inline_script_an_inline_style_or_an_outside_link(self):
         c = self.logged_in()
         for path in PAGES + ["/login"]:

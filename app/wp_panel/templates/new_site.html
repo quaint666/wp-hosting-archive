@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% block title %}New site{% endblock %}
 {% block body %}
-<h1>New site</h1>
-<p><a href="{{ url_for('sites') }}">All sites</a></p>
-<p>This makes an empty site on hold: the name is its host name and cannot be changed later, and WordPress is not installed yet. Nothing is public until you move it to live.</p>
+<p class="crumbs"><a href="{{ url_for('sites') }}">All sites</a></p>
+<div class="page-head"><div><h1>New site</h1></div></div>
+<section class="card">
+<p class="notice">This makes an empty site on hold: the name is its host name and cannot be changed later, and WordPress is not installed yet. Nothing is public until you move it to live.</p>
 <form method="post" action="{{ url_for('create_site') }}" class="login">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <input type="hidden" name="req" value="{{ req }}">
@@ -13,6 +14,7 @@
   <label>Label <span class="small">optional, up to 100 characters</span>
     <input name="label" maxlength="100" autocomplete="off">
   </label>
-  <button type="submit">Create the site</button>
+  <div class="actions"><button type="submit">Create the site</button></div>
 </form>
+</section>
 {% endblock %}

@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Audit{% endblock %}
 {% block body %}
-<h1>Audit</h1>
-<p>The last {{ lines }} lines of dellwp's audit file, newest last. The file is append-only on dellwp; this page cannot change it.</p>
+<div class="page-head"><div><h1>Audit</h1>
+<p class="small">The last {{ lines }} lines of dellwp's audit file, newest last. The file is append-only on dellwp; this page cannot change it.</p></div></div>
 {% if rows %}
+<div class="table-wrap">
 <table>
   <thead><tr><th>Time</th><th>Phase</th><th>Verb</th><th>Site</th><th>Error</th><th>Other</th></tr></thead>
   <tbody>
@@ -15,5 +16,6 @@
   {% endfor %}
   </tbody>
 </table>
-{% else %}<p>The audit file is empty.</p>{% endif %}
+</div>
+{% else %}<div class="card empty">The audit file is empty.</div>{% endif %}
 {% endblock %}

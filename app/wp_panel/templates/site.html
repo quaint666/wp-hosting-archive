@@ -1,30 +1,52 @@
 {% extends "base.html" %}
 {% block title %}{{ name }}{% endblock %}
 {% block body %}
-<h1>{{ name | clip(40) }}</h1>
-<p><a href="{{ url_for('sites') }}">All sites</a></p>
+<p class="crumbs"><a href="{{ url_for('sites') }}">All sites</a></p>
+<div class="page-head">
+  <div><h1>{{ name | clip(40) }}</h1>
+    {% if registry.get('label') %}<p class="small">{{ registry.get('label') | clip(100) }}</p>{% endif %}</div>
+  <span class="badge {{ 'state-' ~ state if state in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ (state or 'unknown') | clip(20) }}</span>
+</div>
+
+<div class="grid">
+<section class="card">
 <h2>State</h2>
-<p>Now: <span class="badge {{ 'state-' ~ state if state in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ (state or 'unknown') | clip(20) }}</span></p>
 {% for target, what in (('hold', 'Closes the site to visitors and turns its cron timer off.'), ('live', 'Opens the site to visitors and turns its cron timer on. Type its name to confirm.'), ('stopped', 'Takes a final backup, then stops the stack: visitors get a 503. A stopped site comes back on hold, never straight to live.')) %}
 {% if target in moves %}
+<div class="move">
+<p class="small">{{ what }}</p>
 <form method="post" action="{{ url_for('set_state', name=name) }}" class="inline">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <input type="hidden" name="req" value="{{ req ~ target }}">
   <input type="hidden" name="state" value="{{ target }}">
-  {% if target == 'live' %}<label>{{ what }} <input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
-  {% else %}<span>{{ what }}</span>{% endif %}
-  <button type="submit">Move to {{ target }}</button>
+  {% if target == 'live' %}<input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}" aria-label="The site's name, to confirm">{% endif %}
+  <button type="submit"{% if target == 'stopped' %} class="secondary"{% endif %}>Move to {{ target }}</button>
 </form>
+</div>
 {% endif %}
 {% endfor %}
+</section>
+
+<section class="card">
 <h2>WordPress</h2>
-<p><a href="{{ url_for('install_form', name=name) }}">Install WordPress</a> (an empty site only) · <a href="{{ url_for('password_form', name=name) }}">Set a user's password</a> · <a href="{{ url_for('import_site', name=name) }}">Import report</a> (<a href="{{ url_for('import_hub') }}">import a file</a>)</p>
+<p class="small">Install into an empty site, set a user's password, or bring in a .wpress archive.</p>
+<div class="actions">
+  <a class="button secondary" href="{{ url_for('install_form', name=name) }}">Install WordPress</a>
+  <a class="button secondary" href="{{ url_for('password_form', name=name) }}">Set a user's password</a>
+  <a class="button secondary" href="{{ url_for('import_site', name=name) }}">Import report</a>
+  <a class="button secondary" href="{{ url_for('import_hub') }}">Import a file</a>
+</div>
+</section>
+</div>
+
+<section class="card">
 <h2>Settings</h2>
 <p class="small">One setting at a time. wp-ctl checks the value; what applying it costs is written beside it.</p>
-<table class="kv">
+<div class="settings">
 {% for key, title, kind, rule, cost in settings %}
 {% set current = registry.get(key) %}
-<tr><th>{{ title }}</th><td>
+<div class="setting">
+<div class="setting-title">{{ title }}</div>
 <form method="post" action="{{ url_for('set_value', name=name) }}" class="inline">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <input type="hidden" name="req" value="{{ req ~ key }}">
@@ -35,31 +57,43 @@
     {% for v in rule %}<option value="{{ v }}"{% if (current | string | lower) == v %} selected{% endif %}>{{ v }}</option>{% endfor %}
   </select>
   {% elif kind == 'int' %}
-  <input name="value" type="number" required min="{{ rule[0] }}" max="{{ rule[1] }}" step="1" value="{{ '' if current is none else current | string | clip(10) }}" aria-label="{{ title }}">
+  <input name="value" type="number" required min="{{ rule[0] }}" max="{{ rule[1] }}" step="1" value="{{ '' if current is none else current | string | clip(10) }}" placeholder="{{ 'default' if current is none else '' }}" aria-label="{{ title }}">
   {% else %}
   <input name="value" maxlength="{{ rule }}" value="{{ '' if current is none else current | string | clip(rule) }}" aria-label="{{ title }}">
   {% endif %}
-  <button type="submit">Set</button>
+  <button type="submit" class="secondary">Set</button>
 </form>
-<span class="small">{{ cost }}{% if kind == 'int' %}; {{ rule[0] }} to {{ rule[1] }}{% endif %}</span>
-</td></tr>
+<div class="small">{{ cost }}{% if kind == 'int' %}; {{ rule[0] }} to {{ rule[1] }}{% endif %}</div>
+</div>
 {% endfor %}
-</table>
+</div>
+</section>
+
+<div class="grid">
+<section class="card">
 <h2>What dellwp reports</h2>
 {% if status %}
 <table class="kv">{% for k, v in status.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(300) }}</td></tr>{% endfor %}</table>
 {% else %}<p>Nothing reported for this site.</p>{% endif %}
+</section>
+<section class="card">
 <h2>Its registry record</h2>
 {% if registry_error %}<p class="error" role="alert">{{ registry_error | clip(300) }}</p>{% endif %}
 {% if registry %}
 <table class="kv">{% for k, v in registry.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(500) }}</td></tr>{% endfor %}</table>
 {% elif not registry_error %}<p>No record.</p>{% endif %}
+</section>
+</div>
+
+<section class="card danger">
 <h2>Delete</h2>
 {% if state == 'stopped' %}
+<p class="small">Archived for 14 days, then gone. The name is tombstoned. You will be asked for the name twice.</p>
 <form method="post" action="{{ url_for('delete_site', name=name) }}" class="inline">
   <input type="hidden" name="csrf" value="{{ csrf_token() }}">
   <label>Type the site's name to go on to the last step <input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
-  <button type="submit">Delete…</button>
+  <button type="submit" class="danger secondary">Delete…</button>
 </form>
 {% else %}<p class="small">Only a stopped site can be deleted: move it to stopped first.</p>{% endif %}
+</section>
 {% endblock %}

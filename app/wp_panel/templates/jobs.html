@@ -1,21 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Jobs{% endblock %}
 {% block body %}
-<h1>Jobs</h1>
+<div class="page-head"><div><h1>Jobs</h1><p class="small">The latest jobs dellwp has run for the panel, newest first.</p></div></div>
 {% if rows %}
+<div class="table-wrap">
 <table>
   <thead><tr><th>Job</th><th>What</th><th>Site</th><th>State</th><th>Exit</th></tr></thead>
   <tbody>
   {% for r in rows %}
+  {% set st = r.get('state', '') %}
   <tr>
     <td><a href="{{ url_for('job', job=r.get('job', '')) }}">{{ r.get('job', '') | clip(40) }}</a></td>
     <td>{{ r.get('verb', '') | clip(30) }}</td>
     <td>{{ r.get('site', '') | clip(40) }}</td>
-    <td>{{ r.get('state', '') | clip(20) }}</td>
+    <td><span class="badge {{ 'job-running' if st == 'running' else 'job-lost' if st == 'lost' else 'job-done-ok' if (st == 'done' and r.get('rc') == 0) else 'job-failed' if st == 'done' else '' }}">{{ st | clip(20) }}</span></td>
     <td>{{ r.get('rc', '') | clip(10) }}</td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}<p>No jobs yet.</p>{% endif %}
+</div>
+{% else %}<div class="card empty">No jobs yet.</div>{% endif %}
 {% endblock %}

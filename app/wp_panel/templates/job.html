@@ -2,13 +2,15 @@
 {% block title %}Job {{ job }}{% endblock %}
 {% block head %}{% if status.get('state') == 'running' %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
 {% block body %}
-<h1>Job {{ job | clip(40) }}</h1>
-<p><a href="{{ url_for('jobs') }}">All jobs</a></p>
-<table class="kv">
-  <tr><th>State</th><td>{{ status.get('state', '') | clip(20) }}</td></tr>
+<p class="crumbs"><a href="{{ url_for('jobs') }}">All jobs</a></p>
+{% set st = status.get('state', '') %}
+<div class="page-head"><div><h1>Job {{ job | clip(40) }}</h1></div>
+  <span class="badge {{ 'job-running' if st == 'running' else 'job-lost' if st == 'lost' else 'job-done-ok' if (st == 'done' and status.get('rc') == 0) else 'job-failed' if st == 'done' else '' }}">{{ st | clip(20) }}{% if st == 'done' %}, exit {{ status.get('rc', '') | clip(10) }}{% endif %}</span></div>
+<div class="card"><table class="kv">
+  <tr><th>State</th><td>{{ st | clip(20) }}</td></tr>
   <tr><th>Exit status</th><td>{{ status.get('rc', '') | clip(10) }}</td></tr>
-</table>
-{% if status.get('state') == 'running' %}<p class="small">Still running: this page reloads itself every 3 seconds.</p>{% endif %}
+</table></div>
+{% if status.get('state') == 'running' %}<p class="notice">Still running: this page reloads itself every 3 seconds.</p>{% endif %}
 <h2>Log</h2>
 <pre class="log">{{ log.get('data', '') }}</pre>
 {% if log.get('offset') and log.get('data') %}
