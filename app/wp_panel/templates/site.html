@@ -17,6 +17,8 @@
 </form>
 {% endif %}
 {% endfor %}
+<h2>WordPress</h2>
+<p><a href="{{ url_for('install_form', name=name) }}">Install WordPress</a> (an empty site only) · <a href="{{ url_for('password_form', name=name) }}">Set a user's password</a></p>
 <h2>Settings</h2>
 <p class="small">One setting at a time. wp-ctl checks the value; what applying it costs is written beside it.</p>
 <table class="kv">
@@ -52,4 +54,12 @@
 {% if registry %}
 <table class="kv">{% for k, v in registry.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(500) }}</td></tr>{% endfor %}</table>
 {% elif not registry_error %}<p>No record.</p>{% endif %}
+<h2>Delete</h2>
+{% if state == 'stopped' %}
+<form method="post" action="{{ url_for('delete_site', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <label>Type the site's name to go on to the last step <input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
+  <button type="submit">Delete…</button>
+</form>
+{% else %}<p class="small">Only a stopped site can be deleted: move it to stopped first.</p>{% endif %}
 {% endblock %}

@@ -147,11 +147,16 @@ class Vhost(unittest.TestCase):
         self.assertNotRegex(self.code, r"(?m)^server_tokens")
 
     def test_it_proxies_everything_to_the_app_on_loopback_and_says_the_request_was_https(self):
-        self.assertEqual(re.findall(r"proxy_pass (\S+);", self.code), ["http://127.0.0.1:8000"])
-        self.assertIn("proxy_set_header X-Forwarded-Proto https;", self.code)
-        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", self.code, "the client's address, not a list a client can extend")
+        self.assertEqual(re.findall(r"proxy_pass (\S+);", self.code), ["http://127.0.0.1:8000"] * 2, "the catch-all and the one slow-pages location, both to the app on loopback")
+        self.assertEqual(re.findall(r"location (\S+ )?(\S+) \{", self.code), [("~ ", "^/sites/[a-z0-9-]+/(install|password)$"), ("", "/")])
+        slow = self.code.split("location ~")[1].split("location /")[0]
+        self.assertIn("proxy_read_timeout 700s;", slow, "longer than wp-ctl's 600 s for install")
+        self.assertEqual(self.code.count("proxy_read_timeout"), 2)
+        self.assertEqual(self.code.count("proxy_set_header X-Forwarded-Proto https;"), 2, "in both locations")
+        self.assertEqual(self.code.count("proxy_set_header X-Forwarded-For $remote_addr;"), 2, "the client's address, not a list a client can extend")
+        self.assertEqual(self.code.count("proxy_set_header Host $host;"), 2)
         self.assertNotIn("$proxy_add_x_forwarded_for", self.code)
-        self.assertEqual(len(re.findall(r"^\s*location ", self.code, re.M)), 1)
+        self.assertEqual(len(re.findall(r"^\s*location ", self.code, re.M)), 2, "the catch-all and the slow pages; a new location is a decision of its batch")
 
     def test_the_body_limit_is_small_until_the_import_page_exists(self):
         self.assertEqual(re.findall(r"client_max_body_size (\S+);", self.code), ["1m"])

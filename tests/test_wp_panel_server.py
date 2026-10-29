@@ -166,5 +166,34 @@ class RealServer(unittest.TestCase):
         self.assertEqual(len(out), want)
 
 
+@unittest.skipUnless(HAVE_GUNICORN, "gunicorn is not installed (pip install -r app/requirements.txt)")
+class SlowRequest(unittest.TestCase):
+    def test_a_request_longer_than_the_worker_timeout_is_not_killed_under_gthread(self):
+        """Installing WordPress waits minutes for the tool on dellwp, far over `timeout`; the setting is the worker's heartbeat, not a request's length (gthread). Proven here with a 2 s timeout and a 5 s request."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "slow.py").write_text("import time\n\ndef app(environ, start_response):\n    time.sleep(5)\n    start_response('200 OK', [('Content-Type', 'text/plain')])\n    return [b'done']\n")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        env = {"PATH": os.environ["PATH"], "PANEL_BIND": "127.0.0.1:%d" % port}
+        proc = subprocess.Popen([sys.executable, "-I", "-m", "gunicorn", "-c", str(CONF), "--timeout", "2", "--workers", "1", "--worker-tmp-dir", "/tmp", "--chdir", d.name, "slow:app"],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        c.request("GET", "/")
+        r = c.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"done"))
+        c.close()
+
+
 if __name__ == "__main__":
     unittest.main()

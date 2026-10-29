@@ -1,4 +1,4 @@
-"""The pages: Sites, Site, Jobs, Job, Audit (they only read), and the first forms: create a site, change one setting, move a site to hold, live or stopped (batch 11 of step 6). Each asks dellwp through the
+"""The pages: Sites, Site, Jobs, Job, Audit (they only read), and the first forms: create a site, change one setting, move a site to hold, live or stopped (batch 11 of step 6), delete a stopped site, set a WordPress user's password and install WordPress into an empty site (batch 12). Each asks dellwp through the
 ctl client and renders what it was told. A form is a POST with the session's token (checked before anything else), asks for ONE verb, and answers with a redirect to that verb's job page; wp-ctl decides, the
 page only asks. Every form carries a request id made when the page was drawn, so a form sent twice (a double click, a reload) starts one job. Whatever dellwp sends is text to show, never markup:
 the templates escape it, and a job log goes in a <pre>. A page that cannot be had says why, in a page of its own, with a status the browser understands."""
@@ -137,6 +137,55 @@ def register(app):
         if args["state"] == "live":
             args["confirm_name"] = field("confirm_name", 60)
         return started(ask("ensure-state", **args))
+
+    @app.post("/sites/<name>/delete")
+    @action
+    def delete_site(name):
+        """Two steps, two entries of the name: the first only opens the page that says what will be deleted; the second starts the job. The tool wants a stopped site and says so; the page says so first."""
+        typed, again = field("confirm_name", 60), field("confirm_again", 60)
+        if typed != name:
+            return render_template("error.html", status=400, title="The form was not accepted", message="The name typed is not the site's name. Nothing was deleted."), 400
+        if not again:
+            reply = ask("show", site=name)
+            status, registry = reply.get("status") or {}, reply.get("registry") or {}
+            if (status.get("deployed") or registry.get("state")) != "stopped":
+                return render_template("error.html", status=400, title="Stop the site first", message="Only a stopped site is deleted: move it to stopped (it takes a final backup that is kept for the archive), then delete it."), 400
+            return render_template("delete_confirm.html", name=name, status=status, registry=registry, req=new_req())
+        return started(ask("delete", site=name, confirm_name=typed, confirm_again=again, req=field("req", 80)))
+
+    def secret_form(template, name):
+        reply = ask("show", site=name)                         # an unknown site is a 404 here, before a form is drawn
+        return render_template(template, name=name, registry=reply.get("registry") or {})
+
+    def done(title, name, out):
+        return render_template("done.html", title=title, name=name, out=str(out or "")[-1500:])
+
+    @app.get("/sites/<name>/password")
+    @page
+    def password_form(name):
+        return secret_form("password.html", name)
+
+    @app.post("/sites/<name>/password")
+    @action
+    def change_password(name):
+        user, pw, again = field("user", 80), field("password", 300), field("again", 300)
+        if pw != again:
+            return render_template("error.html", status=400, title="The form was not accepted", message="The two passwords are not the same. Nothing was changed."), 400
+        return done("Password changed", name, ask("password", secret=pw, site=name, user=user).get("out"))
+
+    @app.get("/sites/<name>/install")
+    @page
+    def install_form(name):
+        return secret_form("install.html", name)
+
+    @app.post("/sites/<name>/install")
+    @action
+    def install_wordpress(name):
+        pw, again = field("password", 300), field("again", 300)
+        if pw != again:
+            return render_template("error.html", status=400, title="The form was not accepted", message="The two passwords are not the same. Nothing was changed."), 400
+        reply = ask("install", secret=pw, site=name, title=field("title", 200), user=field("user", 60), email=field("email", 300))
+        return done("WordPress installed", name, reply.get("out"))
 
     @app.get("/jobs")
     @page

@@ -61,14 +61,30 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state"}, "a new action verb is a decision of its batch: add it here on purpose")
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete"}, "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
             self.assertEqual(theirs.kind, "job", verb)
             self.assertEqual(set(spec), set(theirs.args), verb)
             for name, (required, _) in spec.items():
                 self.assertEqual(required or name == "confirm_name", theirs.args[name].required or name == "confirm_name", (verb, name))
-        self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS))
+        self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS) | set(ctl.SECRET_VERBS))
+
+    def test_the_secret_verbs_are_the_dispatchers_secret_verbs_with_its_argument_names_and_rules(self):
+        self.assertEqual(set(ctl.SECRET_VERBS), {"password", "install"})
+        for verb, spec in ctl.SECRET_VERBS.items():
+            theirs = wp_ctl.VERBS[verb]
+            self.assertEqual(theirs.kind, "secret", verb)
+            self.assertEqual(set(spec), set(theirs.args), verb)
+            for name, (required, _) in spec.items():
+                self.assertEqual(required, theirs.args[name].required, (verb, name))
+        self.assertEqual((ctl.MIN_PASSWORD, ctl.MAX_PASSWORD), (wp_ctl.MIN_PASSWORD, wp_ctl.MAX_TEXT))
+        for name in ("USER_NAME_RE", "ADMIN_NAME_RE", "EMAIL_RE"):
+            self.assertEqual(getattr(ctl, name).pattern, getattr(wp_ctl, name).pattern, name)
+        import yaml
+        limits = yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())["wp_ctl_limits"]
+        for verb, seconds in ctl.TIMEOUTS.items():
+            self.assertGreater(seconds, limits[verb]["timeout_s"], "the page waits longer than wp-ctl lets the tool run: %s" % verb)
 
     def test_every_verb_that_is_in_neither_list_is_refused(self):
         for verb in set(wp_ctl.VERBS) - set(ctl.ALLOWED):
@@ -414,6 +430,109 @@ class Actions(unittest.TestCase):
         cmd, kw = fake.calls[0]
         self.assertEqual(json.loads(kw["input"]), {"verb": "create", "name": "hub", "req": "p1"})
         self.assertEqual(cmd[-1], "wpctl@dellwp", "the remote command is never named: the key is forced to wp-ctl")
+
+
+class Secrets(unittest.TestCase):
+    PW = "correct horse battery 7"
+
+    def test_the_password_is_the_second_line_of_the_input_and_nowhere_else(self):
+        fake = Fake(stdout=ok(rc=0, ran=True, out="Success\n"))
+        client(run=fake).call("password", secret=self.PW, site="alpha", user="admin")
+        cmd, kw = fake.calls[0]
+        first, second, rest = kw["input"].decode().split("\n")
+        self.assertEqual((json.loads(first), second, rest), ({"verb": "password", "site": "alpha", "user": "admin"}, self.PW, ""))
+        self.assertNotIn(self.PW, " ".join(cmd) + str(kw["env"]) + first)
+
+    def test_install_sends_its_arguments_in_the_first_line_and_the_password_in_the_second(self):
+        fake = Fake(stdout=ok(rc=0, ran=True, out="done\n"))
+        client(run=fake).call("install", secret=self.PW, site="alpha", title="Alpha shop", user="owner", email="o@example.com")
+        first, second, _ = fake.calls[0][1]["input"].decode().split("\n")
+        self.assertEqual(json.loads(first), {"verb": "install", "site": "alpha", "title": "Alpha shop", "user": "owner", "email": "o@example.com"})
+        self.assertEqual(second, self.PW)
+
+    def test_a_password_that_is_short_long_not_text_or_has_a_control_character_is_refused_without_being_sent(self):
+        for pw in (None, "", "short", "x" * 13, "x" * 201, "a" * 14 + "\n", "a" * 14 + "\nb", "a" * 14 + "\x00", "a" * 14 + "\x7f", 12345678901234, [self.PW], b"x" * 20):
+            fake = Fake(stdout=ok())
+            with self.subTest(pw=repr(pw)[:12]), self.assertRaises(ctl.CtlError) as cm:
+                client(run=fake).call("password", secret=pw, site="alpha", user="admin")
+            self.assertEqual((cm.exception.kind, fake.calls), ("not_allowed", []))
+            if isinstance(pw, str) and len(pw) > 5:
+                self.assertNotIn(pw, str(cm.exception))
+        for pw in ("a" * 14, "a" * 200, "pässwörd with spaces 99"):
+            client(run=Fake(stdout=ok(rc=0, ran=True, out=""))).call("password", secret=pw, site="alpha", user="admin")
+
+    def test_only_a_secret_verb_takes_a_password_and_it_must_have_one(self):
+        for verb, args in (("show", {"site": "alpha"}), ("set", {"site": "alpha", "key": "note", "value": "x"}), ("jobs", {})):
+            fake = Fake(stdout=ok())
+            with self.subTest(verb=verb), self.assertRaises(ctl.CtlError) as cm:
+                client(run=fake).call(verb, secret=self.PW, **args)
+            self.assertEqual((cm.exception.kind, fake.calls), ("not_allowed", []))
+            self.assertNotIn(self.PW, str(cm.exception))
+        with self.assertRaises(ctl.CtlError):
+            client(run=Fake(stdout=ok())).call("password", site="alpha", user="admin")
+
+    def test_the_password_cannot_be_smuggled_into_an_argument(self):
+        for args in ({"site": "alpha", "user": "admin", "password": self.PW}, {"site": "alpha", "user": "admin\n" + self.PW}):
+            fake = Fake(stdout=ok())
+            with self.assertRaises(ctl.CtlError):
+                client(run=fake).call("password", secret=self.PW, **args)
+            self.assertEqual(fake.calls, [])
+
+    def test_the_user_and_the_install_arguments_must_look_the_way_wp_ctl_wants(self):
+        for user in ("", "a b", "a;b", "x" * 61, "日本", "a\nb", None, 5):
+            with self.subTest(user=user), self.assertRaises(ctl.CtlError):
+                client().request("password", {"site": "alpha", "user": user})
+        for user in ("ab", "x" * 31, "a b", "a@b", "a\nb"):
+            with self.subTest(admin=user), self.assertRaises(ctl.CtlError):
+                client().request("install", {"site": "alpha", "title": "T", "user": user, "email": "o@example.com"})
+        for email in ("", "nope", "a@b", "a b@c.d", "a@b@c.d", "a@b.c\n", "x" * 250 + "@a.bc"):
+            with self.subTest(email=email), self.assertRaises(ctl.CtlError):
+                client().request("install", {"site": "alpha", "title": "T", "user": "owner", "email": email})
+        for title in ("", " x", "x ", "x" * 101, "a\nb"):
+            with self.subTest(title=title), self.assertRaises(ctl.CtlError):
+                client().request("install", {"site": "alpha", "title": title, "user": "owner", "email": "o@example.com"})
+
+    def test_a_tool_that_failed_is_reported_with_the_end_of_its_words_and_without_the_password(self):
+        out = "wp-site-password: the user nobody does not exist (REDACTED)"
+        fake = Fake(stdout=(json.dumps({"ok": False, "rc": 1, "ran": True, "out": out + " " + self.PW}) + "\n").encode(), returncode=1)
+        with self.assertRaises(ctl.CtlError) as cm:
+            client(run=fake).call("password", secret=self.PW, site="alpha", user="nobody")
+        self.assertEqual(cm.exception.kind, "failed")
+        self.assertIn("does not exist", str(cm.exception))
+        self.assertNotIn(self.PW, str(cm.exception))
+
+    def test_a_password_with_spaces_is_redacted_even_when_the_tool_spreads_it_over_a_long_text(self):
+        pw = "two  spaces   and   more words 12"
+        out = "x " * 400 + "failed with " + pw + " in it"
+        fake = Fake(stdout=(json.dumps({"ok": False, "rc": 1, "ran": True, "out": out}) + "\n").encode(), returncode=1)
+        with self.assertRaises(ctl.CtlError) as cm:
+            client(run=fake).call("password", secret=pw, site="alpha", user="admin")
+        self.assertNotIn("spaces", str(cm.exception).replace("REDACTED", ""))
+        self.assertIn("REDACTED", str(cm.exception))
+
+    def test_install_and_password_wait_longer_than_the_other_calls_and_nothing_else_does(self):
+        fake = Fake(stdout=ok(rc=0, ran=True, out=""))
+        client(run=fake, timeout_s=30).call("install", secret=self.PW, site="alpha", title="T", user="owner", email="o@example.com")
+        client(run=fake, timeout_s=30).call("password", secret=self.PW, site="alpha", user="admin")
+        client(run=fake, timeout_s=30).call("set", site="alpha", key="note", value="x")
+        self.assertEqual([kw["timeout"] for _, kw in fake.calls], [660, 330, 30])
+        slow = Fake(raises=subprocess.TimeoutExpired("ssh", 660))
+        with self.assertRaises(ctl.CtlError) as cm:
+            client(run=slow).call("install", secret=self.PW, site="alpha", title="T", user="owner", email="o@example.com")
+        self.assertIn("660 seconds", str(cm.exception))
+
+    def test_delete_needs_the_name_typed_twice_and_exactly(self):
+        line = json.loads(client().request("delete", {"site": "alpha", "confirm_name": "alpha", "confirm_again": "alpha", "req": "pd1"}))
+        self.assertEqual(line, {"verb": "delete", "site": "alpha", "confirm_name": "alpha", "confirm_again": "alpha", "req": "pd1"})
+        for a, b in (("alpha", "bravo"), ("bravo", "alpha"), ("bravo", "bravo"), ("Alpha", "alpha"), ("alpha", "alpha "), ("alpha", None), (None, "alpha")):
+            with self.subTest(a=a, b=b), self.assertRaises(ctl.CtlError) as cm:
+                client().request("delete", {"site": "alpha", "confirm_name": a, "confirm_again": b})
+            self.assertEqual(cm.exception.kind, "not_allowed")
+        for missing in ("confirm_name", "confirm_again", "site"):
+            args = {"site": "alpha", "confirm_name": "alpha", "confirm_again": "alpha"}
+            del args[missing]
+            with self.assertRaises(ctl.CtlError):
+                client().request("delete", args)
 
 
 if __name__ == "__main__":

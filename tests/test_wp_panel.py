@@ -23,7 +23,7 @@ from werkzeug.http import parse_cookie  # noqa: E402
 
 from wp_panel import auth, config  # noqa: E402
 from wp_panel.app import HEADERS, create_app  # noqa: E402
-from wp_panel.ctl import ACTION_VERBS, ALLOWED, READ_VERBS, SET_KEYS, Ctl, CtlError  # noqa: E402
+from wp_panel.ctl import ACTION_VERBS, ALLOWED, READ_VERBS, SECRET_VERBS, SET_KEYS, Ctl, CtlError, good_password  # noqa: E402
 
 PASSWORD = "correct horse battery staple 42"
 TOTP_SECRET = pyotp.random_base32()
@@ -44,7 +44,7 @@ class FakeCtl:
     """Answers like wp-ctl; every call is recorded. `fail` maps a verb to a CtlError to raise."""
 
     def __init__(self):
-        self.calls, self.fail = [], {}
+        self.calls, self.fail, self.secrets = [], {}, []
         self.replies = {
             "list": {"ok": True, "sites": [{"site": "alpha", "deployed": "live", "actual": "live", "unit": "active"}, {"site": "bravo", "deployed": "hold", "actual": "hold", "unit": "active"}]},
             "show": {"ok": True, "site": "alpha", "status": {"deployed": "live", "quota_pct": "9"}, "registry": {"name": "alpha", "note": "a note", "port": 9101}},
@@ -52,6 +52,9 @@ class FakeCtl:
             "job-status": {"ok": True, "state": "done", "rc": 0},
             "job-log": {"ok": True, "job": JOB, "data": "line one\nline two\n", "offset": 18, "state": "done", "rc": 0},
             "create": {"ok": True, "job": JOB},
+            "delete": {"ok": True, "job": JOB},
+            "password": {"ok": True, "rc": 0, "ran": True, "out": "Success: Password changed.\n"},
+            "install": {"ok": True, "rc": 0, "ran": True, "out": "WordPress installed.\n"},
             "set": {"ok": True, "job": JOB},
             "ensure-state": {"ok": True, "job": JOB},
             "audit-tail": {"ok": True, "lines": [{"ts": "2026-10-29T12:00:00Z", "phase": "intent", "verb": "set", "site": "alpha", "req": "x"}]},
@@ -59,8 +62,14 @@ class FakeCtl:
 
     checker = Ctl("dellwp", "wpctl", "/k", "/kh")          # the real client's own checks of the verb and every value, so a page that sends something wp-ctl would refuse fails here as it would live
 
-    def call(self, verb, **args):
+    def call(self, verb, secret=None, **args):
         self.checker.request(verb, args)
+        if verb in SECRET_VERBS:
+            if not good_password(secret):
+                raise CtlError("not_allowed", "the password must be 14 to 200 characters on one line, without control characters")
+            self.secrets.append(secret)                      # kept apart from the calls, so a test can look for it everywhere else
+        elif secret is not None:
+            raise CtlError("not_allowed", "takes no password")
         self.calls.append((verb, dict(args)))
         if verb in self.fail:
             raise self.fail[verb]
@@ -478,7 +487,7 @@ class Actions(Base):
         return self.c.post(path, data=data, base_url=BASE, **kw)
 
     def acted(self):
-        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS]
+        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS]
 
     def setUp(self):
         super().setUp()
@@ -619,7 +628,8 @@ class Actions(Base):
             self.ctl.replies["show"]["status"]["deployed"] = state
             html = self.text("/sites/alpha")
             self.assertEqual(set(re.findall(r'name="state" value="([a-z]+)"', html)), offered, state)
-            self.assertEqual('name="confirm_name"' in html, "live" in offered, state)
+            state_forms = re.findall(r'<form method="post" action="/sites/alpha/state".*?</form>', html, re.S)
+            self.assertEqual(any('name="confirm_name"' in f for f in state_forms), "live" in offered, state)
         for state in ("", "weird", "closed"):
             self.ctl.replies["show"]["status"]["deployed"] = state
             self.ctl.replies["show"]["registry"].pop("state", None)
@@ -669,13 +679,164 @@ class Actions(Base):
         return r.get_data(as_text=True)
 
 
+class Secrets(Base):
+    """Batch 12: delete (two entries of the name, a stopped site only), a WordPress user's password and installing WordPress. The password is the one thing that must be found nowhere but in the one call."""
+    PW = "correct horse battery 7"
+
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+        self.ctl.replies["show"]["status"]["deployed"] = "stopped"
+
+    def post(self, path, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.csrf(path="/sites/alpha")
+        if token:
+            data["csrf"] = token
+        return self.c.post(path, data=data, base_url=BASE)
+
+    def acted(self):
+        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS]
+
+    def test_delete_is_two_steps_and_the_first_only_shows_what_would_go(self):
+        r = self.post("/sites/alpha/delete", {"confirm_name": "alpha"})
+        html = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.acted(), [], "typing the name once deletes nothing")
+        self.assertIn("for good", html)
+        self.assertIn('name="confirm_again"', html)
+        self.assertRegex(html, r'name="confirm_name" value="alpha"')
+        self.assertRegex(html, r'name="req" value="p[0-9a-f]{32}"')
+
+    def test_the_second_entry_starts_the_delete_and_sends_the_job_page(self):
+        r = self.post("/sites/alpha/delete", {"confirm_name": "alpha", "confirm_again": "alpha", "req": "pd1"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual(self.acted(), [("delete", {"site": "alpha", "confirm_name": "alpha", "confirm_again": "alpha", "req": "pd1"})])
+
+    def test_a_name_that_is_not_the_sites_deletes_nothing_at_either_step(self):
+        for typed in ("", "bravo", "Alpha", "alpha ", " alpha", "alph"):
+            with self.subTest(typed=typed):
+                self.assertEqual(self.post("/sites/alpha/delete", {"confirm_name": typed}).status_code, 400)
+                self.assertEqual(self.post("/sites/alpha/delete", {"confirm_name": typed, "confirm_again": typed, "req": "pd1"}).status_code, 400)
+                if typed:                                     # an empty second entry is the first step again: it shows the page and deletes nothing
+                    self.assertEqual(self.post("/sites/alpha/delete", {"confirm_name": "alpha", "confirm_again": typed, "req": "pd1"}).status_code, 400)
+        self.assertEqual(self.post("/sites/alpha/delete", {"confirm_name": "alpha", "confirm_again": "", "req": "pd1"}).status_code, 200)
+        self.assertEqual(self.acted(), [])
+
+    def test_a_site_that_is_not_stopped_is_not_offered_a_delete_and_the_first_step_says_stop_it_first(self):
+        for state in ("hold", "live"):
+            self.ctl.replies["show"]["status"]["deployed"] = state
+            self.assertNotIn('action="/sites/alpha/delete"', self.get("/sites/alpha").get_data(as_text=True), state)
+            r = self.post("/sites/alpha/delete", {"confirm_name": "alpha"})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("Stop the site first", r.get_data(as_text=True))
+        self.ctl.replies["show"]["status"]["deployed"] = "stopped"
+        self.assertIn('action="/sites/alpha/delete"', self.get("/sites/alpha").get_data(as_text=True))
+        self.assertEqual(self.acted(), [])
+
+    def test_the_password_goes_to_the_client_once_and_is_in_no_page_no_call_and_no_redirect(self):
+        r = self.post("/sites/alpha/password", {"user": "admin", "password": self.PW, "again": self.PW})
+        html = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Password changed", html)
+        self.assertEqual(self.ctl.secrets, [self.PW])
+        self.assertEqual(self.acted(), [("password", {"site": "alpha", "user": "admin"})])
+        self.assertNotIn(self.PW, html + str(self.ctl.calls) + str(r.headers))
+
+    def test_two_passwords_that_differ_or_a_short_one_or_one_with_a_newline_ask_nothing_and_are_not_echoed(self):
+        for pw, again in ((self.PW, self.PW + "x"), ("short", "short"), (self.PW + "\n" + "x", self.PW + "\n" + "x"), ("x" * 201, "x" * 201), ("", "")):
+            with self.subTest(pw=pw[:6]):
+                r = self.post("/sites/alpha/password", {"user": "admin", "password": pw, "again": again})
+                self.assertEqual(r.status_code, 400)
+                if len(pw) > 3:
+                    self.assertNotIn(pw, r.get_data(as_text=True))
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.ctl.secrets, [])
+
+    def test_a_user_name_that_is_not_one_asks_nothing(self):
+        for user in ("", "a b", "a;b", "x" * 61, "日本", "a\nb"):
+            with self.subTest(user=user):
+                self.assertEqual(self.post("/sites/alpha/password", {"user": user, "password": self.PW, "again": self.PW}).status_code, 400)
+        self.assertEqual(self.acted(), [])
+
+    def test_a_failed_tool_shows_its_words_and_never_the_password(self):
+        self.ctl.fail["password"] = CtlError("failed", "wp-ctl failed: no error code (Error: the user does not exist)", None)
+        r = self.post("/sites/alpha/password", {"user": "nobody", "password": self.PW, "again": self.PW})
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("does not exist", r.get_data(as_text=True))
+        self.assertNotIn(self.PW, r.get_data(as_text=True))
+
+    def test_install_sends_the_title_user_and_email_as_arguments_and_the_password_apart(self):
+        r = self.post("/sites/alpha/install", {"title": "Alpha shop", "user": "owner", "email": "o@example.com", "password": self.PW, "again": self.PW})
+        html = r.get_data(as_text=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("WordPress installed", html)
+        self.assertEqual(self.acted(), [("install", {"site": "alpha", "title": "Alpha shop", "user": "owner", "email": "o@example.com"})])
+        self.assertEqual(self.ctl.secrets, [self.PW])
+        self.assertNotIn(self.PW, html)
+
+    def test_install_refuses_what_wp_ctl_would_and_asks_nothing(self):
+        good = {"title": "Alpha", "user": "owner", "email": "o@example.com", "password": self.PW, "again": self.PW}
+        for over in ({"title": ""}, {"title": "x" * 101}, {"user": "ab"}, {"user": "has space"}, {"user": "x" * 31}, {"email": "nope"}, {"email": "a b@c.d"}, {"email": ""}, {"again": "different password 99"}, {"password": "short", "again": "short"}):
+            with self.subTest(over=over):
+                self.assertEqual(self.post("/sites/alpha/install", dict(good, **over)).status_code, 400)
+        self.assertEqual(self.acted(), [])
+
+    def test_the_password_pages_and_the_forms_have_the_token_and_ask_nothing_without_it(self):
+        for path, data in (("/sites/alpha/password", {"user": "admin", "password": self.PW, "again": self.PW}), ("/sites/alpha/install", {"title": "A", "user": "owner", "email": "o@example.com", "password": self.PW, "again": self.PW}),
+                           ("/sites/alpha/delete", {"confirm_name": "alpha", "confirm_again": "alpha", "req": "pd1"})):
+            for token in (False, "", "wrong"):
+                with self.subTest(path=path, token=token):
+                    self.assertEqual(self.post(path, data, token=token).status_code, 400)
+        other = self.app.test_client()
+        self.assertEqual(other.get("/sites/alpha/password", base_url=BASE).status_code, 302)
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.ctl.secrets, [])
+
+    def test_the_password_inputs_are_password_fields_that_a_browser_does_not_fill_or_remember(self):
+        for path in ("/sites/alpha/password", "/sites/alpha/install"):
+            html = self.get(path).get_data(as_text=True)
+            self.assertEqual(len(re.findall(r'<input name="(?:password|again)" type="password"[^>]*autocomplete="new-password"', html)), 2, path)
+            self.assertNotIn("value=\"%s" % self.PW, html)
+            self.assertNotIn("<script", html.lower())
+
+    def test_the_forms_for_an_unknown_site_are_a_404_page(self):
+        self.ctl.fail["show"] = CtlError("refused", "wp-ctl refused: unknown_site", "unknown_site")
+        self.assertEqual(self.get("/sites/ghost/password").status_code, 404)
+        self.assertEqual(self.get("/sites/ghost/install").status_code, 404)
+
+    def test_a_tool_that_says_something_is_shown_as_text(self):
+        self.ctl.replies["install"] = {"ok": True, "rc": 0, "ran": True, "out": "<script>alert(1)</script> done"}
+        r = self.post("/sites/alpha/install", {"title": "A", "user": "owner", "email": "o@example.com", "password": self.PW, "again": self.PW})
+        self.assertNotIn("<script", r.get_data(as_text=True).lower())
+        self.assertIn("&lt;script&gt;", r.get_data(as_text=True))
+
+    def test_the_site_page_links_to_the_two_forms(self):
+        html = self.get("/sites/alpha").get_data(as_text=True)
+        self.assertIn('href="/sites/alpha/install"', html)
+        self.assertIn('href="/sites/alpha/password"', html)
+
+    def test_the_app_never_logs_the_password(self):
+        import logging
+        records = []
+        handler = logging.Handler()
+        handler.emit = lambda rec: records.append(rec.getMessage())
+        self.app.logger.addHandler(handler)
+        self.ctl.fail["password"] = CtlError("failed", "wp-ctl failed: x", None)
+        self.post("/sites/alpha/password", {"user": "admin", "password": self.PW, "again": self.PW})
+        self.assertFalse([m for m in records if self.PW in m])
+
+
 class ReadOnly(Base):
     def test_the_app_has_exactly_these_routes_and_none_of_them_changes_anything_on_dellwp(self):
         rules = sorted((r.rule, tuple(sorted(m for m in r.methods if m not in ("HEAD", "OPTIONS")))) for r in self.app.url_map.iter_rules())
         self.assertEqual(rules, sorted([("/", ("GET",)), ("/audit", ("GET",)), ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
-                                        ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
+                                        ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
+                                        ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
+                                        ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),
-                         "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state)")
+                         "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install)")
 
     def test_a_full_crawl_asks_for_read_verbs_only(self):
         self.logged_in()

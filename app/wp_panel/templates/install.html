@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Install WordPress · {{ name }}{% endblock %}
+{% block body %}
+<h1>Install WordPress</h1>
+<p><a href="{{ url_for('site', name=name) }}">{{ name | clip(40) }}</a></p>
+<p class="small">For an empty site only: the tool refuses a site that already has WordPress in it. This can take a minute. The administrator's password is handled like any password here: never logged, never shown again. 14 to 200 characters.</p>
+<form method="post" action="{{ url_for('install_wordpress', name=name) }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <label>Site title <input name="title" required maxlength="100" value="{{ registry.get('label', '') | clip(100) }}" autocomplete="off"></label>
+  <label>Administrator user <span class="small">3 to 30 letters, digits, dot, dash or underscore</span>
+    <input name="user" required minlength="3" maxlength="30" pattern="[A-Za-z0-9_.\-]{3,30}" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <label>Administrator email <input name="email" type="email" required maxlength="254" autocomplete="off"></label>
+  <label>Administrator password <input name="password" type="password" required minlength="14" maxlength="200" autocomplete="new-password"></label>
+  <label>The same password again <input name="again" type="password" required minlength="14" maxlength="200" autocomplete="new-password"></label>
+  <button type="submit">Install WordPress</button>
+</form>
+{% endblock %}

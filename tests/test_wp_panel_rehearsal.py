@@ -126,7 +126,7 @@ class Driver(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for needle in ("a wrong login is refused with the one plain message", "the right password and code log in", "Sites opens", "a site's page opens", "Jobs opens", "a job's page opens with its log",
                        "Audit opens", "logging out needs the token", "logging out works", "after logging out /sites is sent to /login", "site(s) listed",
-                       "the site page offers its setting and state forms (nothing is submitted)", "the new-site form opens (nothing is submitted)"):
+                       "the site page offers its setting and state forms (nothing is submitted)", "the new-site form opens (nothing is submitted)", "the password form opens (nothing is submitted)", "the install form opens (nothing is submitted)"):
             self.assertIn(needle, r.stdout)
         for secret in (PASSWORD, c, "panel_session"):
             self.assertNotIn(secret, r.stdout + r.stderr)

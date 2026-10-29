@@ -7,7 +7,7 @@ Without --login it asks nothing and logs nothing in: the TLS handshake and the c
 200 with the security headers the app and nginx must send, and no version in the server banner; /sites without a login is sent to /login; the stylesheet is served; a form posted without its token is refused.
 With --login (or --login-only, which skips the checks above and only logs in) it reads the password on the first line of standard input and the authenticator code on the second (the caller reads them hidden and pipes them in: they are never an argument, an environment
 variable or a file) and walks a real session: one wrong login is refused the same way as any other; the right one opens Sites, Jobs and Audit (which asks dellwp through ssh, so this is the end-to-end proof) and the
-first job's page when there is one, and the new-site form and a site's setting forms (looked at, never submitted: the rehearsal changes nothing); logging out ends the session. It prints one line per check ("ok: ..." or "FAIL: ...") and never a secret, a cookie or a page's content; the exit status is the number of failures."""
+first job's page when there is one, and the new-site form and a site's setting, password and install forms (looked at, never submitted: the rehearsal changes nothing); logging out ends the session. It prints one line per check ("ok: ..." or "FAIL: ...") and never a secret, a cookie or a page's content; the exit status is the number of failures."""
 import argparse
 import http.client
 import re
@@ -148,6 +148,9 @@ def login_checks(s, password, code):
         st, _, page = s.request("GET", "/sites/" + name)
         check(st == 200 and "registry record" in page.lower(), "a site's page opens", st)
         check('action="/sites/%s/set"' % name in page and 'action="/sites/%s/state"' % name in page and 'name="csrf"' in page, "the site page offers its setting and state forms (nothing is submitted)")
+        for form, needle in (("password", 'type="password"'), ("install", 'name="email"')):
+            st, _, sub = s.request("GET", "/sites/%s/%s" % (name, form))
+            check(st == 200 and needle in sub and 'name="csrf"' in sub, "the %s form opens (nothing is submitted)" % form, st)
     st, _, page = s.request("GET", "/new-site")
     check(st == 200 and 'action="/new-site"' in page and 'name="req"' in page, "the new-site form opens (nothing is submitted)", st)
     st, _, html = s.request("GET", "/jobs")

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block body %}
+<h1>{{ title }}</h1>
+<p><a href="{{ url_for('site', name=name) }}">Back to {{ name | clip(40) }}</a></p>
+{% if out %}<h2>What the tool said</h2>
+<pre class="log">{{ out }}</pre>{% endif %}
+{% endblock %}

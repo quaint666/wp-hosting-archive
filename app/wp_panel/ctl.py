@@ -3,8 +3,10 @@
 The ssh key on the control VM is forced to `sudo -n /usr/local/sbin/wp-ctl` in dellwp's authorized_keys, so this client names no remote command: whatever it sends arrives as the request on wp-ctl's
 standard input, and wp-ctl checks the verb against its own allowlist and every argument against its own rules. That is the real lock. This module is a second one on the app's side: it refuses a verb
 that is not in READ_VERBS or ACTION_VERBS, an argument the verb does not take, and a value that does not look the way wp-ctl wants it, BEFORE anything is sent, so a bug in a page cannot ask for more
-than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (batch 11: create, set, ensure-state; delete, import and the
-password verbs are not here yet). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent twice runs once.
+than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (batch 11: create, set, ensure-state; batch 12: delete, and the
+two that take a password, SECRET_VERBS: password, install; the import verbs are not here yet). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent
+twice runs once. A secret verb sends the request line and then the password as a second line on the same standard input (wp-ctl hands it to the tool through a file in a RAM disk): the password is never an
+argument, never in the request line, and never in a message of this module; what comes back is scrubbed here again before it is shown.
 
 Nothing here builds a shell line: ssh gets an argument list, the request travels on standard input, and the environment ssh sees holds nothing but a PATH. What goes wrong is reported as CtlError with a
 kind the pages can show: not_allowed (this client refused), unreachable (no answer from dellwp), refused (wp-ctl said no, status 2), failed (wp-ctl ran and failed, status 1), bad_reply (the answer
@@ -19,6 +21,11 @@ LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")                          #
 SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note")
 STATES = ("hold", "live", "stopped")
 SET_VALUE_MAX = 500
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                         # wp-ctl's USER_NAME_RE (an existing WordPress user)
+ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                         # wp-ctl's ADMIN_NAME_RE
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                          # wp-ctl's EMAIL_RE
+MIN_PASSWORD, MAX_PASSWORD = 14, 200                                          # wp-ctl's MIN_PASSWORD and MAX_TEXT
+TIMEOUTS = {"password": 330, "install": 660}                                  # seconds an answer may take: wp-ctl's own limit for the verb (300, 600) and a margin; every other verb uses timeout_s
 
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # the site-name rule of scripts/wp_site_model.py and scripts/wp_ctl.py
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")                      # the job id wp-ctl makes (scripts/wp_ctl.py JOB_RE)
@@ -65,11 +72,22 @@ ACTION_VERBS = {
     "set": {"site": (True, _site), "key": (True, _one_of(SET_KEYS)), "value": (True, _text(SET_VALUE_MAX, empty=True))},
     "ensure-state": {"site": (True, _site), "state": (True, _one_of(STATES)), "confirm_name": (False, _site)},
 }
-ALLOWED = dict(READ_VERBS, **ACTION_VERBS)
+ACTION_VERBS["delete"] = {"site": (True, _site), "confirm_name": (True, _site), "confirm_again": (True, _site)}
+SECRET_VERBS = {
+    "password": {"site": (True, _site), "user": (True, _text(60, USER_NAME_RE))},
+    "install": {"site": (True, _site), "title": (True, _text(100, LABEL_RE)), "user": (True, _text(30, ADMIN_NAME_RE)), "email": (True, _text(254, EMAIL_RE))},
+}
+ALLOWED = dict(READ_VERBS, **ACTION_VERBS, **SECRET_VERBS)
+
+
+def good_password(v):
+    return isinstance(v, str) and MIN_PASSWORD <= len(v) <= MAX_PASSWORD and CONTROL_RE.search(v) is None
 
 
 def _rules(verb, args):
     """What the argument table cannot say: going live needs the site's own name typed (wp-ctl: confirm_name, equal to the site), and nothing else takes one."""
+    if verb == "delete" and not (args.get("confirm_name") == args.get("site") == args.get("confirm_again")):
+        raise CtlError("not_allowed", "a delete needs the site's name typed twice, exactly")
     if verb == "ensure-state":
         if args.get("state") == "live" and args.get("confirm_name") != args.get("site"):
             raise CtlError("not_allowed", "going live needs the site's name typed exactly")
@@ -129,13 +147,22 @@ class Ctl:
             raise CtlError("not_allowed", "the request is too long")
         return line
 
-    def call(self, verb, **args):
-        """wp-ctl's reply (a dict with ok true) or a CtlError."""
+    def call(self, verb, secret=None, **args):
+        """wp-ctl's reply (a dict with ok true) or a CtlError. `secret` is the password of a SECRET verb (and of no other)."""
         line = self.request(verb, args)
+        if verb in SECRET_VERBS:
+            if not good_password(secret):
+                raise CtlError("not_allowed", "the password must be %d to %d characters on one line, without control characters" % (MIN_PASSWORD, MAX_PASSWORD))
+            payload = line + secret + "\n"
+        elif secret is not None:
+            raise CtlError("not_allowed", "%s takes no password" % verb)
+        else:
+            payload = line
+        timeout = TIMEOUTS.get(verb, self.timeout_s)
         try:
-            p = self.run(self.command(), input=line.encode(), capture_output=True, timeout=self.timeout_s, env={"PATH": self.path})
+            p = self.run(self.command(), input=payload.encode(), capture_output=True, timeout=timeout, env={"PATH": self.path})
         except subprocess.TimeoutExpired:
-            raise CtlError("unreachable", "dellwp did not answer within %d seconds" % self.timeout_s)
+            raise CtlError("unreachable", "dellwp did not answer within %d seconds" % timeout)
         except OSError as e:
             raise CtlError("unreachable", "ssh could not be started: %s" % (e.strerror or "an operating-system error"))
         out = (p.stdout or b"")[:MAX_REPLY_BYTES + 1]
@@ -158,7 +185,12 @@ class Ctl:
         code = reply.get("error") if isinstance(reply.get("error"), str) else None
         detail = reply.get("detail") if isinstance(reply.get("detail"), str) else ""
         kind = "refused" if p.returncode == 2 else "failed"
-        raise CtlError(kind, "wp-ctl %s: %s%s" % ("refused" if kind == "refused" else "failed", code or "no error code", (" (%s)" % detail[:200]) if detail else ""), code)
+        if not detail and isinstance(reply.get("out"), str):
+            detail = reply["out"]
+        if secret:
+            detail = detail.replace(secret, "REDACTED")                   # before the text is cut or its spaces folded, so no piece of the password survives either
+        detail = " ".join(detail.split())[-300:]
+        raise CtlError(kind, "wp-ctl %s: %s%s" % ("refused" if kind == "refused" else "failed", code or "no error code", (" (%s)" % detail) if detail else ""), code)
 
     @staticmethod
     def _why(raw):
