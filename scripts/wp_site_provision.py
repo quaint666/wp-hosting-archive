@@ -12,7 +12,7 @@
 The steps of the Ansible tasks this replaced (tasks/wp_site_one_common.yml, gone; git has it), in their order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
 the image once, the configuration files, the images, the systemd unit, start / restart / php reload as the play decides, the nginx vhost (validated; the previous one is put back on a failure), the
 probe through nginx and php, and the three timers. The rules and the record are scripts/wp_site_model.py, the files come from scripts/wp_site_renderer.py. The record holds only what differs from
-wp_site_defaults (the same convention as an entry of wp_sites), plus the name, the port, the quota id, the state and when it was made. Design: docs/handoff_wp_control_temp.md.
+wp_site_defaults (only what differs is kept), plus the name, the port, the quota id, the state and when it was made. Design: docs/handoff_wp_control_temp.md.
 
 templates/wp/wp_site_provision.py.j2 carries the repo's values and installs this as /usr/local/sbin/wp-site-provision (root only). Exit status: 0 done, 1 it ran and failed, 2 refused (nothing was
 changed). Nothing it prints is a secret. Tests: tests/test_wp_site_provision.py runs it against stand-ins for docker, nginx, systemctl and the quota tools."""
@@ -65,7 +65,7 @@ class Provisioner:
     def __init__(self, cfg, run=subprocess.run, sleep=time.sleep, probe=default_probe, chown=os.chown, out=print, now=time.time):
         self.cfg, self.run, self.sleep, self.probe, self.chown, self.out, self.now = cfg, run, sleep, probe, chown, out, now
         self.defaults, self.platform = cfg["defaults"], cfg["platform"]
-        self.known = [{**self.defaults, **k} for k in cfg["known"]]            # an entry of wp_sites without a state is on hold, as in the play
+        self.floor = [{**self.defaults, **k, "state": "closed"} for k in cfg["closed_floor"]]            # the ports and quota ids of the sites of the old engine: reserved, every entry closed
         self.registry = model.Registry(cfg["data_dir"], cfg["tombstones_dir"], self.defaults)
 
     # ---------------------------------------------------------------------------------------------------------------------------------- plumbing
@@ -120,8 +120,8 @@ class Provisioner:
     def all_merged(self):
         """Every site the registry or the repo knows, each over the defaults: one entry for every site and for every time a name was closed (a name may have a site and tombstones of earlier sites).
         The same site seen in two places must agree (model.everything checks); a site record that has a tombstone with the same port and quota id is a close that was interrupted, and is broken."""
-        model.everything(self.registry, self.known)
-        by = {(k["port"], k["quota_id"]): model.merged(self.defaults, k) for k in self.known}
+        model.everything(self.registry, self.floor)
+        by = {(k["port"], k["quota_id"]): model.merged(self.defaults, k) for k in self.floor}
         records = {(r["port"], r["quota_id"]): r for r in self.registry.sites()}
         for t in self.registry.tombstones():
             key = (t["port"], t["quota_id"])
@@ -155,7 +155,7 @@ class Provisioner:
         values = self.parse_sets(sets)
         with self.lock("registry"), self.lock("site-" + name):
             try:
-                everything = model.everything(self.registry, self.known)
+                everything = model.everything(self.registry, self.floor)
                 merged = self.all_merged()
             except model.RegistryError as e:
                 raise Failed(str(e))

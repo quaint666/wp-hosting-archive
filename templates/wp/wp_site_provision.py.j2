@@ -1,8 +1,8 @@
 #!/usr/bin/python3 -I
 # Managed by Ansible (templates/wp/wp_site_provision.py.j2). Make a WordPress site and keep it matching its record:   wp-site-provision create <name> [--set key=value ...] | apply <name> | set <name> key=value ... | state <name> hold|live|stopped | close <name> | rows | render <name> [--diff]
 # The logic is {{ wp_tools_lib }}/wp_site_provision.py (copied from scripts/ in the repo, where tests/test_wp_site_provision.py runs it); this file only carries the values from the repo. The templates it
-# renders are the copies in {{ wp_tools_lib }}/templates; the master secret is read from {{ wp_provision_secret_dir }}, never from this file. Root only (0750). `known` is the list of sites still
-# declared in host_vars/dellwp/vars.yml (wp_sites): their names, ports and quota ids are never given to a new site, whether or not they exist.
+# renders are the copies in {{ wp_tools_lib }}/templates; the master secret is read from {{ wp_provision_secret_dir }}, never from this file. Root only (0750). `closed_floor` is the
+# list in host_vars/dellwp/vars.yml (wp_closed_floor) of the ports and quota ids of the sites of the old engine: they are never given to a new site (their names may be).
 import json
 import sys
 
@@ -37,7 +37,7 @@ import wp_site_provision  # noqa: E402
     "backup": wp_tools_bin ~ "/wp-site-backup",
   },
   "defaults": wp_site_defaults,
-  "known": wp_sites,
+  "closed_floor": wp_closed_floor,
   "fit": {
     "reserved_names": wp_reserved_names,
     "vm_memory_mb": wp_vm.memory | int,

@@ -26,7 +26,6 @@ SECRETS = ("stub-master-secret", "stub-resend-key")
 def render():
     v = play.base_vars()
     v["wp_master_secret"], v["dellwp_wp_resend_key"] = SECRETS
-    v["wp_sites"] = v["real_wp_sites"]                                    # the helper swaps in a fixture site; the wrapper must carry the real list
     e = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
     e.globals["lookup"] = lambda kind, name: v[name]
     ctx = dict(v, inventory_hostname="dellwp", hostvars={"delloptiplex3040": {"proxmox_vms": [play.dellwp_vm()]}})
@@ -56,7 +55,8 @@ class Wrapper(unittest.TestCase):
     def test_the_values_are_the_repos(self):
         c, v = self.cfg, self.v
         self.assertEqual(c["defaults"], v["wp_site_defaults"], "booleans, numbers and lists survive")
-        self.assertEqual(c["known"], v["real_wp_sites"])
+        self.assertEqual(c["closed_floor"], v["wp_closed_floor"])
+        self.assertNotIn("known", c)
         self.assertEqual(c["fit"], dict(reserved_names=v["wp_reserved_names"], vm_memory_mb=play.dellwp_vm()["memory"], data_disk_gb=play.dellwp_vm()["data_disk"], ram_reserve_mb=v["wp_vm_ram_reserve_mb"],
                                          data_reserve_mb=v["wp_data_reserve_mb"], backup_quota_offset=v["wp_backup_quota_offset"], scratch_quota_id=v["wp_scratch_quota_id"],
                                          archive_quota_id=v["wp_archive_quota_id"], intake_quota_id=v["wp_intake_quota_id"]))
@@ -83,21 +83,35 @@ class Wrapper(unittest.TestCase):
         self.assertNotIn("wp_master_secret", self.cfg["platform"])
         self.assertTrue(all(not k.startswith("dellwp_") for k in self.cfg["platform"]), "vault variables are never carried")
 
+    def test_the_floor_in_vars_is_the_old_engines_numbers_and_nothing_else(self):
+        import yaml
+        raw = yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())
+        self.assertNotIn("wp_sites", raw, "the sites are the registry's; the repo lists none")
+        floor = raw["wp_closed_floor"]
+        self.assertEqual(sorted(e["name"] for e in floor), sorted(["wptest", "helloworld", "rehearsal", "rehearsal2", "rehearsal3", "rehearsal4", "rehearsal5", "rehearsal6", "rehearsal7", "parity1"]),
+                         "an entry is never removed: its numbers stay held")
+        for e in floor:
+            self.assertEqual(set(e), {"name", "port", "quota_id"}, e)
+        for key in ("name", "port", "quota_id"):
+            self.assertEqual(len({e[key] for e in floor}), len(floor), key + " is unique")
+        self.assertGreaterEqual(max(e["port"] for e in floor), 9110)
+        self.assertGreaterEqual(max(e["quota_id"] for e in floor), 1010)
+
     def test_the_tool_starts_with_it_and_can_plan_a_site(self):
         prov = wp_site_provision.Provisioner(self.cfg)
-        self.assertEqual({k["name"] for k in prov.known}, {s["name"] for s in self.v["real_wp_sites"]})
-        self.assertTrue(all(k["state"] in ("hold", "live", "stopped", "closed") for k in prov.known), "an entry without a state gets the default")
+        self.assertEqual({k["name"] for k in prov.floor}, {s["name"] for s in self.v["wp_closed_floor"]})
+        self.assertTrue(all(k["state"] == "closed" for k in prov.floor), "every entry of the floor is closed")
         for n in ("wp_site_defaults",):
             self.assertIn(n, self.v)
 
-    def test_the_numbers_of_a_new_site_are_above_every_site_the_repo_declares(self):
+    def test_the_numbers_of_a_new_site_are_above_every_number_of_the_floor(self):
         import wp_site_model as model
         import tempfile
         with tempfile.TemporaryDirectory() as t:
             cfg = dict(self.cfg, data_dir=t + "/sites", tombstones_dir=t + "/tomb")
             prov = wp_site_provision.Provisioner(cfg)
-            port, quota = model.next_numbers(model.everything(prov.registry, prov.known))
-        self.assertEqual((port, quota), (max(s["port"] for s in self.v["real_wp_sites"]) + 1, max(s["quota_id"] for s in self.v["real_wp_sites"]) + 1))
+            port, quota = model.next_numbers(model.everything(prov.registry, prov.floor))
+        self.assertEqual((port, quota), (max(s["port"] for s in self.v["wp_closed_floor"]) + 1, max(s["quota_id"] for s in self.v["wp_closed_floor"]) + 1))
 
     def test_the_repo_variables_the_wrapper_needs_exist(self):
         for name in ("wp_provision_secret_dir", "wp_provision_lock_dir", "wp_provision_command_timeout_s", "wp_provision_probe_tries", "wp_provision_probe_delay_s", "wp_provision_platform_vars",

@@ -88,7 +88,7 @@ done
 [ "$STATE_NOW" = done ] && ok "the job finished: $st" || bad "the job did not finish in 60 s: $st"
 echo "   the job log:"; panel "{\"verb\":\"job-log\",\"job\":\"$JOB\"}" | jget data | sed 's/^/     /'
 [ "$(echo "$st" | jget rc)" != 0 ] && ok "wp-site-delete refused the fake site, as it must" || bad "wp-site-delete exited 0 on a fake site: look at it before anything else"
-panel "{\"verb\":\"job-log\",\"job\":\"$JOB\"}" | jget data | grep -q "is not in wp_sites" && bad "the real tool does not see a registry-only site: deploy the library (--tags wp_tools)" || ok "the real tools' require_site accepted the registry record"
+panel "{\"verb\":\"job-log\",\"job\":\"$JOB\"}" | jget data | grep -q "is not a site (it has no registry record" && bad "the real tool does not see a registry-only site: deploy the library (--tags wp_tools)" || ok "the real tools' require_site accepted the registry record"
 [ -d "$DIR" ] && [ -f "$DIR/site.json" ] && ok "nothing of the fake site was touched" || bad "the fake site changed"
 phases=$(grep "\"job\":\"$JOB\"" "$AUDIT" | python3 -c 'import json,sys; print(",".join(sorted(json.loads(l)["phase"] for l in sys.stdin)))')
 grep -q '"req":"rehearsal-1"' "$AUDIT" && ok "the audit carries the request id" || bad "no request id in the audit"

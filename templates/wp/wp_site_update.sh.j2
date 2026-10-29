@@ -1,6 +1,6 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_site_update.sh.j2). Update one site, and take it back if the update breaks it:   wp-site-update <site> [--check | --apply]
-# Run by wp-update@<site>.timer every night before the backup. What it does depends on the site's `update_policy:` (wp_sites; the default is notify):
+# Run by wp-update@<site>.timer every night before the backup. What it does depends on the site's `update_policy:` (its record in the registry; the default is notify):
 #   auto    apply what is available (below)            notify  tell ntfy what is available, once per set, and change nothing
 #   freeze  do nothing
 # --check lists what is available and changes nothing (any policy). --apply is the operator doing it by hand: it applies everything available, major plugin and theme updates included, and retries a

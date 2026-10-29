@@ -255,7 +255,7 @@ def merged(defaults, rec):
 
 def everything(registry, known=()):
     """Every site the registry or the repo knows, one per port and quota id (a site, or one time a name was closed), as plain dicts of name, port, quota_id, state: records, tombstones and `known`
-    (the repo's wp_sites until it moves). The same site seen in two places is one entry. A port or a quota id used by two different sites is an error: numbers are never shared."""
+    (the closed floor of wp_closed_floor in host_vars/dellwp/vars.yml). The same site seen in two places is one entry. A port or a quota id used by two different sites is an error: numbers are never shared."""
     seen = {}
     for rec in list(registry.sites()) + list(registry.tombstones()) + [dict(k) for k in known]:
         rec = {k: rec[k] for k in ("name", "port", "quota_id", "state") if k in rec}

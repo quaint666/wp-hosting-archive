@@ -28,7 +28,7 @@ wp_unit_dir: /etc/systemd/system
 wp_vhost_dir: /etc/nginx/conf.d
 # Functions php-fpm may not call (a site can list exceptions in php_allow_functions). The WP-CLI one-shot containers do not load this file.
 wp_php_disable_functions: [exec, passthru, shell_exec, system, proc_open, popen, pcntl_exec, pcntl_fork, pcntl_signal, pcntl_alarm, posix_kill, posix_setuid, posix_setgid, dl, symlink, link, show_source]
-# Every field a site may omit; wp_sites entries override these. name, port and quota_id are required. state: hold = nginx answers only a local curl and the
+# Every field a site's record may omit; the record overrides these. name, port and quota_id are always in a record. state: hold = nginx answers only a local curl and the
 # timers skip; live = public. secret_rev: bump it to rotate that site's database password and salts (they derive from dellwp_wp_master_secret).
 wp_site_defaults:
   state: hold
@@ -50,58 +50,21 @@ wp_site_defaults:
   allow_user_enum: false
   mail_mode: log
   php_allow_functions: []
-# port = the loopback port of the site's php-fpm container (unique per site); quota_id = its ext4 project id (unique, never reused for another site).
-wp_sites:
-  - name: wptest
-    port: 9101
-    quota_id: 1001
-    state: closed
-    update_policy: auto
-  - name: helloworld
-    port: 9102
-    quota_id: 1002
-    state: closed
-    update_policy: auto
-  - name: rehearsal
-    port: 9103
-    quota_id: 1003
-    state: closed
-    update_policy: notify
-  - name: rehearsal2
-    port: 9104
-    quota_id: 1004
-    state: closed
-    update_policy: notify
-  - name: rehearsal3
-    port: 9105
-    quota_id: 1005
-    state: closed
-    update_policy: notify
-  - name: rehearsal4
-    port: 9106
-    quota_id: 1006
-    state: closed
-    update_policy: notify
-  - name: rehearsal5
-    port: 9107
-    quota_id: 1007
-    state: closed
-    update_policy: notify
-  - name: rehearsal6
-    port: 9108
-    quota_id: 1008
-    state: closed
-    update_policy: notify
-  - name: rehearsal7
-    port: 9109
-    quota_id: 1009
-    state: closed
-    update_policy: notify
-  - name: parity1
-    port: 9110
-    quota_id: 1010
-    state: closed
-    update_policy: notify
+# The sites are not listed here: a site is a record in the registry on dellwp (/srv/wp/sites/<name>/site.json), made by wp-ctl create. What stays here is the FLOOR of numbers: the ports and
+# quota project ids of the sites of the old engine, which are all closed and gone. wp-site-provision never gives a new site a number at or below these (it takes the next one above everything ever
+# recorded, tombstones and this floor included), so no new site can inherit a trace of an old one in the quota tables or the backups. Their NAMES are free to use again; only the numbers are held.
+# port = the loopback port of the site's php-fpm container; quota_id = its ext4 project id. Nothing here is ever removed or changed.
+wp_closed_floor:
+  - {name: wptest, port: 9101, quota_id: 1001}
+  - {name: helloworld, port: 9102, quota_id: 1002}
+  - {name: rehearsal, port: 9103, quota_id: 1003}
+  - {name: rehearsal2, port: 9104, quota_id: 1004}
+  - {name: rehearsal3, port: 9105, quota_id: 1005}
+  - {name: rehearsal4, port: 9106, quota_id: 1006}
+  - {name: rehearsal5, port: 9107, quota_id: 1007}
+  - {name: rehearsal6, port: 9108, quota_id: 1008}
+  - {name: rehearsal7, port: 9109, quota_id: 1009}
+  - {name: parity1, port: 9110, quota_id: 1010}
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
 # containers get these limits (memory equals swap); the pin is in vars/wp.yml.

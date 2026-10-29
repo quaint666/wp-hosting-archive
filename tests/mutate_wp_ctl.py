@@ -203,6 +203,9 @@ M = [
  ('a linked directory is followed', 'scripts/wp_ctl.py', 'if e.is_dir(follow_symlinks=False) and NAME_RE.fullmatch(e.name)', 'if e.is_dir() and NAME_RE.fullmatch(e.name)', 'tests/test_wp_ctl.py'),
  ("the dispatcher's wrapper bakes a site list in again", 'templates/wp/wp_ctl.py.j2', '    "reserved_names": [', '    "sites": ["wptest"],\n    "reserved_names": [', 'tests/test_wp_ctl.py'),
  ("the fit rule counts a closed site's name as taken", 'scripts/wp_site_model.py', 'len({s["name"] for s in exist}) == len(exist),', 'len(set(names)) == n,', 'tests/test_wp_site_model.py'),
+ ('a floor entry that says live is a live site', 'scripts/wp_site_provision.py', '{**self.defaults, **k, "state": "closed"} for k in cfg["closed_floor"]', '{**self.defaults, **k} for k in cfg["closed_floor"]', 'tests/test_wp_site_provision.py'),
+ ('the wrapper hands the tool no floor', 'templates/wp/wp_site_provision.py.j2', '  "closed_floor": wp_closed_floor,', '  "closed_floor": [],', 'tests/test_wp_site_provision_wrapper.py'),
+ ('the floor is not used for the numbers of a new site', 'scripts/wp_site_provision.py', 'everything = model.everything(self.registry, self.floor)', 'everything = model.everything(self.registry, [])', 'tests/test_wp_site_provision.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

@@ -107,17 +107,18 @@ class Tools(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, r.stderr)
                 self.assertEqual(self.log("docker.argv"), "")
 
-    def test_the_name_pattern_holds_even_if_a_bad_name_is_in_the_list(self):
-        # Second layer: the allowlist is rendered from wp_sites, whose own checks refuse such names, but the tool must not depend on that.
-        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
-        hostile = dict(self.ctx, wp_sites=[{"name": "wptest"}, {"name": "../etc"}, {"name": "a;id"}, {"name": "x y"}])
-        (self.tmp / "lib/common.sh").write_text(env.get_template("wp_tools_common.sh.j2").render(**hostile))
-        for bad in ("../etc", "a;id", "x y"):
+    def test_the_name_pattern_holds_even_if_a_directory_with_a_hostile_name_has_a_record(self):
+        # Second layer: a site is a directory with a record, whose name the registry's rules fix; the tool must not depend on that.
+        for bad in ("a;id", "x y", "A", "-x"):
+            (self.tmp / "data/sites" / bad).mkdir()
+            (self.tmp / "data/sites" / bad / "site.json").write_text("{}")
             with self.subTest(bad):
                 r = self.run_tool("wp-site-cli", bad, "core", "version")
                 self.assertEqual(r.returncode, 2)
                 self.assertIn("is not a site name", r.stderr)
                 self.assertEqual(self.log("docker.argv"), "")
+        r = self.run_tool("wp-site-cli", "../etc", "core", "version")
+        self.assertEqual((r.returncode, "is not a site name" in r.stderr), (2, True))
 
     def test_user_mode_is_the_web_apps_power(self):
         r = self.run_tool("wp-site-cli", "wptest", "core", "version")

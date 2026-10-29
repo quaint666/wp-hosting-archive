@@ -129,7 +129,7 @@ class Base(unittest.TestCase):
         self.cfg = {
             "data_dir": str(t / "mount/sites"), "tombstones_dir": str(t / "mount/tombstones"), "lock_dir": str(t / "lock"), "template_dir": str(HERE.parent / "templates"),
             "master_secret_file": str(self.secret), "resend_key_file": str(self.resend), "platform": plat, "defaults": v["wp_site_defaults"],
-            "known": [{"name": "old", "port": 9101, "quota_id": 1001, "state": "closed", "update_policy": "auto"}],
+            "closed_floor": [{"name": "old", "port": 9101, "quota_id": 1001, "state": "closed", "update_policy": "auto"}],
             "fit": dict(reserved_names=v["wp_reserved_names"], vm_memory_mb=vm["memory"], data_disk_gb=vm["data_disk"], ram_reserve_mb=v["wp_vm_ram_reserve_mb"], data_reserve_mb=v["wp_data_reserve_mb"],
                         backup_quota_offset=v["wp_backup_quota_offset"], scratch_quota_id=v["wp_scratch_quota_id"], archive_quota_id=v["wp_archive_quota_id"], intake_quota_id=v["wp_intake_quota_id"]),
             "tools": {**{n: "/usr/bin/" + n for n in ("lsattr", "chattr", "repquota", "setquota", "docker", "nginx", "systemctl")}, "backup": "/usr/bin/wp-site-backup"},
@@ -243,13 +243,13 @@ class Create(Base):
         self.make().create("alpha")                                           # a value the tool reads and the list lacks would be a KeyError here
         self.make().apply("alpha")
 
-    def test_an_entry_of_the_repos_list_without_a_state_counts_as_on_hold(self):
-        self.cfg["known"] = [{"name": "declared", "port": 9101, "quota_id": 1001}]            # as an entry of wp_sites may be: the state comes from wp_site_defaults
+    def test_every_entry_of_the_floor_is_closed_whatever_it_says_so_its_numbers_are_held_and_its_name_is_free(self):
+        self.cfg["closed_floor"] = [{"name": "declared", "port": 9101, "quota_id": 1001}, {"name": "other", "port": 9102, "quota_id": 1002, "state": "live"}]
         rec = self.make().create("alpha")
-        self.assertEqual((rec["port"], rec["quota_id"]), (9102, 1002))
-        with self.assertRaises(model.Refuse) as cm:
-            self.make().create("declared")
-        self.assertIn("already exists", str(cm.exception))
+        self.assertEqual((rec["port"], rec["quota_id"]), (9103, 1003), "above every number of the floor")
+        again = self.make().create("declared")
+        self.assertGreater(again["port"], rec["port"], "the name is free; it gets new numbers")
+        self.assertEqual(self.make().rows() and sorted(r.split()[0] for r in self.make().rows()), ["alpha", "declared"], "a floor entry is never a site")
 
     def test_the_second_site_gets_the_next_numbers(self):
         self.make().create("alpha")
@@ -850,9 +850,9 @@ class Rows(Base):
         self.make().close("alpha")
         self.assertEqual(self.make().rows(), [self.want("bravo")])
 
-    def test_a_site_the_repo_still_declares_and_has_no_record_is_listed_over_the_defaults(self):
-        self.cfg["known"] = self.cfg["known"] + [{"name": "legacy", "port": 9150, "quota_id": 1050, "update_policy": "auto"}]
-        self.assertEqual(self.make().rows(), ["legacy hold 1050 %d %d %d auto" % (self.cfg["defaults"]["quota_mb"], 1050 + self.cfg["platform"]["wp_backup_quota_offset"], self.cfg["defaults"]["backup_quota_mb"])])
+    def test_an_entry_of_the_floor_is_not_a_row_even_without_a_state(self):
+        self.cfg["closed_floor"] = self.cfg["closed_floor"] + [{"name": "legacy", "port": 9150, "quota_id": 1050, "update_policy": "auto"}]
+        self.assertEqual(self.make().rows(), [])
 
     def test_rows_runs_nothing_and_needs_no_secret(self):
         self.make().create("alpha")
