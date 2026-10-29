@@ -5,7 +5,9 @@ A stand-in `run` records what would be executed and answers like wp-ctl does; a 
 given. They prove: only the read verbs go out, with exactly the arguments and ranges wp-ctl has (cross-checked against the dispatcher's own table); every value is checked before anything is sent and a
 value cannot carry a second request; ssh is called with an argument list, no remote command and a clean environment; every way an answer can go wrong becomes a CtlError of the right kind, with no
 traceback and no path of the key in the message. They do not prove the real ssh, the forced command or dellwp: the rehearsal on the VM does. Run: python3 -I tests/test_wp_panel_ctl.py"""
+import hashlib
 import json
+import time
 import os
 import stat
 import subprocess
@@ -60,31 +62,30 @@ class Allowlist(unittest.TestCase):
         self.assertTrue(set(ctl.READ_VERBS) <= reads)
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
-    def test_the_action_verbs_are_exactly_these_and_each_is_a_job_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete"}, "a new action verb is a decision of its batch: add it here on purpose")
+    def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard"},
+                         "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
-            self.assertEqual(theirs.kind, "job", verb)
+            self.assertIn(theirs.kind, ("job", "inline"), verb)
             self.assertEqual(set(spec), set(theirs.args), verb)
             for name, (required, _) in spec.items():
-                self.assertEqual(required or name == "confirm_name", theirs.args[name].required or name == "confirm_name", (verb, name))
-        self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS) | set(ctl.SECRET_VERBS))
+                optional = theirs.args[name].kind == "flag" or name == "confirm_name" and verb in ("ensure-state", "import-run")      # a flag is false when absent; these confirmations are asked for by another argument
+                self.assertEqual(required, theirs.args[name].required and not optional, (verb, name))
+        self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS) | set(ctl.SECRET_VERBS) | set(ctl.STREAM_VERBS))
+        self.assertEqual(set(ctl.STREAM_VERBS), {"import-receive"})
+        self.assertEqual(wp_ctl.VERBS["import-receive"].kind, "stream")
+        self.assertEqual(set(ctl.STREAM_VERBS["import-receive"]), set(wp_ctl.VERBS["import-receive"].args))
+        self.assertEqual(ctl.READ_VERBS["import-report"].keys(), wp_ctl.VERBS["import-report"].args.keys())
+        self.assertEqual(wp_ctl.VERBS["import-report"].kind, "read")
 
-    def test_the_secret_verbs_are_the_dispatchers_secret_verbs_with_its_argument_names_and_rules(self):
-        self.assertEqual(set(ctl.SECRET_VERBS), {"password", "install"})
-        for verb, spec in ctl.SECRET_VERBS.items():
-            theirs = wp_ctl.VERBS[verb]
-            self.assertEqual(theirs.kind, "secret", verb)
-            self.assertEqual(set(spec), set(theirs.args), verb)
-            for name, (required, _) in spec.items():
-                self.assertEqual(required, theirs.args[name].required, (verb, name))
-        self.assertEqual((ctl.MIN_PASSWORD, ctl.MAX_PASSWORD), (wp_ctl.MIN_PASSWORD, wp_ctl.MAX_TEXT))
-        for name in ("USER_NAME_RE", "ADMIN_NAME_RE", "EMAIL_RE"):
-            self.assertEqual(getattr(ctl, name).pattern, getattr(wp_ctl, name).pattern, name)
+    def test_the_import_limits_and_patterns_are_the_dispatchers_and_the_intake_quotas(self):
+        self.assertEqual(ctl.REJECT_RE.pattern, wp_ctl.REJECT_RE.pattern)
+        self.assertEqual(ctl.FILE_RE.pattern, wp_ctl.IMPORT_FILE_RE.pattern)
         import yaml
+        self.assertEqual(ctl.UPLOAD_MAX, yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())["wp_intake_quota_mb"] * 1024 * 1024)
         limits = yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())["wp_ctl_limits"]
-        for verb, seconds in ctl.TIMEOUTS.items():
-            self.assertGreater(seconds, limits[verb]["timeout_s"], "the page waits longer than wp-ctl lets the tool run: %s" % verb)
+        self.assertGreater(ctl.STREAM_TIMEOUT_S, limits["import-receive"]["timeout_s"])
 
     def test_every_verb_that_is_in_neither_list_is_refused(self):
         for verb in set(wp_ctl.VERBS) - set(ctl.ALLOWED):
@@ -348,7 +349,7 @@ class Source(unittest.TestCase):
         for bad in ("shell=True", "os.system", "os.popen", "import flask", "import requests", "eval(", "exec("):
             self.assertNotIn(bad, code, bad)
         imports = {l.split()[1].split(".")[0] for l in text.splitlines() if l.startswith(("import ", "from "))}
-        self.assertLessEqual(imports, {"json", "re", "subprocess"})
+        self.assertLessEqual(imports, {"hashlib", "json", "re", "subprocess", "threading"})
 
 
 class Actions(unittest.TestCase):
@@ -533,6 +534,180 @@ class Secrets(unittest.TestCase):
             del args[missing]
             with self.assertRaises(ctl.CtlError):
                 client().request("delete", args)
+
+
+STAND_IN = """#!{python}
+import hashlib, json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+mode = open(os.path.join(here, "mode")).read().strip()
+first = sys.stdin.buffer.readline()
+request = json.loads(first)
+open(os.path.join(here, "request"), "w").write(json.dumps(request))
+if mode == "refuse":
+    print(json.dumps({{"ok": False, "error": "already_there", "detail": "x.wpress is already in the intake directory"}}))
+    sys.exit(2)
+if mode == "hang":
+    time.sleep(30)
+h, n = hashlib.sha256(), 0
+while True:
+    b = sys.stdin.buffer.read(1 << 16)
+    if not b:
+        break
+    h.update(b)
+    n += len(b)
+open(os.path.join(here, "eof"), "w").write("%d" % n)
+digest = "0" * 64 if mode == "lie" else h.hexdigest()
+print(json.dumps({{"ok": True, "rc": 0, "ran": True, "out": "received %s %d %s\\n" % (digest, n, request["file"])}}))
+"""
+
+
+class Stream(unittest.TestCase):
+    def setUp(self):
+        import stat
+        import tempfile
+        self.d = tempfile.TemporaryDirectory()
+        self.addCleanup(self.d.cleanup)
+        self.ssh = os.path.join(self.d.name, "ssh")
+        with open(self.ssh, "w") as f:
+            f.write(STAND_IN.format(python=sys.executable))
+        os.chmod(self.ssh, os.stat(self.ssh).st_mode | stat.S_IXUSR)
+        self.mode("ok")
+
+    def mode(self, m):
+        with open(os.path.join(self.d.name, "mode"), "w") as f:
+            f.write(m)
+
+    def seen(self, name):
+        with open(os.path.join(self.d.name, name)) as f:
+            return f.read()
+
+    def client(self):
+        return ctl.Ctl("dellwp", "wpctl", "/k", "/kh", ssh=self.ssh, path=os.environ["PATH"])
+
+    def test_every_byte_goes_through_once_in_order_and_the_hash_and_count_are_checked_against_dellwps_line(self):
+        data = os.urandom(5 * 1024 * 1024 + 123)
+        chunks = (data[i:i + 65536] for i in range(0, len(data), 65536))
+        got = self.client().stream("import-receive", chunks, file="site-one.wpress")
+        self.assertEqual(got, {"file": "site-one.wpress", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        self.assertEqual(json.loads(self.seen("request")), {"verb": "import-receive", "file": "site-one.wpress"})
+        self.assertEqual(self.seen("eof"), str(len(data)))
+
+    def test_the_chunks_are_pulled_one_at_a_time_not_collected_first(self):
+        pulled = []
+
+        def gen():
+            for i in range(20):
+                pulled.append(i)
+                yield b"x" * 1000
+        got = self.client().stream("import-receive", gen(), file="a1.wpress")
+        self.assertEqual((got["bytes"], pulled[-1]), (20000, 19))
+
+    def test_an_account_that_does_not_match_what_was_sent_is_not_trusted(self):
+        self.mode("lie")
+        with self.assertRaises(ctl.CtlError) as cm:
+            self.client().stream("import-receive", iter([b"abc" * 100]), file="a1.wpress")
+        self.assertEqual(cm.exception.kind, "bad_reply")
+
+    def test_a_refusal_before_the_bytes_are_read_is_a_refusal_not_a_broken_pipe(self):
+        self.mode("refuse")
+        big = (b"x" * 65536 for _ in range(400))                    # far more than a pipe holds
+        with self.assertRaises(ctl.CtlError) as cm:
+            self.client().stream("import-receive", big, file="a1.wpress")
+        self.assertEqual((cm.exception.kind, cm.exception.code), ("refused", "already_there"))
+
+    def test_a_chunk_source_that_fails_stops_ssh_and_the_failure_goes_on(self):
+        class Gone(Exception):
+            pass
+
+        def gen():
+            yield b"x" * 1000
+            raise Gone()
+        with self.assertRaises(Gone):
+            self.client().stream("import-receive", gen(), file="a1.wpress")
+
+    def test_ssh_is_dead_and_collected_when_the_chunk_source_fails(self):
+        seen = []
+
+        def spy(*a, **kw):
+            seen.append(subprocess.Popen(*a, **kw))
+            return seen[-1]
+
+        def gen():
+            yield b"x" * 1000
+            raise KeyError("gone")
+        with self.assertRaises(KeyError):
+            self.client().stream("import-receive", gen(), popen=spy, file="a1.wpress")
+        self.assertIsNotNone(seen[0].poll(), "the process was stopped and waited for, not left running")
+
+    def test_a_stalled_ssh_is_stopped_after_the_time_limit(self):
+        self.mode("hang")
+        old = ctl.STREAM_TIMEOUT_S
+        ctl.STREAM_TIMEOUT_S = 1
+        self.addCleanup(setattr, ctl, "STREAM_TIMEOUT_S", old)
+        t0 = time.time()
+        with self.assertRaises(ctl.CtlError):
+            self.client().stream("import-receive", iter([b"abc"]), file="a1.wpress")
+        self.assertLess(time.time() - t0, 10)
+
+    def test_only_a_stream_verb_streams_and_a_stream_verb_is_not_called(self):
+        for verb in ("show", "set", "password", "import-run", "delete", "", None):
+            with self.subTest(verb=verb), self.assertRaises(ctl.CtlError) as cm:
+                self.client().stream(verb, iter([b"x"]), file="a1.wpress")
+            self.assertEqual(cm.exception.kind, "not_allowed")
+        with self.assertRaises(ctl.CtlError) as cm:
+            self.client().call("import-receive", file="a1.wpress")
+        self.assertEqual(cm.exception.kind, "not_allowed")
+
+    def test_a_file_name_that_is_not_a_plain_wpress_name_is_refused_before_ssh_starts(self):
+        for name in ("", "a", "a.zip", ".hidden.wpress", "../a.wpress", "a/b.wpress", "a b.wpress", "a.wpress\n", "x" * 100 + ".wpress", None, 5):
+            with self.subTest(name=name), self.assertRaises(ctl.CtlError) as cm:
+                self.client().stream("import-receive", iter([b"x"]), file=name)
+            self.assertEqual(cm.exception.kind, "not_allowed")
+            self.assertFalse(os.path.exists(os.path.join(self.d.name, "request")))
+
+
+class Imports(unittest.TestCase):
+    def line(self, verb, **args):
+        return json.loads(client().request(verb, args))
+
+    def refused(self, verb, **args):
+        with self.assertRaises(ctl.CtlError) as cm:
+            client().request(verb, args)
+        self.assertEqual(cm.exception.kind, "not_allowed", (verb, args))
+
+    def test_the_four_import_actions_and_the_report_are_sent_as_wp_ctl_wants_them(self):
+        self.assertEqual(self.line("import-report", site="alpha"), {"verb": "import-report", "site": "alpha"})
+        self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress", plan=True, req="p1"), {"verb": "import-run", "site": "alpha", "file": "a1.wpress", "plan": True, "req": "p1"})
+        self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress"), {"verb": "import-run", "site": "alpha", "file": "a1.wpress"})
+        self.assertEqual(self.line("import-run", site="alpha", file="a1.wpress", replace=True, confirm_name="alpha")["confirm_name"], "alpha")
+        self.assertEqual(self.line("import-approve", site="alpha", reject="akismet,hello-dolly", accept_failures=True), {"verb": "import-approve", "site": "alpha", "reject": "akismet,hello-dolly", "accept_failures": True})
+        self.assertEqual(self.line("import-reset", site="alpha", confirm_name="alpha"), {"verb": "import-reset", "site": "alpha", "confirm_name": "alpha"})
+        self.assertEqual(self.line("import-discard", file="a1.wpress", if_present=False), {"verb": "import-discard", "file": "a1.wpress", "if_present": False})
+
+    def test_a_replace_needs_the_name_typed_and_nothing_else_takes_one(self):
+        for typed in ("", "bravo", "Alpha", "alpha ", None):
+            self.refused("import-run", site="alpha", file="a1.wpress", replace=True, confirm_name=typed)
+        self.refused("import-run", site="alpha", file="a1.wpress", replace=True)
+        self.refused("import-run", site="alpha", file="a1.wpress", confirm_name="alpha")
+        self.refused("import-run", site="alpha", file="a1.wpress", replace=False, confirm_name="alpha")
+
+    def test_a_reset_needs_the_name_typed_exactly(self):
+        for typed in ("", "bravo", "Alpha", "alpha ", None):
+            self.refused("import-reset", site="alpha", confirm_name=typed)
+        self.refused("import-reset", site="alpha")
+
+    def test_flags_are_booleans_and_nothing_else(self):
+        for flag in ("true", 1, 0, None, "yes", [True]):
+            self.refused("import-run", site="alpha", file="a1.wpress", plan=flag)
+            self.refused("import-approve", site="alpha", accept_failures=flag)
+            self.refused("import-discard", file="a1.wpress", if_present=flag)
+
+    def test_the_rejected_list_is_slugs_and_commas_and_a_file_is_a_plain_wpress_name(self):
+        for reject in ("", ",", "a,", ",a", "a,,b", "a b", "a;b", "../x", "a\nb", "x" * 201, None):
+            self.refused("import-approve", site="alpha", reject=reject)
+        for name in ("", "a", "a.zip", ".hidden.wpress", "../a.wpress", "a/b.wpress", "a b.wpress", "a.wpress\n", "x" * 100 + ".wpress", None):
+            self.refused("import-run", site="alpha", file=name)
+            self.refused("import-discard", file=name)
 
 
 if __name__ == "__main__":

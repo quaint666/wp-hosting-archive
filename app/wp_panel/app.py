@@ -21,7 +21,9 @@ HEADERS = {
     "Cache-Control": "no-store",
     "Cross-Origin-Opener-Policy": "same-origin",
 }
-MAX_BODY = 16 * 1024                    # the login form and the action forms are the largest things any page takes; the upload page (batch 12) sets its own limit on its own route
+# The one page that runs a script (the upload: a file goes to the app as the raw body of a PUT, so no multipart parser stands between the browser's bytes and dellwp). The script is a file of this app, never inline.
+SCRIPT_PAGES = {"import_hub": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"}
+MAX_BODY = 16 * 1024                    # the login form and the action forms are the largest things any page takes; the upload route (batch 13) sets its own limit on its own route
 
 
 def create_app(settings, ctl, clock=time.time):
@@ -38,9 +40,11 @@ def create_app(settings, ctl, clock=time.time):
             session["csrf"] = secrets.token_urlsafe(32)
         return session["csrf"]
 
+    def csrf_ok(sent):
+        return isinstance(sent, str) and hmac.compare_digest(sent.encode(), csrf_token().encode())
+
     def check_csrf():
-        sent = request.form.get("csrf", "")
-        if not hmac.compare_digest(sent.encode(), csrf_token().encode()):
+        if not csrf_ok(request.form.get("csrf", "")):
             abort(400)
 
     def logged_in():
@@ -48,6 +52,7 @@ def create_app(settings, ctl, clock=time.time):
         return session.get("uid") == "operator" and isinstance(iat, (int, float)) and not isinstance(iat, bool) and 0 <= clock() - iat < settings.session_s
 
     app.extensions["panel_check_csrf"] = check_csrf
+    app.extensions["panel_csrf_ok"] = csrf_ok
     app.jinja_env.globals["csrf_token"] = csrf_token
     app.jinja_env.globals["logged_in"] = logged_in
 
@@ -64,6 +69,8 @@ def create_app(settings, ctl, clock=time.time):
     def headers(response):
         for name, value in HEADERS.items():
             response.headers[name] = value
+        if request.endpoint in SCRIPT_PAGES:
+            response.headers["Content-Security-Policy"] = SCRIPT_PAGES[request.endpoint]
         return response
 
     @app.route("/login", methods=["GET", "POST"])

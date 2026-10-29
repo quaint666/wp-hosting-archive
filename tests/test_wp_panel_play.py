@@ -51,7 +51,7 @@ def task(part):
 class Variables(unittest.TestCase):
     def test_the_variables_are_the_documented_ones_and_hold_no_secret(self):
         raw = yaml.safe_load((ROOT / "host_vars/aopenpanel/vars.yml").read_text())
-        for key in ("panel_dir", "panel_build_dir", "panel_secret_dir", "panel_uid", "panel_container", "panel_memory", "panel_bind", "panel_session_hours", "panel_domain", "panel_ctl_host", "panel_ctl_user"):
+        for key in ("panel_dir", "panel_build_dir", "panel_secret_dir", "panel_uid", "panel_container", "panel_memory", "panel_bind", "panel_session_hours", "panel_domain", "panel_ctl_host", "panel_ctl_user", "panel_upload_max_mb"):
             self.assertIn(key, raw)
         self.assertFalse([k for k in raw if k.startswith("aopenpanel_panel_")], "the secrets are in the vault, never in vars.yml")
         self.assertEqual(PANEL_VARS["panel_ctl_host"], net.HOSTS["dellwp"]["overlay_ip"])
@@ -146,21 +146,44 @@ class Vhost(unittest.TestCase):
         self.assertEqual(self.code.count("    server_tokens off;\n"), 2)
         self.assertNotRegex(self.code, r"(?m)^server_tokens")
 
-    def test_it_proxies_everything_to_the_app_on_loopback_and_says_the_request_was_https(self):
-        self.assertEqual(re.findall(r"proxy_pass (\S+);", self.code), ["http://127.0.0.1:8000"] * 2, "the catch-all and the one slow-pages location, both to the app on loopback")
-        self.assertEqual(re.findall(r"location (\S+ )?(\S+) \{", self.code), [("~ ", "^/sites/[a-z0-9-]+/(install|password)$"), ("", "/")])
-        slow = self.code.split("location ~")[1].split("location /")[0]
-        self.assertIn("proxy_read_timeout 700s;", slow, "longer than wp-ctl's 600 s for install")
-        self.assertEqual(self.code.count("proxy_read_timeout"), 2)
-        self.assertEqual(self.code.count("proxy_set_header X-Forwarded-Proto https;"), 2, "in both locations")
-        self.assertEqual(self.code.count("proxy_set_header X-Forwarded-For $remote_addr;"), 2, "the client's address, not a list a client can extend")
-        self.assertEqual(self.code.count("proxy_set_header Host $host;"), 2)
-        self.assertNotIn("$proxy_add_x_forwarded_for", self.code)
-        self.assertEqual(len(re.findall(r"^\s*location ", self.code, re.M)), 2, "the catch-all and the slow pages; a new location is a decision of its batch")
+    def locations(self):
+        """location header -> its block, in file order (the blocks hold no braces inside)."""
+        return re.findall(r"location (?:(~) )?(\S+) \{\n(.*?)\n    \}", self.code, re.S)
 
-    def test_the_body_limit_is_small_until_the_import_page_exists(self):
-        self.assertEqual(re.findall(r"client_max_body_size (\S+);", self.code), ["1m"])
-        self.assertNotIn("proxy_request_buffering off", self.code, "the upload location is a later step's: it sets its own")
+    def test_it_proxies_everything_to_the_app_on_loopback_and_says_the_request_was_https(self):
+        locs = self.locations()
+        self.assertEqual([(kind, path) for kind, path, _ in locs], [("~", "^/sites/[a-z0-9-]+/(install|password)$"), ("~", "^/import/files/[A-Za-z0-9._-]+$"), ("", "/")],
+                         "the slow pages, the upload, the catch-all; a new location is a decision of its batch")
+        self.assertEqual(re.findall(r"proxy_pass (\S+);", self.code), ["http://127.0.0.1:8000"] * 3)
+        for kind, path, block in locs:
+            self.assertIn("proxy_set_header X-Forwarded-Proto https;", block, path)
+            self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", block, "the client's address, not a list a client can extend: " + path)
+            self.assertIn("proxy_set_header Host $host;", block, path)
+            self.assertIn("proxy_http_version 1.1;", block, path)
+        self.assertNotIn("$proxy_add_x_forwarded_for", self.code)
+
+    def test_install_and_password_wait_longer_than_the_tool_may_run(self):
+        slow = dict((path, block) for _, path, block in self.locations())["^/sites/[a-z0-9-]+/(install|password)$"]
+        self.assertIn("proxy_read_timeout 700s;", slow, "longer than wp-ctl's 600 s for install")
+        self.assertNotIn("proxy_request_buffering", slow)
+
+    def test_the_body_limit_is_small_everywhere_but_the_upload_which_is_the_intake_quota_unbuffered(self):
+        upload = dict((path, block) for _, path, block in self.locations())["^/import/files/[A-Za-z0-9._-]+$"]
+        self.assertEqual(re.findall(r"client_max_body_size (\S+);", self.code), ["1m", "%sm" % net.HOSTS["dellwp"]["wp_intake_quota_mb"]])
+        self.assertNotIn("client_max_body_size", self.code.split("location ~")[0].split("server_name")[1].split("client_max_body_size 1m;")[1], "the small limit is the server's; only the upload sets its own")
+        self.assertIn("client_max_body_size %sm;" % net.HOSTS["dellwp"]["wp_intake_quota_mb"], upload)
+        self.assertIn("proxy_request_buffering off;", upload, "nginx keeps no copy of the file: the app sees the bytes as they arrive")
+        self.assertEqual(self.code.count("proxy_request_buffering"), 1, "only the upload")
+        self.assertIn("limit_except PUT { deny all; }", upload, "the upload location takes PUT and nothing else")
+        self.assertIn("client_body_timeout 300s;", upload, "a body that stalls is dropped")
+        for t in ("proxy_read_timeout", "proxy_send_timeout"):
+            m = re.search(r"%s (\d+)s;" % t, upload)
+            self.assertTrue(m and int(m.group(1)) > 14400, t + ": at least as long as wp-ctl lets import-receive run (4 hours)")
+
+    def test_the_apps_upload_limit_is_the_intake_quota_the_nginx_limit_is_made_from(self):
+        ctl_py = (ROOT / "app/wp_panel/ctl.py").read_text()
+        self.assertIn("UPLOAD_MAX = 3072 * 1024 * 1024", ctl_py)
+        self.assertEqual(int(net.HOSTS["dellwp"]["wp_intake_quota_mb"]), 3072)
 
     def test_nginx_accepts_it_when_nginx_is_here(self):
         if shutil.which("nginx") is None:

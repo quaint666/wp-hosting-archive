@@ -6,6 +6,7 @@ secret files made for the test, and spoken to over plain HTTP: the login page an
 headers are refused by the server itself, and the process ends when asked. They do not prove the container, HTTPS, or the load the real VM can carry. Needs Flask, pyotp and gunicorn (app/requirements.txt).
 Run: python3 -I tests/test_wp_panel_server.py"""
 import http.client
+import json
 import os
 import runpy
 import signal
@@ -193,6 +194,65 @@ class SlowRequest(unittest.TestCase):
         r = c.getresponse()
         self.assertEqual((r.status, r.read()), (200, b"done"))
         c.close()
+
+
+@unittest.skipUnless(HAVE_GUNICORN and Path("/proc/self/status").exists(), "gunicorn or /proc is not here")
+class BigBody(unittest.TestCase):
+    def test_a_300_mb_put_is_read_a_piece_at_a_time_by_gunicorn_and_the_worker_stays_small(self):
+        """The import page streams a file of up to 3 GB through this server to ssh. Proven here with 300 MB through the real gunicorn configuration and a WSGI app that reads it in 64 KiB pieces: the worker's
+        peak memory must stay far below the body (so gunicorn does not collect the body first), and every byte arrives."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        (Path(d.name) / "big.py").write_text(
+            "import hashlib, json\n\n"
+            "def app(environ, start_response):\n"
+            "    n, left, h = 0, int(environ['CONTENT_LENGTH']), hashlib.sha256()\n"
+            "    body = environ['wsgi.input']\n"
+            "    while left:\n"
+            "        b = body.read(min(65536, left))\n"
+            "        if not b:\n"
+            "            break\n"
+            "        left -= len(b); n += len(b); h.update(b)\n"
+            "    peak = [int(l.split()[1]) for l in open('/proc/self/status') if l.startswith('VmHWM')][0]\n"
+            "    out = json.dumps({'bytes': n, 'sha': h.hexdigest(), 'peak_kb': peak}).encode()\n"
+            "    start_response('200 OK', [('Content-Type', 'application/json')])\n"
+            "    return [out]\n")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        env = {"PATH": os.environ["PATH"], "PANEL_BIND": "127.0.0.1:%d" % port}
+        proc = subprocess.Popen([sys.executable, "-I", "-m", "gunicorn", "-c", str(CONF), "--workers", "1", "--worker-tmp-dir", "/tmp", "--chdir", d.name, "big:app"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        import hashlib
+        total, piece = 300 * 1024 * 1024, b"\x5a" * (1024 * 1024)
+
+        class Body:
+            def __init__(self):
+                self.left, self.h = total, hashlib.sha256()
+
+            def read(self, n=-1):
+                if not self.left:
+                    return b""
+                size = min(n if n and n > 0 else len(piece), len(piece), self.left)
+                self.left -= size
+                self.h.update(piece[:size])
+                return piece[:size]
+        body = Body()
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+        c.request("PUT", "/", body=body, headers={"Content-Length": str(total)})
+        r = c.getresponse()
+        got = json.loads(r.read())
+        c.close()
+        self.assertEqual((r.status, got["bytes"], got["sha"]), (200, total, body.h.hexdigest()))
+        self.assertLess(got["peak_kb"], 120 * 1024, "the worker's peak memory (kB) must be far below the 300 MB body")
 
 
 if __name__ == "__main__":

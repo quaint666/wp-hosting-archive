@@ -28,6 +28,7 @@ from werkzeug.security import generate_password_hash  # noqa: E402
 from werkzeug.serving import make_server  # noqa: E402
 
 from test_wp_panel import FakeCtl, JOB  # noqa: E402
+from wp_panel.ctl import CtlError  # noqa: E402
 from wp_panel import config  # noqa: E402
 from wp_panel.app import create_app  # noqa: E402
 
@@ -94,8 +95,9 @@ def run_driver(server, *args, stdin="", cacert=True, name=NAME):
     return subprocess.run(cmd, capture_output=True, text=True, input=stdin, timeout=120)
 
 
-def code():
-    return pyotp.TOTP(TOTP).now()
+def code(ahead=0):
+    """The code now, or of a later 30-second step (a code works once, so a second login in one test uses the next one; the app accepts one step either way)."""
+    return pyotp.TOTP(TOTP).at(time.time() + 30 * ahead)
 
 
 class Base(unittest.TestCase):
@@ -126,13 +128,14 @@ class Driver(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         for needle in ("a wrong login is refused with the one plain message", "the right password and code log in", "Sites opens", "a site's page opens", "Jobs opens", "a job's page opens with its log",
                        "Audit opens", "logging out needs the token", "logging out works", "after logging out /sites is sent to /login", "site(s) listed",
-                       "the site page offers its setting and state forms (nothing is submitted)", "the new-site form opens (nothing is submitted)", "the password form opens (nothing is submitted)", "the install form opens (nothing is submitted)"):
+                       "the site page offers its setting and state forms (nothing is submitted)", "the new-site form opens (nothing is submitted)", "the password form opens (nothing is submitted)", "the install form opens (nothing is submitted)",
+                       "the import page opens, with the one script of this app", "the site's import page opens"):
             self.assertIn(needle, r.stdout)
         for secret in (PASSWORD, c, "panel_session"):
             self.assertNotIn(secret, r.stdout + r.stderr)
         self.assertIn(("show", {"site": "alpha"}), s.ctl.calls)
         self.assertIn(("job-log", {"job": JOB, "offset": 0}), s.ctl.calls)
-        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail"}, "the rehearsal asked for read verbs only, and submitted no form")
+        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail", "import-report"}, "the rehearsal asked for read verbs only, and submitted no form")
 
     def test_login_only_skips_the_checks_it_has_already_made(self):
         r = run_driver(self.server(), "--login-only", stdin="%s\n%s\n" % (PASSWORD, code()))
@@ -205,7 +208,7 @@ class Driver(Base):
         for bad in ("subprocess", "os.system", "open(", "os.environ", "getenv", "argv[1:]) and", "print(password", "print(code", "print(s.cookie"):
             self.assertNotIn(bad, code_only, bad)
         imports = {l.split()[1].split(".")[0] for l in text.splitlines() if l.startswith(("import ", "from "))}
-        self.assertLessEqual(imports, {"argparse", "http", "re", "socket", "ssl", "sys", "time", "urllib"})
+        self.assertLessEqual(imports, {"argparse", "hashlib", "http", "json", "os", "re", "socket", "ssl", "sys", "time", "urllib"})
 
 
 class Script(Base):
@@ -252,8 +255,8 @@ exit ${SSH_RC:-0}
         self.assertNotIn("set -u", r.stdout)
 
     def test_bad_options_are_refused_before_anything_runs(self):
-        for args in (("--bogus",), ("--port", "x"), ("--ip", "not-an-ip"), ("--ip", "1.2.3.4;id"), ("--cacert", "/nonexistent"), ("--closed-ports", "80;id")):
-            r = subprocess.run(["bash", str(SCRIPT), "--yes", *args], capture_output=True, text=True, env=self.env)
+        for args in (("--bogus",), ("--port", "x"), ("--ip", "not-an-ip"), ("--ip", "1.2.3.4;id"), ("--cacert", "/nonexistent"), ("--closed-ports", "80;id"), ("--upload-mb", "x"), ("--upload-mb", "3001"), ("--upload-mb", "-1"), ("--upload-mb", "5;id"), ("--upload-mb",), ("--ip",), ("--port",), ("--cacert",), ("--closed-ports",)):
+            r = subprocess.run(["bash", str(SCRIPT), "--yes", *args], capture_output=True, text=True, env=self.env, timeout=20)         # a timeout here is the old bug: a last option without its value looped for ever
             self.assertEqual(r.returncode, 2, args)
         self.assertFalse(self.log.exists())
 
@@ -292,6 +295,33 @@ exit ${SSH_RC:-0}
         self.assertIn("C=wp-panel", calls[2])
         self.assertIn("MEMB=536870912", calls[2])
         self.assertIn("PUID=10001", calls[2])
+
+    def test_with_an_upload_the_script_sends_a_file_through_everything_asks_what_it_cost_and_says_it_changed_something(self):
+        s = self.server()
+        r = self.run_script(s, "--upload-mb", "2", stdin="%s\n%s\n" % (PASSWORD, code()))
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:])
+        self.assertIn("the upload of 2 MB went through", r.stdout)
+        self.assertIn("== 4. what the upload cost the VM", r.stdout)
+        self.assertLess(r.stdout.index("== 3. the login"), r.stdout.index("== 4. what the upload cost the VM"))
+        self.assertIn("Changed: one generated file of 2 MB", r.stdout)
+        self.assertNotIn("Nothing was changed", r.stdout)
+        self.assertEqual(len(s.ctl.streams), 1)
+        self.assertEqual(sum("bash -s" in c for c in self.log.read_text().splitlines()), 2, "the VM checks, then the cost")
+
+    def test_without_an_upload_or_without_a_login_there_is_no_cost_step_and_the_script_says_it_changed_nothing(self):
+        s = self.server()
+        r = self.run_script(s, "--no-login", "--upload-mb", "2")
+        self.assertEqual(r.returncode, 0, r.stdout[-1500:])
+        self.assertNotIn("== 4.", r.stdout)
+        self.assertIn("Nothing was changed on the VM or on dellwp", r.stdout)
+        self.assertEqual(s.ctl.streams, [])
+
+    def test_the_cost_step_reads_the_containers_memory_peak_and_nginx_body_directory(self):
+        text = SCRIPT.read_text()
+        step = text[text.index('say "4. what the upload cost the VM"'):]
+        self.assertIn("memory.peak", step)
+        self.assertIn("/var/lib/nginx/body", step)
+        self.assertIn("* 9 / 10", step, "under 90% of the cap")
 
     def test_the_vms_failures_are_counted_into_the_exit_status(self):
         r = self.run_script(self.server(), "--no-login", env=dict(self.env, SSH_BASH_RC="3"))
@@ -339,6 +369,40 @@ exit ${SSH_RC:-0}
         r = self.run_script(s, stdin="not the password\n%s\n" % code())
         self.assertGreater(r.returncode, 0)
         self.assertIn("FAIL: the right password and code log in", r.stdout)
+
+    def test_an_upload_goes_through_and_is_checked_and_removed_and_without_the_option_nothing_is_uploaded(self):
+        s = self.server()
+        r = run_driver(s, "--login", stdin="%s\n%s\n" % (PASSWORD, code()))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(s.ctl.streams, [])
+        s2 = self.server()
+        r = run_driver(s2, "--login-only", "--upload-mb", "3", stdin="%s\n%s\n" % (PASSWORD, code(1)))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for needle in ("the import page opens and hands the script its token", "the upload of 3 MB went through", "dellwp reports the same byte count and sha256 as were sent", "the file is removed from the intake again (rehearsal-"):
+            self.assertIn(needle, r.stdout)
+        (verb, args, n, _), = s2.ctl.streams
+        self.assertEqual((verb, n, bool(re.fullmatch(r"rehearsal-[0-9]+\.wpress", args["file"]))), ("import-receive", 3 * 1024 * 1024, True))
+        self.assertEqual([a for v, a in s2.ctl.calls if v == "import-discard"], [{"file": args["file"], "if_present": False}])
+
+    def test_an_upload_that_dellwp_reports_differently_is_a_failure(self):
+        s = self.server()
+        real = s.ctl.stream
+
+        def liar(verb, chunks, **args):
+            got = real(verb, chunks, **args)
+            return dict(got, sha256="0" * 64)
+        s.ctl.stream = liar
+        r = run_driver(s, "--login-only", "--upload-mb", "1", stdin="%s\n%s\n" % (PASSWORD, code(-1)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FAIL: dellwp reports the same byte count and sha256", r.stdout)
+
+    def test_a_refused_upload_is_a_failure_and_names_the_reason(self):
+        s = self.server()
+        s.ctl.fail["import-receive"] = CtlError("refused", "wp-ctl refused: failed (x is already in the intake directory)", None)
+        r = run_driver(s, "--login-only", "--upload-mb", "1", stdin="%s\n%s\n" % (PASSWORD, code()))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FAIL: the upload of 1 MB", r.stdout)
+        self.assertIn("already in the intake", r.stdout)
 
     def test_the_script_changes_nothing_in_the_repo_and_commits_nothing(self):
         code_only = "\n".join(l for l in SCRIPT.read_text().splitlines() if not l.lstrip().startswith("#"))

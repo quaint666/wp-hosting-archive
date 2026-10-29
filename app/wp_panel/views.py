@@ -1,13 +1,16 @@
-"""The pages: Sites, Site, Jobs, Job, Audit (they only read), and the first forms: create a site, change one setting, move a site to hold, live or stopped (batch 11 of step 6), delete a stopped site, set a WordPress user's password and install WordPress into an empty site (batch 12). Each asks dellwp through the
+"""The pages: Sites, Site, Jobs, Job, Audit (they only read), and the first forms: create a site, change one setting, move a site to hold, live or stopped (batch 11 of step 6), delete a stopped site, set a WordPress user's password and install WordPress into an empty site (batch 12), and the import: upload a .wpress, plan or run it, read its report, approve or reset it, discard a file (batch 13). Each asks dellwp through the
 ctl client and renders what it was told. A form is a POST with the session's token (checked before anything else), asks for ONE verb, and answers with a redirect to that verb's job page; wp-ctl decides, the
 page only asks. Every form carries a request id made when the page was drawn, so a form sent twice (a double click, a reload) starts one job. Whatever dellwp sends is text to show, never markup:
 the templates escape it, and a job log goes in a <pre>. A page that cannot be had says why, in a page of its own, with a status the browser understands."""
 import json
 import secrets
+import time
 
-from flask import abort, current_app, redirect, render_template, request, url_for
+from flask import abort, current_app, jsonify, redirect, render_template, request, url_for
 
-from .ctl import JOB_RE, SET_KEYS, CtlError
+from werkzeug.exceptions import ClientDisconnected
+
+from .ctl import CHUNK, JOB_RE, SET_KEYS, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -68,8 +71,13 @@ SETTINGS = [
 ]
 
 
+class UploadCutOff(Exception):
+    """The browser's body ended before its Content-Length: the upload was abandoned."""
+
+
 def register(app):
     check_csrf = app.extensions["panel_check_csrf"]
+    csrf_ok = app.extensions["panel_csrf_ok"]
 
     def page(fn):
         def wrapper(*a, **kw):
@@ -157,8 +165,8 @@ def register(app):
         reply = ask("show", site=name)                         # an unknown site is a 404 here, before a form is drawn
         return render_template(template, name=name, registry=reply.get("registry") or {})
 
-    def done(title, name, out):
-        return render_template("done.html", title=title, name=name, out=str(out or "")[-1500:])
+    def done(title, name, out, back="site"):
+        return render_template("done.html", title=title, name=name, out=str(out or "")[-1500:], back=back)
 
     @app.get("/sites/<name>/password")
     @page
@@ -186,6 +194,102 @@ def register(app):
             return render_template("error.html", status=400, title="The form was not accepted", message="The two passwords are not the same. Nothing was changed."), 400
         reply = ask("install", secret=pw, site=name, title=field("title", 200), user=field("user", 60), email=field("email", 300))
         return done("WordPress installed", name, reply.get("out"))
+
+    # ---------------------------------------------------------------------------------------------------------------------------- the import (batch 13)
+    @app.get("/import")
+    @page
+    def import_hub():
+        rows = [r for r in ask("list").get("sites", []) if isinstance(r, dict) and isinstance(r.get("site"), str)]
+        return render_template("import.html", sites=[r["site"] for r in rows], req=new_req(), upload_max_mb=UPLOAD_MAX // (1024 * 1024))
+
+    def discard_quietly(file):
+        """Best effort, after an upload that did not end cleanly: wp-site-import cannot tell a cut-off stream from a finished file, so a short file may have been kept. If this fails too, the importer's
+        own check of the archive (a truncated file is refused) is the second line."""
+        try:
+            app.extensions["panel_ctl"].call("import-discard", file=file, if_present=True)
+        except CtlError:
+            pass
+
+    @app.put("/import/files/<file>")
+    def upload(file):
+        """The raw bytes of the file are the body. The token is a header (a page of another origin cannot set one), the length must be announced, and the body is passed on a chunk at a time: nothing is kept
+        here, in memory or on disk. wp-ctl's answer must match what was sent (bytes and sha256)."""
+        def fail(text, status):
+            return jsonify(ok=False, error=text), status
+        if not csrf_ok(request.headers.get("X-CSRF", "")):
+            return fail("The page's token is missing or wrong: reload the page and try again.", 400)
+        length = request.content_length
+        if length is None or length < 1:
+            return fail("The file is empty, or its length was not announced.", 411 if length is None else 400)
+        if length > UPLOAD_MAX:
+            return fail("The file is larger than the %d MB the intake can hold." % (UPLOAD_MAX // (1024 * 1024)), 413)
+        request.max_content_length = UPLOAD_MAX
+        body = request.stream
+
+        def chunks():
+            left = length
+            while left:
+                try:
+                    data = body.read(min(CHUNK, left))
+                except (ClientDisconnected, OSError, ValueError):
+                    raise UploadCutOff()
+                if not data:
+                    raise UploadCutOff()
+                left -= len(data)
+                yield data
+        try:
+            got = app.extensions["panel_ctl"].stream("import-receive", chunks(), file=file)
+        except UploadCutOff:
+            time.sleep(2)                                    # dellwp finishes the short file when its input ends; give it that moment, then remove it
+            discard_quietly(file)
+            return fail("The upload was cut off. What reached dellwp was removed again.", 400)
+        except CtlError as e:
+            if e.kind in ("bad_reply", "unreachable"):
+                discard_quietly(file)
+            return fail(str(e), 400 if e.kind in ("not_allowed", "refused") else 503 if e.kind == "unreachable" else 502)
+        return jsonify(ok=True, file=got["file"], bytes=got["bytes"], sha256=got["sha256"])
+
+    @app.post("/import/run")
+    @action
+    def import_run():
+        mode = field("mode", 10)
+        if mode not in ("plan", "run", "replace"):
+            abort(400)
+        args = {"site": field("site", 40), "file": field("file", 120), "req": field("req", 80), "plan": mode == "plan", "replace": mode == "replace"}
+        if mode == "replace":
+            args["confirm_name"] = field("confirm_name", 60)
+        return started(ask("import-run", **args))
+
+    @app.post("/import/discard")
+    @action
+    def import_discard():
+        reply = ask("import-discard", file=field("file", 120), if_present=False)
+        return done("File removed", "", reply.get("out"), back="import_hub")
+
+    @app.get("/sites/<name>/import")
+    @page
+    def import_site(name):
+        ask("show", site=name)                              # an unknown site is a 404 before anything else
+        try:
+            report, problem = ask("import-report", site=name).get("out", ""), ""
+        except CtlError as e:
+            if e.kind not in ("failed", "refused"):
+                raise
+            report, problem = "", str(e)
+        return render_template("import_site.html", name=name, report=str(report)[-20000:], problem=problem, req=new_req())
+
+    @app.post("/sites/<name>/import/approve")
+    @action
+    def import_approve(name):
+        args = {"site": name, "req": field("req", 80), "accept_failures": field("accept_failures", 5) == "yes"}
+        if field("reject", 250):
+            args["reject"] = field("reject", 250)
+        return started(ask("import-approve", **args))
+
+    @app.post("/sites/<name>/import/reset")
+    @action
+    def import_reset(name):
+        return started(ask("import-reset", site=name, confirm_name=field("confirm_name", 60), req=field("req", 80)))
 
     @app.get("/jobs")
     @page

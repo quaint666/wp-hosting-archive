@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Import{% endblock %}
+{% block body %}
+<h1>Import a .wpress</h1>
+<p class="small">Four steps: upload the file, plan it (nothing is written), run it into an empty site on hold, then read the report and approve or reset on the site's import page. A site that is not empty can be replaced: the old data is snapshotted first.</p>
+<h2>1. Upload</h2>
+<form id="upload" class="login" data-url="{{ url_for('import_hub') }}/files/" data-csrf="{{ csrf_token() }}" data-max-bytes="{{ upload_max_mb * 1048576 }}">
+  <label>File <span class="small">up to {{ upload_max_mb }} MB</span> <input type="file" id="upload-file" accept=".wpress" required></label>
+  <label>Name on dellwp <span class="small">letters, digits, dot, dash, underscore; ends in .wpress</span>
+    <input id="upload-name" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <button type="submit">Upload</button>
+  <progress id="upload-progress" max="100" value="0" hidden></progress>
+  <p id="upload-status" role="status"></p>
+</form>
+<noscript><p class="error">The upload needs JavaScript. Without it, copy the file with <code>wp-ctl</code> from a shell instead.</p></noscript>
+<h2>2. Plan or run</h2>
+<form method="post" action="{{ url_for('import_run') }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req }}">
+  <label>Site <select name="site" required>{% for s in sites %}<option value="{{ s }}">{{ s | clip(40) }}</option>{% endfor %}</select></label>
+  <label>File on dellwp <input name="file" id="run-file" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <fieldset>
+    <legend>What to do</legend>
+    <label><input type="radio" name="mode" value="plan" checked> Plan only: check the archive and print the plan; nothing is written</label>
+    <label><input type="radio" name="mode" value="run"> Import into an empty site on hold</label>
+    <label><input type="radio" name="mode" value="replace"> Replace the data of a site that has some: a snapshot is taken first. Type the site's name:</label>
+    <input name="confirm_name" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="the site's name, only for a replace">
+  </fieldset>
+  <button type="submit">Start</button>
+</form>
+<h2>Remove a file</h2>
+<form method="post" action="{{ url_for('import_discard') }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <label>File on dellwp <input name="file" required maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*\.wpress" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <button type="submit">Remove from the intake</button>
+</form>
+<script src="{{ url_for('static', filename='upload.js') }}" defer></script>
+{% endblock %}

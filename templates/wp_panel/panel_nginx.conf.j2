@@ -35,6 +35,24 @@ server {
         proxy_read_timeout 700s;
     }
 
+    # The upload of the import page: the file is the raw body of a PUT and goes through to the app a piece at a time, never kept by nginx (proxy_request_buffering off, so there is no copy on this VM's disk and the
+    # app sees the bytes as they arrive). The limit is the intake quota of dellwp; a body that stalls for 5 minutes is dropped; the answer may take as long as wp-ctl lets the receive run (4 hours).
+    location ~ ^/import/files/[A-Za-z0-9._-]+$ {
+        limit_except PUT { deny all; }
+        client_max_body_size {{ panel_upload_max_mb }}m;
+        client_body_timeout 300s;
+        proxy_request_buffering off;
+        proxy_pass http://{{ panel_bind }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 15000s;
+        proxy_read_timeout 15000s;
+    }
+
     location / {
         proxy_pass http://{{ panel_bind }};
         proxy_http_version 1.1;

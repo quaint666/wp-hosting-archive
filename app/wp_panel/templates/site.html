@@ -18,7 +18,7 @@
 {% endif %}
 {% endfor %}
 <h2>WordPress</h2>
-<p><a href="{{ url_for('install_form', name=name) }}">Install WordPress</a> (an empty site only) · <a href="{{ url_for('password_form', name=name) }}">Set a user's password</a></p>
+<p><a href="{{ url_for('install_form', name=name) }}">Install WordPress</a> (an empty site only) · <a href="{{ url_for('password_form', name=name) }}">Set a user's password</a> · <a href="{{ url_for('import_site', name=name) }}">Import report</a> (<a href="{{ url_for('import_hub') }}">import a file</a>)</p>
 <h2>Settings</h2>
 <p class="small">One setting at a time. wp-ctl checks the value; what applying it costs is written beside it.</p>
 <table class="kv">

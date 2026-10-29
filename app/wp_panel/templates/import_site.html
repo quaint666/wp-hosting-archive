@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Import · {{ name }}{% endblock %}
+{% block body %}
+<h1>Import: {{ name | clip(40) }}</h1>
+<p><a href="{{ url_for('site', name=name) }}">The site</a> · <a href="{{ url_for('import_hub') }}">Import a file</a></p>
+<h2>The report</h2>
+{% if problem %}<p class="error" role="alert">{{ problem | clip(400) }}</p>{% endif %}
+{% if report %}<pre class="log">{{ report }}</pre>{% elif not problem %}<p>There is no report for this site.</p>{% endif %}
+<h2>Approve</h2>
+<p class="small">Approving copies in the code that is not from wordpress.org (mu-plugins, plugins and themes it does not offer) and deletes the intake file and the work directory. A report with a failed step, a bad checksum or a scan finding can only be approved by accepting its failures.</p>
+<form method="post" action="{{ url_for('import_approve', name=name) }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ 'approve' }}">
+  <label>Reject these plugins or themes <span class="small">optional, slugs separated by commas</span>
+    <input name="reject" maxlength="200" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*(,[A-Za-z0-9][A-Za-z0-9._\-]*)*" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+  <label><input type="checkbox" name="accept_failures" value="yes"> I have read the failures in the report and accept them</label>
+  <button type="submit">Approve the import</button>
+</form>
+<h2>Reset</h2>
+<p class="small">Undoes an import that is not approved yet: the tables, the copied files and, for a replace, the old data from its snapshot. Type the site's name.</p>
+<form method="post" action="{{ url_for('import_reset', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ 'reset' }}">
+  <label>Name <input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
+  <button type="submit">Reset the import</button>
+</form>
+{% endblock %}

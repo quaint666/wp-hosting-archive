@@ -4,16 +4,18 @@ The ssh key on the control VM is forced to `sudo -n /usr/local/sbin/wp-ctl` in d
 standard input, and wp-ctl checks the verb against its own allowlist and every argument against its own rules. That is the real lock. This module is a second one on the app's side: it refuses a verb
 that is not in READ_VERBS or ACTION_VERBS, an argument the verb does not take, and a value that does not look the way wp-ctl wants it, BEFORE anything is sent, so a bug in a page cannot ask for more
 than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (batch 11: create, set, ensure-state; batch 12: delete, and the
-two that take a password, SECRET_VERBS: password, install; the import verbs are not here yet). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent
+two that take a password, SECRET_VERBS: password, install; batch 13: the import verbs, and the one upload, STREAM_VERBS: import-receive, whose bytes follow the request line on the same standard input). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent
 twice runs once. A secret verb sends the request line and then the password as a second line on the same standard input (wp-ctl hands it to the tool through a file in a RAM disk): the password is never an
 argument, never in the request line, and never in a message of this module; what comes back is scrubbed here again before it is shown.
 
 Nothing here builds a shell line: ssh gets an argument list, the request travels on standard input, and the environment ssh sees holds nothing but a PATH. What goes wrong is reported as CtlError with a
 kind the pages can show: not_allowed (this client refused), unreachable (no answer from dellwp), refused (wp-ctl said no, status 2), failed (wp-ctl ran and failed, status 1), bad_reply (the answer
 was not what wp-ctl sends). The messages are plain text for the page to escape."""
+import hashlib
 import json
 import re
 import subprocess
+import threading
 
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")                                 # wp-ctl's REQ_RE
@@ -25,6 +27,13 @@ USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                         # 
 ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                         # wp-ctl's ADMIN_NAME_RE
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                          # wp-ctl's EMAIL_RE
 MIN_PASSWORD, MAX_PASSWORD = 14, 200                                          # wp-ctl's MIN_PASSWORD and MAX_TEXT
+REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")      # wp-ctl's REJECT_RE: plugin and theme slugs, comma separated
+FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")                                # wp-ctl's IMPORT_FILE_RE
+FILE_MAX = 100
+UPLOAD_MAX = 3072 * 1024 * 1024                                              # the intake quota (wp_intake_quota_mb): nothing larger could be kept
+CHUNK = 64 * 1024
+STREAM_TIMEOUT_S = 14400 + 600                                               # wp-ctl's own limit for import-receive (14400) and a margin
+RECEIVED_RE = re.compile(r"^received ([0-9a-f]{64}) ([0-9]+) (\S+)$")        # the one line wp-site-import receive prints
 TIMEOUTS = {"password": 330, "install": 660}                                  # seconds an answer may take: wp-ctl's own limit for the verb (300, 600) and a margin; every other verb uses timeout_s
 
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # the site-name rule of scripts/wp_site_model.py and scripts/wp_ctl.py
@@ -49,6 +58,7 @@ def _int(lo, hi):
 READ_VERBS = {
     "list": {},
     "show": {"site": (True, _site)},
+    "import-report": {"site": (True, _site)},
     "jobs": {},
     "job-status": {"job": (True, _job)},
     "job-log": {"job": (True, _job), "offset": (False, _int(0, 2 ** 40))},
@@ -73,11 +83,28 @@ ACTION_VERBS = {
     "ensure-state": {"site": (True, _site), "state": (True, _one_of(STATES)), "confirm_name": (False, _site)},
 }
 ACTION_VERBS["delete"] = {"site": (True, _site), "confirm_name": (True, _site), "confirm_again": (True, _site)}
+
+
+def _bool(v):
+    return isinstance(v, bool)
+
+
+def _file(v):
+    return isinstance(v, str) and len(v) <= FILE_MAX and FILE_RE.fullmatch(v) is not None
+
+
+ACTION_VERBS.update({
+    "import-run": {"site": (True, _site), "file": (True, _file), "plan": (False, _bool), "replace": (False, _bool), "confirm_name": (False, _site)},
+    "import-approve": {"site": (True, _site), "reject": (False, _text(200, REJECT_RE)), "accept_failures": (False, _bool)},
+    "import-reset": {"site": (True, _site), "confirm_name": (True, _site)},
+    "import-discard": {"file": (True, _file), "if_present": (False, _bool)},
+})
+STREAM_VERBS = {"import-receive": {"file": (True, _file)}}
 SECRET_VERBS = {
     "password": {"site": (True, _site), "user": (True, _text(60, USER_NAME_RE))},
     "install": {"site": (True, _site), "title": (True, _text(100, LABEL_RE)), "user": (True, _text(30, ADMIN_NAME_RE)), "email": (True, _text(254, EMAIL_RE))},
 }
-ALLOWED = dict(READ_VERBS, **ACTION_VERBS, **SECRET_VERBS)
+ALLOWED = dict(READ_VERBS, **ACTION_VERBS, **SECRET_VERBS, **STREAM_VERBS)
 
 
 def good_password(v):
@@ -88,6 +115,13 @@ def _rules(verb, args):
     """What the argument table cannot say: going live needs the site's own name typed (wp-ctl: confirm_name, equal to the site), and nothing else takes one."""
     if verb == "delete" and not (args.get("confirm_name") == args.get("site") == args.get("confirm_again")):
         raise CtlError("not_allowed", "a delete needs the site's name typed twice, exactly")
+    if verb == "import-reset" and args.get("confirm_name") != args.get("site"):
+        raise CtlError("not_allowed", "a reset needs the site's name typed exactly")
+    if verb == "import-run":
+        if args.get("replace") is True and args.get("confirm_name") != args.get("site"):
+            raise CtlError("not_allowed", "replacing a site's data needs the site's name typed exactly")
+        if args.get("replace") is not True and "confirm_name" in args:
+            raise CtlError("not_allowed", "only a replace is confirmed by the name")
     if verb == "ensure-state":
         if args.get("state") == "live" and args.get("confirm_name") != args.get("site"):
             raise CtlError("not_allowed", "going live needs the site's name typed exactly")
@@ -149,6 +183,8 @@ class Ctl:
 
     def call(self, verb, secret=None, **args):
         """wp-ctl's reply (a dict with ok true) or a CtlError. `secret` is the password of a SECRET verb (and of no other)."""
+        if verb in STREAM_VERBS:
+            raise CtlError("not_allowed", "%s is sent with stream(): its bytes follow the request" % verb)
         line = self.request(verb, args)
         if verb in SECRET_VERBS:
             if not good_password(secret):
@@ -165,9 +201,13 @@ class Ctl:
             raise CtlError("unreachable", "dellwp did not answer within %d seconds" % timeout)
         except OSError as e:
             raise CtlError("unreachable", "ssh could not be started: %s" % (e.strerror or "an operating-system error"))
-        out = (p.stdout or b"")[:MAX_REPLY_BYTES + 1]
-        if p.returncode == 255:
-            raise CtlError("unreachable", "dellwp could not be reached: %s" % self._why(p.stderr))
+        return self._interpret(p.returncode, p.stdout, p.stderr, secret)
+
+    def _interpret(self, returncode, stdout, stderr, secret=None):
+        """The one JSON line wp-ctl answered with, as a dict with ok true, or the CtlError that says what went wrong."""
+        out = (stdout or b"")[:MAX_REPLY_BYTES + 1]
+        if returncode == 255:
+            raise CtlError("unreachable", "dellwp could not be reached: %s" % self._why(stderr))
         if len(out) > MAX_REPLY_BYTES:
             raise CtlError("bad_reply", "the answer from dellwp is larger than this page accepts")
         try:
@@ -177,20 +217,64 @@ class Ctl:
         except (UnicodeDecodeError, ValueError, IndexError):
             reply = None
         if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
-            raise CtlError("bad_reply", "dellwp did not answer with one JSON line (status %s): %s" % (p.returncode, self._why(p.stderr or out)))
-        if reply["ok"] and p.returncode == 0:
+            raise CtlError("bad_reply", "dellwp did not answer with one JSON line (status %s): %s" % (returncode, self._why(stderr or out)))
+        if reply["ok"] and returncode == 0:
             return reply
-        if reply["ok"] or p.returncode == 0:
-            raise CtlError("bad_reply", "the answer and the exit status of wp-ctl disagree (ok=%s, status %s)" % (reply["ok"], p.returncode))
+        if reply["ok"] or returncode == 0:
+            raise CtlError("bad_reply", "the answer and the exit status of wp-ctl disagree (ok=%s, status %s)" % (reply["ok"], returncode))
         code = reply.get("error") if isinstance(reply.get("error"), str) else None
         detail = reply.get("detail") if isinstance(reply.get("detail"), str) else ""
-        kind = "refused" if p.returncode == 2 else "failed"
+        kind = "refused" if returncode == 2 else "failed"
         if not detail and isinstance(reply.get("out"), str):
             detail = reply["out"]
         if secret:
             detail = detail.replace(secret, "REDACTED")                   # before the text is cut or its spaces folded, so no piece of the password survives either
         detail = " ".join(detail.split())[-300:]
         raise CtlError(kind, "wp-ctl %s: %s%s" % ("refused" if kind == "refused" else "failed", code or "no error code", (" (%s)" % detail) if detail else ""), code)
+
+    def stream(self, verb, chunks, popen=subprocess.Popen, **args):
+        """Send a STREAM verb: the request line, then every chunk of `chunks` (an iterable of bytes), then end of input. Nothing is kept in memory but the chunk in hand, and nothing is written to disk. Returns
+        {"file", "bytes", "sha256"} once wp-ctl's one line (`received <sha256> <bytes> <name>`) matches what was sent: a different count, hash or name is a CtlError(bad_reply), because a file of another
+        content than the browser's may now be in the intake. If `chunks` raises (the browser went away), ssh is stopped and the exception goes on: wp-site-import cannot tell that end of input from a
+        finished file, so the caller removes what may have been kept (import-discard). A stalled ssh is stopped after STREAM_TIMEOUT_S."""
+        if verb not in STREAM_VERBS:
+            raise CtlError("not_allowed", "this page may not stream %r" % (verb if isinstance(verb, str) else "that"))
+        line = self.request(verb, args)
+        try:
+            p = popen(self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": self.path})
+        except OSError as e:
+            raise CtlError("unreachable", "ssh could not be started: %s" % (e.strerror or "an operating-system error"))
+        timer = threading.Timer(STREAM_TIMEOUT_S, p.kill)
+        timer.daemon = True
+        timer.start()
+        digest, sent = hashlib.sha256(), 0
+        try:
+            try:
+                p.stdin.write(line.encode())
+                for chunk in chunks:
+                    p.stdin.write(chunk)
+                    digest.update(chunk)
+                    sent += len(chunk)
+                p.stdin.close()
+            except BrokenPipeError:
+                pass                                                          # dellwp stopped reading (a refusal): its answer says why
+            except BaseException:
+                p.kill()
+                p.wait()
+                raise
+            out, err = p.communicate()
+        finally:
+            timer.cancel()
+            for f in (p.stdin, p.stdout, p.stderr):
+                try:
+                    f and f.close()
+                except OSError:
+                    pass
+        reply = self._interpret(p.returncode, out, err)
+        m = RECEIVED_RE.match(" ".join(str(reply.get("out", "")).split()))
+        if not m or (m.group(1), int(m.group(2)), m.group(3)) != (digest.hexdigest(), sent, args["file"]):
+            raise CtlError("bad_reply", "dellwp's account of the file does not match what was sent (%d bytes): it was not trusted" % sent)
+        return {"file": args["file"], "bytes": sent, "sha256": digest.hexdigest()}
 
     @staticmethod
     def _why(raw):

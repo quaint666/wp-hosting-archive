@@ -10,18 +10,21 @@
 #                  refused, the security headers are there, /sites without a login goes to /login
 #   3. the login   (skip with --no-login) you type the password and a fresh authenticator code, both hidden and passed on standard input only; the driver logs in, opens Sites, a site, Jobs, a job, Audit,
 #                  and logs out. One wrong login is made first on purpose (it counts toward the lockout, and the right one clears it)
-# It changes nothing on the VM or on dellwp and makes no commit. Options:  --yes (do not ask before starting)  --no-login  --ip ADDRESS (the VM's address; default from the inventory)
+#   4. the cost    (only with --upload-mb) the upload went through real nginx, the app, ssh and wp-ctl: the container's memory peak stays under 90% of its cap and nginx kept no copy of the file on the VM's disk
+# It changes nothing on the VM or on dellwp and makes no commit, EXCEPT with --upload-mb N: then a generated file of N MB goes into dellwp's intake (checked by count and hash) and is removed again. Options:  --yes (do not ask before starting)  --no-login  --ip ADDRESS (the VM's address; default from the inventory)
 # --port N (default 443)  --cacert FILE (trust this CA instead of the system's, for a certificate that is not yet public)  --closed-ports "80 8000" (ports that must NOT answer from here)
 # What it does not prove: load, the certificate renewal hook (it runs when the certificate renews), a browser, a second operator, or that dellwp's firewall layers are tight (the network test reads the files).
 # Paste the whole output, including any FAIL lines.
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-YES=no; LOGIN=yes; IP=""; PORT=443; CACERT=""; CLOSED="80 8000"
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+YES=no; LOGIN=yes; UPLOAD=0; IP=""; PORT=443; CACERT=""; CLOSED="80 8000"
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
+  case $1 in --ip|--port|--cacert|--closed-ports|--upload-mb) [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; } ;; esac     # without this, `shift 2` with one argument left shifts nothing and the loop never ends
   case $1 in
     --yes) YES=yes; shift ;;
     --no-login) LOGIN=no; shift ;;
+    --upload-mb) UPLOAD=${2:-}; shift 2 ;;
     --ip) IP=${2:-}; shift 2 ;;
     --port) PORT=${2:-}; shift 2 ;;
     --cacert) CACERT=${2:-}; shift 2 ;;
@@ -30,6 +33,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+[[ $UPLOAD =~ ^[0-9]{1,4}$ ]] && [ "$UPLOAD" -le 3000 ] || { echo "--upload-mb is a number of MB, 0 to 3000" >&2; exit 2; }
 [[ $PORT =~ ^[0-9]{1,5}$ ]] || { echo "--port is a number" >&2; exit 2; }
 [[ $CLOSED =~ ^[0-9\ ]*$ ]] || { echo "--closed-ports is a list of port numbers" >&2; exit 2; }
 [ -z "$IP" ] || [[ $IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "--ip is one IPv4 address" >&2; exit 2; }
@@ -167,7 +171,8 @@ if [ "$LOGIN" = yes ]; then
   read -r -s -p "   Password: " PW; echo
   read -r -s -p "   Authenticator code: " CODE; echo
   if [ -z "$PW" ] || [ -z "$CODE" ]; then bump 1 "a password and a code are needed (or run with --no-login)"; else
-    printf '%s\n%s\n' "$PW" "$CODE" | "${DRV[@]}" --login-only | sed 's/^/   /'; RC=${PIPESTATUS[1]}
+    UP=(); [ "$UPLOAD" -eq 0 ] || UP=(--upload-mb "$UPLOAD")
+    printf '%s\n%s\n' "$PW" "$CODE" | "${DRV[@]}" --login-only "${UP[@]}" | sed 's/^/   /'; RC=${PIPESTATUS[1]}
     FAIL=$((FAIL + RC))
   fi
   PW=""; CODE=""
@@ -175,6 +180,28 @@ else
   echo; echo "(3. the login: skipped with --no-login)"
 fi
 
+if [ "$LOGIN" = yes ] && [ "$UPLOAD" -gt 0 ]; then
+  say "4. what the upload cost the VM"
+  vmrun <<'EOF'
+id=$(docker inspect -f '{{.Id}}' "$C" </dev/null)
+peak_file=$(ls /sys/fs/cgroup/system.slice/docker-"$id".scope/memory.peak 2>/dev/null | head -n 1)
+if [ -n "$peak_file" ]; then
+  peak=$(cat "$peak_file")
+  echo "   memory peak of the container since it started: $((peak / 1048576)) MB of $((MEMB / 1048576)) MB"
+  [ "$peak" -lt $((MEMB * 9 / 10)) ]; check "the memory peak is under 90% of the cap" "$?" 0
+else
+  echo "   (no memory.peak file here: another cgroup layout; look at docker stats while uploading)"
+fi
+body=$(du -sk /var/lib/nginx/body 2>/dev/null | cut -f1)
+check "nginx kept no copy of the upload on this disk (/var/lib/nginx/body is under 1 MB)" "$([ "${body:-0}" -lt 1024 ] && echo small || echo "${body} KB")" small
+finish
+EOF
+fi
+
 summary
-echo "   Nothing was changed on the VM or on dellwp, and nothing was committed or edited in the repo."
+if [ "$UPLOAD" -gt 0 ] && [ "$LOGIN" = yes ]; then
+  echo "   Changed: one generated file of $UPLOAD MB was put into dellwp's intake and removed again. Nothing was committed or edited in the repo."
+else
+  echo "   Nothing was changed on the VM or on dellwp, and nothing was committed or edited in the repo."
+fi
 exit "$FAIL"

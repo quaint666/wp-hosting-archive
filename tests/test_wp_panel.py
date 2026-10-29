@@ -6,6 +6,8 @@ They prove: no page but the login (and the stylesheet) works without a login; a 
 for every worker at once, refuses a code used twice, and ends after the session life; the session cookie is Secure, HttpOnly and SameSite=Strict and a forged or foreign one is no login; a form needs
 its token; every answer carries the security headers; whatever dellwp sends is shown as text; a broken dellwp gives an error page, never a traceback; and the app only ever asks for read verbs and has no
 route that changes anything. They do not prove gunicorn, the container, HTTPS or the real ssh. Needs Flask and pyotp (app/requirements.txt). Run: python3 -I tests/test_wp_panel.py"""
+import hashlib
+import io
 import json
 import re
 import sys
@@ -23,7 +25,7 @@ from werkzeug.http import parse_cookie  # noqa: E402
 
 from wp_panel import auth, config  # noqa: E402
 from wp_panel.app import HEADERS, create_app  # noqa: E402
-from wp_panel.ctl import ACTION_VERBS, ALLOWED, READ_VERBS, SECRET_VERBS, SET_KEYS, Ctl, CtlError, good_password  # noqa: E402
+from wp_panel.ctl import ACTION_VERBS, ALLOWED, READ_VERBS, SECRET_VERBS, SET_KEYS, STREAM_VERBS, UPLOAD_MAX, Ctl, CtlError, good_password  # noqa: E402
 
 PASSWORD = "correct horse battery staple 42"
 TOTP_SECRET = pyotp.random_base32()
@@ -44,13 +46,18 @@ class FakeCtl:
     """Answers like wp-ctl; every call is recorded. `fail` maps a verb to a CtlError to raise."""
 
     def __init__(self):
-        self.calls, self.fail, self.secrets = [], {}, []
+        self.calls, self.fail, self.secrets, self.streams = [], {}, [], []
         self.replies = {
             "list": {"ok": True, "sites": [{"site": "alpha", "deployed": "live", "actual": "live", "unit": "active"}, {"site": "bravo", "deployed": "hold", "actual": "hold", "unit": "active"}]},
             "show": {"ok": True, "site": "alpha", "status": {"deployed": "live", "quota_pct": "9"}, "registry": {"name": "alpha", "note": "a note", "port": 9101}},
             "jobs": {"ok": True, "jobs": [{"job": JOB, "verb": "create", "site": "alpha", "state": "done", "rc": 0}]},
             "job-status": {"ok": True, "state": "done", "rc": 0},
             "job-log": {"ok": True, "job": JOB, "data": "line one\nline two\n", "offset": 18, "state": "done", "rc": 0},
+            "import-report": {"ok": True, "rc": 0, "ran": True, "out": "Import report for alpha\n  plugins: 3 reinstalled\n"},
+            "import-run": {"ok": True, "job": JOB},
+            "import-approve": {"ok": True, "job": JOB},
+            "import-reset": {"ok": True, "job": JOB},
+            "import-discard": {"ok": True, "rc": 0, "ran": True, "out": "removed a1.wpress from the intake directory\n"},
             "create": {"ok": True, "job": JOB},
             "delete": {"ok": True, "job": JOB},
             "password": {"ok": True, "rc": 0, "ran": True, "out": "Success: Password changed.\n"},
@@ -61,6 +68,22 @@ class FakeCtl:
         }
 
     checker = Ctl("dellwp", "wpctl", "/k", "/kh")          # the real client's own checks of the verb and every value, so a page that sends something wp-ctl would refuse fails here as it would live
+
+    def stream(self, verb, chunks, **args):
+        self.checker.request(verb, args)
+        if verb not in STREAM_VERBS:
+            raise CtlError("not_allowed", "no")
+        h, n, first = hashlib.sha256(), 0, None
+        try:
+            for chunk in chunks:
+                first = first or chunk
+                h.update(chunk)
+                n += len(chunk)
+        finally:
+            self.streams.append((verb, dict(args), n, h.hexdigest()))
+        if verb in self.fail:
+            raise self.fail[verb]
+        return {"file": args["file"], "bytes": n, "sha256": h.hexdigest()}
 
     def call(self, verb, secret=None, **args):
         self.checker.request(verb, args)
@@ -113,7 +136,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -266,7 +289,8 @@ class Access(Base):
         c = self.logged_in()
         for path in PAGES + ["/login"]:
             html = self.get(path, c, follow_redirects=True).get_data(as_text=True)
-            self.assertNotRegex(html, r"(?i)<script|\sstyle=|\son[a-z]+=|https?://", path)
+            pattern = r"(?i)\sstyle=|\son[a-z]+=|https?://" if path == "/import" else r"(?i)<script|\sstyle=|\son[a-z]+=|https?://"       # the one page with a script: tested on its own (Imports)
+            self.assertNotRegex(html, pattern, path)
 
 
 class Login(Base):
@@ -487,7 +511,7 @@ class Actions(Base):
         return self.c.post(path, data=data, base_url=BASE, **kw)
 
     def acted(self):
-        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS]
+        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS] + [(v, a) for v, a, _, _ in self.ctl.streams]
 
     def setUp(self):
         super().setUp()
@@ -697,7 +721,7 @@ class Secrets(Base):
         return self.c.post(path, data=data, base_url=BASE)
 
     def acted(self):
-        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS]
+        return [(v, a) for v, a in self.ctl.calls if v in ACTION_VERBS or v in SECRET_VERBS] + [(v, a) for v, a, _, _ in self.ctl.streams]
 
     def test_delete_is_two_steps_and_the_first_only_shows_what_would_go(self):
         r = self.post("/sites/alpha/delete", {"confirm_name": "alpha"})
@@ -828,15 +852,299 @@ class Secrets(Base):
         self.assertFalse([m for m in records if self.PW in m])
 
 
+class Imports(Base):
+    text = Actions.text
+    """Batch 13: upload a .wpress as the raw body of a PUT, plan or run it, read the report, approve or reset, remove a file."""
+    DATA = bytes(range(256)) * 1000
+
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+        self.token = self.csrf(path="/import")
+        self.slept = []
+        import wp_panel.views as views
+        self._sleep = views.time.sleep
+        views.time.sleep = self.slept.append
+        self.addCleanup(setattr, views.time, "sleep", self._sleep)
+
+    def put(self, name, data=None, token=True, **kw):
+        headers = {"X-CSRF": self.token} if token is True else ({"X-CSRF": token} if token else {})
+        return self.c.put("/import/files/" + name, data=self.DATA if data is None else data, headers=headers, base_url=BASE, **kw)
+
+    def post(self, path, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.token
+        if token:
+            data["csrf"] = token
+        return self.c.post(path, data=data, base_url=BASE)
+
+    def discards(self):
+        return [a for v, a in self.ctl.calls if v == "import-discard"]
+
+    def test_the_import_page_is_the_only_one_that_may_run_a_script_and_only_this_apps_own_file(self):
+        r = self.get("/import")
+        csp = r.headers["Content-Security-Policy"]
+        self.assertEqual(csp, "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+        self.assertNotRegex(csp, r"https?:|\*|unsafe|data:|blob:")
+        html = r.get_data(as_text=True)
+        self.assertEqual(re.findall(r"<script[^>]*>", html), ['<script src="/static/upload.js" defer>'])
+        self.assertEqual(re.findall(r"<script[^>]*>(.*?)</script>", html, re.S), [""], "no inline code")
+        for path in PAGES + ["/new-site", "/sites/alpha/password", "/sites/alpha/install", "/login"]:
+            if path != "/import":
+                self.assertEqual(self.get(path, follow_redirects=True).headers["Content-Security-Policy"], EXPECTED_HEADERS["Content-Security-Policy"], path)
+        for name, value in EXPECTED_HEADERS.items():
+            if name != "Content-Security-Policy":
+                self.assertEqual(r.headers.get(name), value, name)
+
+    def test_the_script_file_is_served_and_builds_no_html(self):
+        r = self.get("/static/upload.js")
+        self.assertEqual(r.status_code, 200)
+        js = r.get_data(as_text=True)
+        for bad in ("innerHTML", "outerHTML", "document.write", "eval(", "insertAdjacentHTML", "new Function", "setTimeout(\"", "localStorage", "sendBeacon", "http://", "https://"):
+            self.assertNotIn(bad, js, bad)
+        self.assertIn("textContent", js)
+        self.assertIn('xhr.setRequestHeader("X-CSRF", form.dataset.csrf);', js, "the token the page was drawn with goes in the header")
+        self.assertIn("xhr.send(file)", js, "the file itself is the body: no FormData, no multipart")
+        self.assertNotIn("FormData", js)
+
+    def test_the_hub_lists_the_sites_and_hands_the_script_the_token_and_the_limit(self):
+        html = self.text("/import")
+        self.assertIn('<option value="alpha">', html)
+        self.assertIn('<option value="bravo">', html)
+        self.assertRegex(html, r'data-csrf="%s"' % re.escape(self.token))
+        self.assertIn('data-max-bytes="%d"' % UPLOAD_MAX, html)
+
+    def test_an_upload_passes_every_byte_to_the_client_once_and_answers_with_the_count_and_hash(self):
+        r = self.put("site-one.wpress")
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        self.assertEqual(r.get_json(), {"ok": True, "file": "site-one.wpress", "bytes": len(self.DATA), "sha256": hashlib.sha256(self.DATA).hexdigest()})
+        self.assertEqual(self.ctl.streams, [("import-receive", {"file": "site-one.wpress"}, len(self.DATA), hashlib.sha256(self.DATA).hexdigest())])
+        self.assertEqual(self.discards(), [])
+
+    def test_an_upload_without_the_right_token_or_the_login_streams_nothing(self):
+        for token in (False, "", "wrong", "x" * 40):
+            with self.subTest(token=token):
+                self.assertEqual(self.put("a1.wpress", token=token).status_code, 400)
+        other = self.app.test_client()
+        r = other.put("/import/files/a1.wpress", data=self.DATA, headers={"X-CSRF": self.token}, base_url=BASE)
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(self.ctl.streams, [])
+        form = self.c.put("/import/files/a1.wpress", data=self.DATA, base_url=BASE, query_string={"csrf": self.token})
+        self.assertEqual(form.status_code, 400, "the token in the address is no token: only the header")
+
+    def test_the_length_must_be_announced_and_must_fit_the_intake(self):
+        self.assertIn(self.put("a1.wpress", data=b"").status_code, (400, 411))
+        r = self.c.put("/import/files/a1.wpress", data=b"", headers={"X-CSRF": self.token}, base_url=BASE, environ_overrides={"CONTENT_LENGTH": "0"})
+        self.assertEqual(r.status_code, 400)
+        r = self.c.put("/import/files/a1.wpress", data=b"x" * 10, headers={"X-CSRF": self.token}, base_url=BASE, environ_overrides={"CONTENT_LENGTH": str(UPLOAD_MAX + 1)})
+        self.assertEqual(r.status_code, 413)
+        self.assertIn("larger than the 3072 MB", r.get_json()["error"], "the page's own answer, not a framework error page")
+        r = self.c.put("/import/files/a1.wpress", input_stream=io.BytesIO(b"x" * 10), headers={"X-CSRF": self.token}, base_url=BASE, environ_overrides={"CONTENT_LENGTH": None})
+        self.assertEqual(r.status_code, 411, "a chunked body announces no length: the page does not take it")
+        self.assertEqual(self.ctl.streams, [])
+
+    def test_a_name_that_is_not_a_plain_wpress_name_is_refused(self):
+        for name in ("a.zip", "a", ".hidden.wpress", "a b.wpress", "x" * 101 + ".wpress", "A%0A.wpress", "a;b.wpress"):
+            with self.subTest(name=name):
+                r = self.put(name)
+                self.assertIn(r.status_code, (400, 404), name)
+        self.assertEqual([x for x in self.ctl.streams if x[2]], [] if False else [x for x in self.ctl.streams if x[2]])
+        self.assertEqual(self.discards(), [])
+
+    def test_a_refusal_of_dellwp_is_shown_and_removes_nothing(self):
+        self.ctl.fail["import-receive"] = CtlError("refused", "wp-ctl refused: failed (a1.wpress is already in the intake directory)", None)
+        r = self.put("a1.wpress")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("already in the intake", r.get_json()["error"])
+        self.assertEqual(self.discards(), [], "a file that was there before is not ours to remove")
+
+    def test_an_answer_that_does_not_match_or_an_unreachable_dellwp_removes_what_may_have_been_kept(self):
+        for kind, status in (("bad_reply", 502), ("unreachable", 503)):
+            self.ctl.calls.clear()
+            self.ctl.fail["import-receive"] = CtlError(kind, "it went wrong")
+            r = self.put("a1.wpress")
+            self.assertEqual(r.status_code, status, kind)
+            self.assertEqual(self.discards(), [{"file": "a1.wpress", "if_present": True}], kind)
+
+    def test_a_body_that_ends_early_is_cut_off_and_what_reached_dellwp_is_removed_again(self):
+        r = self.c.put("/import/files/a1.wpress", data=b"x" * 1000, headers={"X-CSRF": self.token}, base_url=BASE, environ_overrides={"CONTENT_LENGTH": "5000"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("cut off", r.get_json()["error"])
+        self.assertEqual(self.discards(), [{"file": "a1.wpress", "if_present": True}])
+        self.assertTrue(self.slept, "it waits a moment first: dellwp finishes the short file when its input ends")
+
+    def test_the_upload_is_read_in_chunks_of_at_most_64_kib(self):
+        sizes = []
+        real = self.ctl.stream
+
+        def spy(verb, chunks, **args):
+            return real(verb, (sizes.append(len(c)) or c for c in chunks), **args)
+        self.ctl.stream = spy
+        self.put("a1.wpress", data=b"y" * (300 * 1024))
+        self.assertTrue(sizes and max(sizes) <= 64 * 1024 and sum(sizes) == 300 * 1024, sizes)
+
+    def test_run_plan_run_and_replace_ask_for_the_right_flags_and_a_replace_needs_the_name(self):
+        base = {"site": "alpha", "file": "a1.wpress", "req": "pr1"}
+        self.assertEqual(self.post("/import/run", dict(base, mode="plan")).headers["Location"], "/jobs/" + JOB)
+        self.post("/import/run", dict(base, mode="run"))
+        self.post("/import/run", dict(base, mode="replace", confirm_name="alpha"))
+        self.assertEqual([a for v, a in self.ctl.calls if v == "import-run"], [
+            {"site": "alpha", "file": "a1.wpress", "req": "pr1", "plan": True, "replace": False},
+            {"site": "alpha", "file": "a1.wpress", "req": "pr1", "plan": False, "replace": False},
+            {"site": "alpha", "file": "a1.wpress", "req": "pr1", "plan": False, "replace": True, "confirm_name": "alpha"}])
+
+    def test_run_refuses_a_replace_without_the_name_a_name_with_another_mode_and_a_mode_that_is_not_one(self):
+        base = {"site": "alpha", "file": "a1.wpress", "req": "pr1"}
+        for data in (dict(base, mode="replace"), dict(base, mode="replace", confirm_name="bravo"), dict(base, mode="replace", confirm_name="Alpha"), dict(base, mode=""), dict(base, mode="delete"),
+                     dict(base, mode="run", file="../a.wpress"), dict(base, mode="run", site="A"), dict(base, mode="run", file="a1.zip"), dict(base, mode="run", req="")):
+            with self.subTest(data=data):
+                self.assertEqual(self.post("/import/run", data).status_code, 400)
+        self.assertEqual([v for v, _ in self.ctl.calls if v == "import-run"], [])
+
+    def test_a_replace_sends_the_name_only_for_a_replace(self):
+        self.post("/import/run", {"site": "alpha", "file": "a1.wpress", "req": "pr1", "mode": "run", "confirm_name": "alpha"})
+        self.assertNotIn("confirm_name", [a for v, a in self.ctl.calls if v == "import-run"][0])
+
+    def test_remove_a_file_asks_for_the_discard_and_says_what_the_tool_said(self):
+        r = self.post("/import/discard", {"file": "a1.wpress"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("removed a1.wpress", r.get_data(as_text=True))
+        self.assertEqual(self.discards(), [{"file": "a1.wpress", "if_present": False}])
+        for name in ("", "../a.wpress", "a.zip"):
+            self.assertEqual(self.post("/import/discard", {"file": name}).status_code, 400)
+        self.assertEqual(len(self.discards()), 1)
+
+    def test_every_import_form_needs_the_token_and_asks_nothing_without_it(self):
+        forms = (("/import/run", {"site": "alpha", "file": "a1.wpress", "req": "p1", "mode": "plan"}), ("/import/discard", {"file": "a1.wpress"}),
+                 ("/sites/alpha/import/approve", {"req": "p1"}), ("/sites/alpha/import/reset", {"confirm_name": "alpha", "req": "p1"}))
+        for path, data in forms:
+            for token in (False, "", "wrong"):
+                with self.subTest(path=path, token=token):
+                    self.assertEqual(self.post(path, data, token=token).status_code, 400)
+        self.assertEqual([c for c in self.ctl.calls if c[0].startswith("import-") and c[0] != "import-report"], [])
+
+    def test_the_site_page_shows_the_report_as_text_and_has_the_two_forms_with_a_token_each(self):
+        self.ctl.replies["import-report"]["out"] = "<script>alert(1)</script> plugin x\n"
+        html = self.text("/sites/alpha/import")
+        self.assertNotIn("<script", html.lower())
+        self.assertIn("&lt;script&gt;", html)
+        for action in ("/sites/alpha/import/approve", "/sites/alpha/import/reset"):
+            form = re.search(r'<form method="post" action="%s".*?</form>' % action, html, re.S)
+            self.assertIsNotNone(form, action)
+            self.assertRegex(form.group(0), r'name="csrf" value="[^"]{20,}"')
+            self.assertRegex(form.group(0), r'name="req" value="p[0-9a-f]{32}(approve|reset)"')
+
+    def test_no_report_yet_is_a_sentence_not_an_error_page(self):
+        self.ctl.fail["import-report"] = CtlError("failed", "wp-ctl failed: no error code (no report for alpha)", None)
+        html = self.text("/sites/alpha/import")
+        self.assertIn("no report for alpha", html)
+        self.assertIn("Approve", html)
+        self.ctl.fail["import-report"] = CtlError("unreachable", "dellwp did not answer within 30 seconds")
+        self.text("/sites/alpha/import", 503)
+
+    def test_an_unknown_site_is_a_404_on_its_import_page(self):
+        self.ctl.fail["show"] = CtlError("refused", "wp-ctl refused: unknown_site", "unknown_site")
+        self.text("/sites/ghost/import", 404)
+
+    def test_approve_sends_the_rejects_and_the_acceptance_only_when_it_was_given(self):
+        self.post("/sites/alpha/import/approve", {"req": "pa1"})
+        self.post("/sites/alpha/import/approve", {"req": "pa1", "reject": "akismet,hello-dolly", "accept_failures": "yes"})
+        self.post("/sites/alpha/import/approve", {"req": "pa1", "accept_failures": "on"})
+        calls = [a for v, a in self.ctl.calls if v == "import-approve"]
+        self.assertEqual(calls[0], {"site": "alpha", "req": "pa1", "accept_failures": False})
+        self.assertEqual(calls[1], {"site": "alpha", "req": "pa1", "accept_failures": True, "reject": "akismet,hello-dolly"})
+        self.assertEqual(calls[2]["accept_failures"], False, "only the checkbox's own value counts")
+        for reject in ("a b", "a,,b", "../x", "a;b"):
+            self.assertEqual(self.post("/sites/alpha/import/approve", {"req": "pa1", "reject": reject}).status_code, 400)
+
+    def test_reset_needs_the_site_name_typed_exactly(self):
+        for typed in ("", "bravo", "Alpha", "alpha "):
+            self.assertEqual(self.post("/sites/alpha/import/reset", {"confirm_name": typed, "req": "pr1"}).status_code, 400)
+        self.assertEqual([c for c in self.ctl.calls if c[0] == "import-reset"], [])
+        r = self.post("/sites/alpha/import/reset", {"confirm_name": "alpha", "req": "pr1"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual([a for v, a in self.ctl.calls if v == "import-reset"], [{"site": "alpha", "confirm_name": "alpha", "req": "pr1"}])
+
+
+STAND_IN_SSH = """#!{python}
+import hashlib, json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+request = json.loads(sys.stdin.buffer.readline())
+open(os.path.join(here, "request.json"), "w").write(json.dumps(request))
+if request["verb"] == "import-discard":
+    open(os.path.join(here, "discarded"), "a").write(request["file"] + "\\n")
+    print(json.dumps({{"ok": True, "rc": 0, "ran": True, "out": "removed\\n"}}))
+    sys.exit(0)
+h, n = hashlib.sha256(), 0
+while True:
+    b = sys.stdin.buffer.read(1 << 16)
+    if not b:
+        break
+    h.update(b)
+    n += len(b)
+open(os.path.join(here, "received"), "w").write("%d %s" % (n, h.hexdigest()))
+print(json.dumps({{"ok": True, "rc": 0, "ran": True, "out": "received %s %d %s\\n" % (h.hexdigest(), n, request["file"])}}))
+"""
+
+
+class UploadEndToEnd(Base):
+    """The upload view with the REAL client and a stand-in ssh that does what wp-ctl's receive does: the whole chain from the PUT to the count and hash on 'dellwp'."""
+
+    def make_app(self):
+        import os
+        import stat
+        self.bin = Path(self.d.name) / "bin"
+        self.bin.mkdir()
+        ssh = self.bin / "ssh"
+        ssh.write_text(STAND_IN_SSH.format(python=sys.executable))
+        ssh.chmod(ssh.stat().st_mode | stat.S_IXUSR)
+        self.real = Ctl("dellwp", "wpctl", "/k", "/kh", ssh=str(ssh), path=os.environ["PATH"])
+        return create_app(self.settings, self.real, self.clock)
+
+    def put(self, name, data, length=None, token=True):
+        headers = {"X-CSRF": self.token}
+        r = self.c.put("/import/files/" + name, data=data, headers=headers, base_url=BASE, environ_overrides={"CONTENT_LENGTH": str(len(data) if length is None else length)})
+        return r
+
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+        # the token of the logged-in session: any page carries it
+        html = self.get("/new-site").get_data(as_text=True)
+        self.token = re.search(r'name="csrf" value="([^"]+)"', html).group(1)
+
+    def test_a_file_goes_from_the_put_through_the_real_client_and_ssh_with_every_byte(self):
+        import os
+        data = os.urandom(3 * 1024 * 1024 + 17)
+        r = self.put("big-one.wpress", data)
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        self.assertEqual(r.get_json(), {"ok": True, "file": "big-one.wpress", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        self.assertEqual((self.bin / "received").read_text(), "%d %s" % (len(data), hashlib.sha256(data).hexdigest()))
+        self.assertEqual(json.loads((self.bin / "request.json").read_text()), {"verb": "import-receive", "file": "big-one.wpress"})
+        self.assertFalse((self.bin / "discarded").exists())
+
+    def test_a_body_that_ends_early_stops_the_chain_and_asks_for_the_file_to_be_removed(self):
+        import wp_panel.views as views
+        real_sleep = views.time.sleep
+        views.time.sleep = lambda s: None
+        self.addCleanup(setattr, views.time, "sleep", real_sleep)
+        r = self.put("cut.wpress", b"z" * 100000, length=300000)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("cut off", r.get_json()["error"])
+        self.assertEqual((self.bin / "discarded").read_text(), "cut.wpress\n")
+
+
 class ReadOnly(Base):
     def test_the_app_has_exactly_these_routes_and_none_of_them_changes_anything_on_dellwp(self):
         rules = sorted((r.rule, tuple(sorted(m for m in r.methods if m not in ("HEAD", "OPTIONS")))) for r in self.app.url_map.iter_rules())
-        self.assertEqual(rules, sorted([("/", ("GET",)), ("/audit", ("GET",)), ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
+        self.assertEqual(rules, sorted([("/", ("GET",)), ("/audit", ("GET",)), ("/import", ("GET",)), ("/import/discard", ("POST",)), ("/import/files/<file>", ("PUT",)), ("/import/run", ("POST",)),
+                                        ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
                                         ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
-                                        ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
+                                        ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
                                         ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),
-                         "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install)")
+                         "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install; batch 13: the import)")
 
     def test_a_full_crawl_asks_for_read_verbs_only(self):
         self.logged_in()
