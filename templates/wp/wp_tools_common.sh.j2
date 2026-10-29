@@ -24,9 +24,9 @@ require_site() {
 # (rows=$(site_rows) stops a `set -e` script; a pipe or a `for` over $(site_rows) would turn a broken registry into "no sites" and hide it).
 site_rows() { "$WP_BIN/wp-site-provision" rows </dev/null; }
 
-# A stopped site has no containers (templates/wp/site_nginx.conf.j2, tasks/wp_site_one_common.yml render stopped.flag from the state). A tool that needs the stack says so, instead of
+# A stopped site has no containers (templates/wp/site_nginx.conf.j2, scripts/wp_site_provision.py render stopped.flag from the state). A tool that needs the stack says so, instead of
 # failing on a missing container or network. Call it after require_site.
-refuse_if_stopped() { [ ! -e "$dir/stopped.flag" ] || die "$site is stopped (it has no containers); start it first: python3 scripts/wp_sites.py start $site"; }
+refuse_if_stopped() { [ ! -e "$dir/stopped.flag" ] || die "$site is stopped (it has no containers); start it first: wp-ctl ensure-state site=$site state=hold"; }
 
 # The number of tables in a site's database; 0 is a site that is waiting for an import. Fails when the database cannot be asked: the caller decides what that means (a tool that alerts says so).
 table_count() {

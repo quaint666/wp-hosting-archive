@@ -1,14 +1,12 @@
 ---
 # tasks/wp_sites_common.yml
-# The WordPress site engine on dellwp. No hosts:/become: and no handlers here: imported via import_tasks into the thin wrapper (dellwp/wp_sites_dellwp.yml), which
-# loads vars/wp.yml and sets wp_master_secret. Vars: wp_sites and wp_site_defaults (host_vars/dellwp/vars.yml), wp_master_secret, the image pins (vars/wp.yml).
-# Run order on a fresh VM: dellwp/wp_data_disk_dellwp.yml, dellwp/nginx_base_dellwp.yml, then this.
+# What the sites need around them on dellwp. No hosts:/become: and no handlers here: imported via import_tasks into the thin wrapper (dellwp/wp_sites_dellwp.yml), which
+# loads vars/wp.yml and sets wp_master_secret. Run order on a fresh VM: dellwp/wp_data_disk_dellwp.yml, dellwp/nginx_base_dellwp.yml, then this.
 #
-# This file only checks the list and loops; one site is tasks/wp_site_one_common.yml. The checks fail the play before anything changes: names, ports and project ids
-# unique, the RAM limits and the disk quotas within what the VM and the data disk have (declared in host_vars/delloptiplex3040/vars.yml), reserved names refused.
-# The same expressions are evaluated by tests/test_wp_sites_render.py, in CI and by hand, including the cases they must refuse.
-# Removing an entry from wp_sites stops nothing and deletes nothing: a site that has to go is stopped and removed by hand (data is never deleted by this play).
-# Check mode cannot show: the seed, the containers, the quota calls, whether the images pull, or whether nginx accepts the vhost.
+# This file no longer builds sites. A site exists in the registry (/srv/wp/sites/<name>/site.json) and is made, changed and closed by wp-site-provision (wp-ctl create, set, ensure-state, delete;
+# scripts/wp_site_provision.py), which also checks that the sites fit the VM (scripts/wp_site_model.py). What is left here is shared by every site: the nginx base the vhosts use, the quota projects of the
+# archive and the intake, the must-use plugins every site mounts, the disk check and the status tool. The play never touches a site's data.
+# Check mode cannot show: the quota calls, the download of the plugins, or whether PHP accepts the must-use plugins.
 
 # The vhosts use the zone and the maps the base defines; without them nginx -t fails and the vhost is rolled back (it did, 2026-10-24). Say so before changing anything.
 - name: Read the nginx base on the VM
@@ -26,50 +24,6 @@
       Run dellwp/nginx_base_dellwp.yml first: /etc/nginx/conf.d/wp_base.conf lacks the login zone or $wp_https that the site vhosts use. Nothing was changed.
     quiet: true
 
-- name: Read this VM's declared size from the Proxmox host's list
-  ansible.builtin.set_fact:
-    wp_vm: "{{ hostvars['delloptiplex3040'].proxmox_vms | selectattr('name', 'eq', inventory_hostname) | first }}"
-
-- name: Merge each site with the defaults
-  ansible.builtin.set_fact:
-    wp_sites_merged: "{{ (wp_sites_merged | default([])) + [wp_site_defaults | combine(item)] }}"
-  loop: "{{ wp_sites }}"
-  loop_control:
-    label: "{{ item.name | default('(no name)') }}"
-
-- name: Stop early if the site list does not fit this VM
-  ansible.builtin.assert:
-    that:
-      - wp_sites | length > 0
-      - wp_sites | selectattr('name', 'defined') | selectattr('port', 'defined') | selectattr('quota_id', 'defined') | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='name') | select('match', '^[a-z][a-z0-9-]{1,23}$') | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='name') | intersect(wp_reserved_names) | length == 0
-      - wp_sites_merged | map(attribute='name') | unique | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='port') | unique | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='quota_id') | unique | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='port') | map('int') | select('gt', 1024) | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='quota_id') | map('int') | select('ge', 1000) | list | length == wp_sites | length
-      - wp_sites_merged | map(attribute='state') | difference(['hold', 'live', 'stopped', 'closed']) | length == 0
-      - wp_sites_merged | map(attribute='update_policy') | difference(['auto', 'notify', 'freeze']) | length == 0
-      - (wp_sites_merged | rejectattr('state', 'in', ['stopped', 'closed']) | map(attribute='php_mem_mb') | map('int') | sum) + (wp_sites_merged | rejectattr('state', 'in', ['stopped', 'closed']) | map(attribute='db_mem_mb') | map('int') | sum) <= (wp_vm.memory | int) - (wp_vm_ram_reserve_mb | int)
-      - (wp_sites_merged | rejectattr('state', 'eq', 'closed') | map(attribute='quota_mb') | map('int') | sum) + (wp_sites_merged | rejectattr('state', 'eq', 'closed') | map(attribute='backup_quota_mb') | map('int') | sum) <= (wp_vm.data_disk | int) * 1024 - (wp_data_reserve_mb | int)
-      - (wp_backup_quota_offset | int) > (wp_sites_merged | map(attribute='quota_id') | map('int') | max) - (wp_sites_merged | map(attribute='quota_id') | map('int') | min)
-      - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_scratch_quota_id | int)
-      - (wp_archive_quota_id | int) != (wp_scratch_quota_id | int)
-      - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_archive_quota_id | int)
-      - (wp_intake_quota_id | int) != (wp_scratch_quota_id | int)
-      - (wp_intake_quota_id | int) != (wp_archive_quota_id | int)
-      - (wp_sites_merged | map(attribute='quota_id') | map('int') | max) + (wp_backup_quota_offset | int) < (wp_intake_quota_id | int)
-    fail_msg: >-
-      wp_sites (host_vars/dellwp/vars.yml) does not fit: every entry needs name, port and quota_id; names are 2 to 24 characters of a-z, 0-9 and -, not reserved, unique;
-      ports above 1024 and project ids from 1000 are unique; state is hold, live, stopped or closed (a closed site is a tombstone: its name, port and project id stay reserved, but it holds no RAM and no disk); the memory limits of the sites that run plus {{ wp_vm_ram_reserve_mb }} MB must fit in the VM's
-      {{ wp_vm.memory }} MB; the quotas and backup quotas of the sites that exist plus {{ wp_data_reserve_mb }} MB must fit in its {{ wp_vm.data_disk }} GB data disk; wp_backup_quota_offset must be
-      larger than the spread of the quota ids (a backup project id must never equal another site's id) and the highest backup id must stay below wp_scratch_quota_id, wp_archive_quota_id and wp_intake_quota_id, which must differ. Nothing was changed.
-    quiet: true
-
-# A closed site is a tombstone: it is in the list so that its name, port and project id are never given to another site, but nothing of it may be on the VM. The PLAY NEVER DELETES
-# DATA: a site whose state was edited to closed by hand, with its directory still there, stops the play here, before anything is deployed. The data goes only through wp-site-delete
-# (python3 scripts/wp_sites.py delete <site>), which makes the archive first and asks for the name to be typed.
 # The archive directory is made by the data disk play (dellwp/wp_data_disk_dellwp.yml). Without it the quota task below fails with a bare lsattr error, even in check mode.
 - name: Look for the archive directory
   ansible.builtin.stat:
@@ -115,68 +69,9 @@
     wp_pq_id: "{{ wp_intake_quota_id }}"
     wp_pq_mb: "{{ wp_intake_quota_mb }}"
 
-# The closed sites (tombstones) are checked with ONE command each time, not a task per site and path: every task costs a round trip to the VM (1.3 s or more), and a tombstone stays for good,
-# so a per-site loop made every deploy slower with every site ever deleted. The checks are the same as before; only the way of asking changed.
-- name: Look for what the closed sites left on the VM
-  vars:
-    wp_closed_names: "{{ wp_sites_merged | selectattr('state', 'eq', 'closed') | map(attribute='name') | list }}"
-  ansible.builtin.command:
-    argv: "{{ ['ls', '-1d', '--'] + (wp_closed_names | map('regex_replace', '^', wp_data_mount ~ '/sites/') | list) + (wp_closed_names | map('regex_replace', '^', wp_backup_dir ~ '/') | list) }}"
-  register: wp_closed_left
-  changed_when: false
-  failed_when: wp_closed_left.rc not in [0, 2]        # ls exits 2 when some of the paths do not exist, which is the normal case here: it prints the ones that do
-  check_mode: false
-  when: wp_sites_merged | selectattr('state', 'eq', 'closed') | list | length > 0
-
-- name: Stop if a closed site still has its data on the VM
-  ansible.builtin.assert:
-    that:
-      - wp_closed_left.stdout_lines | default([]) | length == 0
-    fail_msg: >-
-      {{ wp_closed_left.stdout_lines | default([]) | join(' and ') }} still exists, but the repo says that site is closed. The play never deletes data. Run
-      python3 scripts/wp_sites.py delete <site> (it archives the site first and removes it), or set the state back if the edit was a mistake. Nothing was changed.
-    quiet: true
-
-# Which closed sites still have anything the play owns: the stack's unit file, the nginx vhost, or a timer that is enabled or running. A clean tombstone prints nothing. A site that prints
-# is cleaned by tasks/wp_site_closed_common.yml as before. If the probe is ever wrong it is wrong towards "dirty" (any doubt prints the name), which only costs the slow path.
-- name: Look for what is left of the closed sites in the places the play owns
-  vars:
-    wp_closed_probe: |
-      unit_dir=$1; vhost_dir=$2; shift 2
-      for s in "$@"; do
-        dirty=no
-        [ ! -e "$unit_dir/wp-$s.service" ] || dirty=yes
-        [ ! -e "$vhost_dir/wp_site_$s.conf" ] || dirty=yes
-        for k in cron backup update; do
-          ! systemctl is-enabled --quiet "wp-$k@$s.timer" 2>/dev/null || dirty=yes
-          ! systemctl is-active --quiet "wp-$k@$s.timer" 2>/dev/null || dirty=yes
-        done
-        [ "$dirty" = no ] || echo "$s"
-      done
-  ansible.builtin.command:
-    argv: "{{ ['/bin/bash', '-c', wp_closed_probe, '_', wp_unit_dir, wp_vhost_dir] + (wp_sites_merged | selectattr('state', 'eq', 'closed') | map(attribute='name') | list) }}"
-  register: wp_closed_dirty
-  changed_when: false
-  check_mode: false
-  when: wp_sites_merged | selectattr('state', 'eq', 'closed') | list | length > 0
-
-# The must-use plugins every site mounts (tasks/wp_mu_common.yml). Static import: it runs before any site, and keeps the wp_sites tag.
+# The must-use plugins every site mounts (tasks/wp_mu_common.yml). Static import, so it keeps the wp_sites tag. The directory must exist before a site's php container mounts it.
 - name: Deploy the must-use plugins (tasks/wp_mu_common.yml)
   ansible.builtin.import_tasks: wp_mu_common.yml
-
-- name: Deploy each site that exists (tasks/wp_site_one_common.yml)
-  ansible.builtin.include_tasks: wp_site_one_common.yml
-  loop: "{{ wp_sites_merged | rejectattr('state', 'eq', 'closed') | list }}"
-  loop_control:
-    loop_var: wp_s
-    label: "{{ wp_s.name }} ({{ wp_s.state }})"
-
-- name: Remove what a closed site left behind (tasks/wp_site_closed_common.yml)
-  ansible.builtin.include_tasks: wp_site_closed_common.yml
-  loop: "{{ wp_sites_merged | selectattr('state', 'eq', 'closed') | selectattr('name', 'in', wp_closed_dirty.stdout_lines | default([])) | list }}"
-  loop_control:
-    loop_var: wp_s
-    label: "{{ wp_s.name }} (closed)"
 
 - name: Watch the data disk and every site's quota (tasks/wp_disk_check_common.yml)
   ansible.builtin.include_tasks: wp_disk_check_common.yml

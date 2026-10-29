@@ -652,69 +652,18 @@ class Tools(unittest.TestCase):
         compose = yaml.safe_load(env.get_template("site_compose.yml.j2").render(**site))
         self.assertEqual(compose["services"]["db"]["stop_grace_period"], "%ds" % self.ctx["wp_db_stop_grace_s"])
 
-    def test_ansible_does_not_run_compose_itself_so_the_unit_is_the_only_owner(self):
-        text = (ROOT / "tasks/wp_site_one_common.yml").read_text()
-        self.assertNotIn("docker_compose_v2", text)
-        tasks = yaml.safe_load(text)
-        names = [t.get("name", "") for t in tasks]
-        deploy = names.index("Deploy the site's systemd unit")
-        start = names.index("Start the site, or restart it when its compose file or database settings changed; stop it when it is stopped")
-        reload_ = names.index("Recreate only the php container when only its mounted files changed")
-        self.assertLess(deploy, start)
-        self.assertLess(start, reload_)
-        unit = tasks[deploy]["ansible.builtin.template"]
-        self.assertTrue(unit["src"].endswith("/compose_stack.service.j2"))
-        self.assertEqual(tasks[deploy]["vars"]["compose_stack_reload_service"], "php")
+    def test_the_provisioner_does_not_run_compose_itself_so_the_unit_is_the_only_owner(self):
+        text = (ROOT / "scripts/wp_site_provision.py").read_text()
+        code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        for bad in ("docker compose", "docker-compose", '"compose"', "docker_compose"):
+            self.assertNotIn(bad, code, bad)
+        self.assertIn('compose_stack_reload_service="php"', (ROOT / "scripts/wp_site_renderer.py").read_text())
         self.assertTrue((ROOT / "templates/compose_stack.service.j2").is_file())
 
-    def test_what_changed_decides_restart_reload_or_nothing(self):
-        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
-        facts = [t for t in tasks if t.get("name", "").startswith("Work out whether the stack needs")][0]["ansible.builtin.set_fact"]
-        e = jinja2.Environment()
-        e.filters["bool"] = lambda v: str(v).strip().lower() in ("true", "1", "yes")  # Ansible's filter; plain Jinja has none
+    # What a changed file restarts or reloads, when the maintenance flag goes and which timers run in which state are the provisioning tool's (tests/test_wp_site_provision.py: test_a_compose_change_restarts_the_stack,
+    # test_a_change_to_a_mounted_file_recreates_only_php, test_stopped, test_live_starts_the_cron_timer_and_opens_the_vhost), proven on the host by scripts/wp_state_rehearsal_dellwp.sh.
 
-        def decide(env=False, wpconfig=False, **files):
-            ctx = dict(wp_site_env={"changed": env}, wp_site_wpconfig={"changed": wpconfig},
-                       wp_site_files={"results": [{"item": {"dest": d}, "changed": files.get(d.split(".")[0].replace("-", "_"), False)} for d in ("php.ini", "fpm-pool.conf", "compose.yml")]})
-            restart = e.from_string(facts["wp_site_restart"]).render(**ctx).strip() == "True"
-            php = e.from_string(facts["wp_site_php_changed"]).render(**ctx).strip() == "True"
-            return restart, php
-
-        self.assertEqual(decide(), (False, False), "nothing changed: just start")
-        self.assertEqual(decide(compose=True), (True, False), "a compose.yml change (image, limits) restarts the stack")
-        self.assertEqual(decide(env=True), (True, False), "a .env change (database settings) restarts the stack")
-        self.assertEqual(decide(php=True), (False, True), "php.ini alone: reload php only")
-        self.assertEqual(decide(wpconfig=True), (False, True), "wp-config.php alone: reload php only")
-        self.assertEqual(decide(fpm_pool=True), (False, True), "the pool alone: reload php only")
-        self.assertEqual(decide(env=True, php=True), (True, True), "both: the restart covers it (the reload task is skipped)")
-        start = [t for t in tasks if t.get("name", "").startswith("Start the site, or restart it")][0]["ansible.builtin.systemd"]
-        for restart, want in ((True, "restarted"), (False, "started")):
-            for state in ("hold", "live"):
-                self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": state}).strip(), want, "the unit must act on the decision")
-        for restart in (True, False):
-            self.assertEqual(e.from_string(start["state"]).render(wp_site_restart=restart, wp_s={"state": "stopped"}).strip(), "stopped", "a stopped site's unit is stopped whatever changed")
-        reload_task = [t for t in tasks if t.get("name", "").startswith("Recreate only the php container")][0]
-        self.assertEqual(reload_task["ansible.builtin.systemd"]["state"], "reloaded")
-        self.assertIn("not (wp_site_restart | bool)", reload_task["when"])
-        self.assertIn("wp_s.state != 'stopped'", reload_task["when"], "no php to recreate in a stopped site")
-
-    def test_a_stopped_site_loses_the_final_backups_maintenance_flag_only_after_its_containers_are_down(self):
-        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
-        names = [t.get("name", "") for t in tasks]
-        stop = [i for i, n in enumerate(names) if n.startswith("Start the site, or restart it") and "stop it when it is stopped" in n][0]
-        rm = names.index("Take the maintenance flag away from a stopped site")
-        self.assertGreater(rm, stop, "the flag keeps the site quiet until the unit has stopped")
-        t = tasks[rm]
-        self.assertEqual((t["ansible.builtin.file"]["state"], t["when"]), ("absent", "wp_s.state == 'stopped'"))
-        self.assertTrue(t["ansible.builtin.file"]["path"].endswith("/maintenance.flag"))
-
-    def test_only_live_sites_get_a_running_timer_and_systemd_is_reloaded_first(self):
-        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
-        t = [x for x in tasks if "wp-cron@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]
-        e = jinja2.Environment()
-        for state, want in (("live", ("True", "started")), ("hold", ("False", "stopped"))):
-            got = (e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state}))
-            self.assertEqual(got, want, state)
+    def test_systemd_is_reloaded_after_the_units_are_sent_and_before_the_timers_are_enabled(self):
         tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         send = [x for x in tools if x.get("name") == "Send the WordPress units"][0]
         self.assertEqual(send["notify"], "Reload systemd")

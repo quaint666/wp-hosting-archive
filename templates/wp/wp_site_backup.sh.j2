@@ -7,7 +7,7 @@
 # It is built in a hidden .partial-* directory and renamed into place only when everything checked out, so a half-made snapshot never looks like a backup. Core is not
 # saved: it comes from the image (the restore seeds it), and wp-config.php and .env are rendered from the repo and the vault. Snapshots live in their own quota project, so
 # the first one is a real copy (a hard link across projects is refused) and the later ones link inside it.
-# --tag=final (wp_sites.py stop): the last backup of a site that is about to stop. The site is put in maintenance (nginx answers 503, cron skips) before the dump, so nothing can be written
+# --tag=final (wp-ctl ensure-state state=stopped): the last backup of a site that is about to stop. The site is put in maintenance (nginx answers 503, cron skips) before the dump, so nothing can be written
 # between this snapshot and the stop; on success the flag STAYS UP (the stop's play takes it away once the containers are down; run by hand, remove it yourself or stop the site), on a
 # failure it comes down again. A flag that was already up is never touched. Tagged snapshots are kept on their own: the newest {{ wp_backup_keep_final }} final one, and what is said below for pre-update.
 # --tag=pre-import (wp-site-import --replace): the snapshot of the site as it was before an import replaces its data. It is NEVER pruned (a deny must always be able to put the old site back); wp-site-import removes it on a

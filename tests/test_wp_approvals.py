@@ -313,7 +313,7 @@ class Notifying(Phone):
             self.assertIn("Deny only", text, name)
             self.assertEqual([a["label"] for a in self.sent[0][2]["actions"]], ["Deny"], name)
             self.assertIn("NOT CLEAN", self.sent[0][2]["message"], name)
-            self.assertIn("wp_sites.py approve wptest", self.sent[0][2]["message"], name)
+            self.assertIn("wp-site-import approve wptest", self.sent[0][2]["message"], name)
             self.tearDown()
 
     def test_suspicious_code_in_the_held_back_files_removes_the_approve_button(self):

@@ -558,7 +558,7 @@ def clear_update_state(site, tools):
 
 
 def reset_wp_content(cfg, site, site_dir, tools):
-    """wp-content as the image ships it and as site creation seeded it (tasks/wp_site_one_common.yml): root-owned, uploads the one directory PHP may write. Used by --replace after the safety snapshot."""
+    """wp-content as the image ships it and as site creation seeded it (scripts/wp_site_provision.py): root-owned, uploads the one directory PHP may write. Used by --replace after the safety snapshot."""
     uid = int(cfg["php_uid"])
     # The contents are emptied IN PLACE: uploads is a bind mount of its own in the compose file (./html/wp-content/uploads), and a running container keeps the directory it was started with. Removing and
     # recreating that directory left the php container writing into a deleted one ("php can write to uploads" failed, dellwp 2026-10-25). Nothing here replaces the wp-content or uploads directory itself.
@@ -853,7 +853,7 @@ def notify_report(cfg, site, record, work, tools):
         body = "\n".join(["%s: %d steps, %d failed." % (site, len(record["steps"]), sum(1 for s in record["steps"] if not s["ok"])),
                           ("Held back for you: " + ", ".join("%s %s (%d files)" % i for i in held)) if held else "Nothing held back.",
                           "ClamAV: " + str(record["scan"].get("clam", "?"))[:60], "Vulnerabilities: " + " ".join(str(record["scan"].get("vuln", "?")).split())[:160]]
-                         + (["NOT CLEAN: " + "; ".join(why) + ". Decide at the control page: wp_sites.py approve %s [--reject ...] [--accept-failures]." % site] if why
+                         + (["NOT CLEAN: " + "; ".join(why) + ". Decide at the control page, or on the VM: sudo wp-site-import approve %s [--reject a,b] [--accept-failures]." % site] if why
                             else ["Clean. Approve copies the held-back code in; the site stays on hold."]))
         (tools.post or ap.post_json)(url, sender, ap.build_message(url, ask_topic, a["reply_topic"], button, site, body, tokens))
         return "phone notification sent (%s)" % ("Approve and Deny" if not why else "Deny only: " + why[0])

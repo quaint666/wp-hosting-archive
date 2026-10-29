@@ -1,19 +1,17 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_site_delete.sh.j2). Remove a stopped site for good, keeping its last backup for {{ wp_archive_keep_days }} days:   ssh -t dellwp sudo wp-site-delete <site>
-# THE ONLY PLACE THAT DELETES A SITE'S DATA. The play never does (tasks/wp_sites_common.yml stops while a closed site still has a directory); this tool is run by hand, or by
-# `python3 scripts/wp_sites.py delete <site>`, and asks for the site's name to be typed.
+# THE ONLY PLACE THAT DELETES A SITE'S DATA. The play never does; this tool is run by hand, or by `wp-ctl delete` (the job passes the name typed twice), and asks for the site's name to be typed.
 # What must be true first (each is checked before anything is touched, and a failure changes nothing):
 #   - the site is stopped (stopped.flag, rendered by the play from state: stopped), is not frozen, and its directory and its backup directory are real directories, not links
-#   - the NEWEST snapshot of the site is a final one (tag=final, taken by `wp_sites.py stop` with the site in maintenance), so nothing newer exists that the archive would lose, and
+#   - the NEWEST snapshot of the site is a final one (tag=final, taken by `wp-ctl ensure-state state=stopped` with the site in maintenance), so nothing newer exists that the archive would lose, and
 #     its dump passes gzip -t, has its completion marker and a wp_options table
 # Then: you type the site's name; the archive is built in a hidden directory under {{ wp_archive_dir }} and checked (gzip -t, tar -t, a checksum of each file); only a verified archive is
 # moved into place; and only then is anything removed: the unit and its timers, the containers and network (there are none while stopped), the nginx vhost (nginx -t must still pass
 # after it, or the vhost is put back and the tool stops), the site's directory and its backups, and the limits of its two quota projects. The archive is
 # {{ wp_archive_dir }}/<site>-<snapshot stamp>/ with db.sql.gz, wp-content.tar.gz and a MANIFEST that says when it expires; wp-archive-purge removes it then. Run again after an interruption it resumes:
 # an archive that is already there and verifies is used, and every removal tolerates what is already gone. The Proxmox backups of the whole VM keep older copies for months and cannot be purged per site.
-# After this the repo must say the site is closed (state: closed; scripts/wp_sites.py delete does it): the play then keeps the tombstone clean. A site that has a registry record
-# (<dir>/site.json, made by wp-site-provision) leaves its tombstone in the registry instead: `wp-site-provision close` runs after the archive is verified and before anything is removed,
-# so the port and the quota id are never given out again (the name may be, to a new site with new numbers). Nothing in the repo needs to change for such a site.
+# The site leaves its tombstone in the registry (<dir>/site.json is its record, made by wp-site-provision): `wp-site-provision close` runs after the archive is verified and before anything is
+# removed, so the port and the quota id are never given out again (the name may be, to a new site with new numbers). Nothing in the repo needs to change.
 set -eu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
@@ -64,13 +62,13 @@ resume=no; [ "$have_site" = yes ] || resume=yes   # the site's directory is the 
 if [ "$resume" = no ]; then
   [ "$have_site" = yes ] && real_dir "$dir" || die "$dir is not a real directory (missing or a link): refusing"
   real_dir "$bk" || die "$bk is not a real directory (missing or a link): refusing"
-  [ -e "$dir/stopped.flag" ] || die "$site is not stopped: stop it first with python3 scripts/wp_sites.py stop $site (it takes the final backup this tool archives)"
+  [ -e "$dir/stopped.flag" ] || die "$site is not stopped: stop it first with wp-ctl ensure-state site=$site state=stopped (it takes the final backup this tool archives)"
   for f in "$WP_FREEZE" "$dir/freeze"; do [ ! -e "$f" ] || die "$site is frozen ($f exists): a freeze means leave it exactly as it is"; done
   [ -z "$(docker ps -q --filter "name=^wp_${site//-/_}_" </dev/null)" ] || die "a container of $site is running although it is marked stopped; stop it properly first"
   newest=$(find "$bk" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -printf '%f\n' | LC_ALL=C sort | tail -n 1)
   [ -n "$newest" ] || die "there is no snapshot of $site under $bk"
   snap=$bk/$newest
-  grep -qx 'tag=final' "$snap/MANIFEST" 2>/dev/null || die "the newest snapshot of $site ($newest) is not a final one: stop the site with python3 scripts/wp_sites.py stop $site, which takes the final backup, then delete it"
+  grep -qx 'tag=final' "$snap/MANIFEST" 2>/dev/null || die "the newest snapshot of $site ($newest) is not a final one: stop the site with wp-ctl ensure-state site=$site state=stopped, which takes the final backup, then delete it"
   [ -f "$snap/db.sql.gz" ] && [ -d "$snap/files" ] || die "$snap is not a complete snapshot"
   gzip -t "$snap/db.sql.gz" || die "the final snapshot's dump fails gzip's integrity check"
   case "$(gzip -dc "$snap/db.sql.gz" | tail -n 5)" in *"-- Dump completed"*) ;; *) die "the final snapshot's dump has no completion marker (truncated?)" ;; esac
@@ -159,6 +157,6 @@ for d in "$dir" "$bk"; do
   fi
 done
 log "removed. The archive $final stays until $(sed -n 's/^expires=//p' "$final/MANIFEST")"
-command -v ntfy-notify >/dev/null && ntfy-notify "$TOPIC" "$HOST_NAME site $site was deleted; its last backup is archived in $final until $(sed -n 's/^expires=//p' "$final/MANIFEST"). Set it to state: closed in the repo (python3 scripts/wp_sites.py delete does)" || true
+command -v ntfy-notify >/dev/null && ntfy-notify "$TOPIC" "$HOST_NAME site $site was deleted; its last backup is archived in $final until $(sed -n 's/^expires=//p' "$final/MANIFEST"). Its tombstone is in the registry; nothing needs to change in the repo" || true
 echo "== $site deleted. Archive: $final (until $(sed -n 's/^expires=//p' "$final/MANIFEST"))" >&2
 {% endraw %}

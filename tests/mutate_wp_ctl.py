@@ -100,7 +100,6 @@ M = [
  ("a delete needs only one typing", W, '"confirm_again": Arg("text", rx=NAME_RE, same="site")}', '"confirm_again": Arg("text", required=False, rx=NAME_RE, same="site")}'),
  ("the second typing is not compared", W, '"confirm_again": Arg("text", rx=NAME_RE, same="site")}', '"confirm_again": Arg("text", rx=NAME_RE)}'),
  ("create skips the name check", W, 'check_new_name(call.ctl.cfg, a["name"])\n    return call.job', 'return call.job'),
- ("apply works on a site with no record", W, 'def h_apply(call):\n    registered(call)', 'def h_apply(call):\n    pass'),
  ("install password not scrubbed", W, 'tty=[pw, pw], scrub=(pw,))', 'tty=[pw, pw])'),
  ("install asks the tool for the password once", W, '"--email=" + a["email"]], tty=[pw, pw]', '"--email=" + a["email"]], tty=[pw]'),
  ("install holds no lock", W, 'h_install, lock=True)', 'h_install, lock=False)'),
@@ -121,8 +120,6 @@ M = [
  ("set may change the state and the port", W, '"label", "note")   # = wp_site_model.EDITABLE', '"label", "note", "state", "port")   # = wp_site_model.EDITABLE'),
  ("a note is cut at the general limit", W, 'len(value) > (self.limit or MAX_TEXT)', 'len(value) > MAX_TEXT'),
  ("a site can be closed by state", W, 'STATES = ("hold", "live", "stopped")', 'STATES = ("hold", "live", "stopped", "closed")'),
- ("set works on a site with no record", W, '    registered(call)\n    a = call.args\n    return call.job([call.ctl.tool("wp-site-provision"), "set"', '    a = call.args\n    return call.job([call.ctl.tool("wp-site-provision"), "set"'),
- ("ensure-state works on a site with no record", W, '    registered(call)\n    return call.job([call.ctl.tool("wp-site-provision"), "state"', '    return call.job([call.ctl.tool("wp-site-provision"), "state"'),
  ("set passes the value without its key", W, '"%s=%s" % (a["key"], a["value"])', 'a["value"]'),
  ("ensure-state passes the site and state swapped", W, '"state", call.args["site"], call.args["state"]]', '"state", call.args["state"], call.args["site"]]'),
  ("a stopped site may go straight to live", "scripts/wp_site_model.py", '"stopped": ("hold",)', '"stopped": ("hold", "live")', "tests/test_wp_site_model.py"),
@@ -201,8 +198,11 @@ M = [
  ('the delete accepts any file as a dated tombstone', 'templates/wp/wp_site_delete.sh.j2', '$b =~ ^$site\\.[0-9]{8}T[0-9]{6}Z\\.json$', 'true', 'tests/test_wp_delete.py'),
  ('the delete ignores the unstamped tombstone', 'templates/wp/wp_site_delete.sh.j2', '[[ $b == "$site.json" || ', '[[ ', 'tests/test_wp_delete.py'),
  ('the delete follows a tombstone link', 'templates/wp/wp_site_delete.sh.j2', ' && [ ! -L "$f" ]; then return 0; fi', '; then return 0; fi', 'tests/test_wp_delete.py'),
- ('wrapper: closed sites become sites', 'templates/wp/wp_ctl.py.j2', "(s.state | default(wp_site_defaults.state)) != 'closed' %}", "(s.state | default(wp_site_defaults.state)) == 'closed' %}"),
  ('close writes no tombstone', 'scripts/wp_site_provision.py', '                tomb = self.registry.write_tombstone(rec, datetime', '                tomb = None; (rec, datetime', 'tests/test_wp_site_provision.py'),
+ ('a directory without a record is a site', 'scripts/wp_ctl.py', 'and os.path.isfile(os.path.join(e.path, "site.json")):', 'and True:', 'tests/test_wp_ctl.py'),
+ ('a linked directory is followed', 'scripts/wp_ctl.py', 'if e.is_dir(follow_symlinks=False) and NAME_RE.fullmatch(e.name)', 'if e.is_dir() and NAME_RE.fullmatch(e.name)', 'tests/test_wp_ctl.py'),
+ ("the dispatcher's wrapper bakes a site list in again", 'templates/wp/wp_ctl.py.j2', '    "reserved_names": [', '    "sites": ["wptest"],\n    "reserved_names": [', 'tests/test_wp_ctl.py'),
+ ("the fit rule counts a closed site's name as taken", 'scripts/wp_site_model.py', 'len({s["name"] for s in exist}) == len(exist),', 'len(set(names)) == n,', 'tests/test_wp_site_model.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

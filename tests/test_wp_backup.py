@@ -471,7 +471,7 @@ class Backup(Base):
     def test_a_stopped_site_is_refused_and_touches_nothing(self):
         (self.site / "stopped.flag").write_text("")
         r = self.backup("20261024T201500Z")
-        self.assertEqual(r.returncode, 2); self.assertIn("is stopped", r.stderr); self.assertIn("wp_sites.py start wptest", r.stderr)
+        self.assertEqual(r.returncode, 2); self.assertIn("is stopped", r.stderr); self.assertIn("wp-ctl ensure-state site=wptest state=hold", r.stderr)
         self.assertEqual(self.log("docker.calls"), ""); self.assertEqual(self.snapshots(), [])
 
     def test_retention_with_few_snapshots_deletes_nothing(self):
@@ -519,13 +519,7 @@ class Backup(Base):
 
     # --- how it is scheduled
     def test_every_site_is_backed_up_every_night_hold_or_live_and_a_failure_alerts(self):
-        tasks = yaml.safe_load((ROOT / "tasks/wp_site_one_common.yml").read_text())
-        t = [x for x in tasks if "wp-backup@" in str(x.get("ansible.builtin.systemd", {}).get("name", ""))][0]["ansible.builtin.systemd"]
-        import jinja2
-        e = jinja2.Environment()
-        for state in ("hold", "live"):
-            self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": state}), e.from_string(t["state"]).render(wp_s={"state": state})), ("True", "started"), state)
-        self.assertEqual((e.from_string(t["enabled"]).render(wp_s={"state": "stopped"}), e.from_string(t["state"]).render(wp_s={"state": "stopped"})), ("False", "stopped"), "no database to dump while stopped")
+        # which state has the timer on (hold and live yes, stopped no) is the provisioning tool's: tests/test_wp_site_provision.py (test_stopped, test_a_timer_that_is_enabled_but_not_running_is_started)
         svc = self.env_j.get_template("wp_backup.service.j2").render(**self.ctx)
         self.assertIn("OnFailure=wp-job-failed@%N.service", svc)
         self.assertIn("ExecStart=%s/wp-site-backup %%i" % self.ctx["wp_tools_bin"], svc)

@@ -50,7 +50,7 @@ class Syntax(unittest.TestCase):
         for m in re.finditer(r"<<'PY'\n(.*?)\nPY\n", TEXT, re.S):
             compile(m.group(1), "embedded", "exec")
             found += 1
-        self.assertGreaterEqual(found, 2)
+        self.assertGreaterEqual(found, 1)
 
     def test_a_snippet_that_asks_for_a_variable_has_it_in_the_env_line(self):
         env_line = re.search(r'sudo -n env ([^"]*) bash -s', TEXT).group(1)
@@ -75,31 +75,17 @@ class Syntax(unittest.TestCase):
                                  "the password may only be read, compared, counted, piped and unset: " + line)
         self.assertIn("read -r -s", TEXT, "the password is read hidden")
 
-    def test_the_old_way_delete_keeps_its_two_typed_names_and_the_parity_step_comes_before_the_create(self):
-        delete_line = [l for l in TEXT.splitlines() if "wp_sites.py delete" in l and not l.lstrip().startswith("#")][0]
-        self.assertNotIn("--yes", delete_line)
-        self.assertLess(TEXT.index('say "1. parity'), TEXT.index('say "2. create'))
-        self.assertLess(TEXT.index("wp_sites.py delete"), TEXT.index('say "2. create'))
-        self.assertLess(TEXT.index("--tags wp_tools,wp_ctl"), TEXT.index('say "2. create'), "the tool's list of the repo's sites is refreshed before a site is given a port")
+    def test_the_rehearsal_has_no_old_way_step_and_never_commits_or_edits_the_repo(self):
+        code = "\n".join(l for l in TEXT.splitlines() if not l.lstrip().startswith("#"))
+        for word in ("wp_sites.py", "git commit", "git add", "--commit", "parity", "PARITY", "sed -i", "ansible-playbook"):
+            self.assertNotIn(word, code, word)
+        self.assertLess(TEXT.index('say "1. create'), TEXT.index('say "2. refusals'))
+        self.assertLess(TEXT.index('say "2. refusals'), TEXT.index('say "3. install'))
+        self.assertLess(TEXT.index('say "3. install'), TEXT.index('say "4. apply'))
 
     def test_the_preflight_looks_for_everything_rehearsal7_could_have_left(self):
         for what in ("$SITES/rehearsal7", "wp-rehearsal7.service", "wp_site_rehearsal7.conf", '$BDIR/rehearsal7', "name=^wp_rehearsal7_"):
             self.assertIn(what, TEXT)
-
-
-class Wrapper(unittest.TestCase):
-    def test_the_check_that_the_wrapper_names_a_site_matches_the_real_rendered_wrapper(self):
-        """The wrapper keeps its site list as JSON inside a Python string, so a name is written name\\": \\"x. The check must find a closed site there and not find a stranger."""
-        import test_wp_site_provision_wrapper as w
-        v, text = w.render()
-        line = next(l for l in TEXT.splitlines() if "grep -c" in l and "wp-site-provision" in l and not l.lstrip().startswith("#"))
-        cmd = re.search(r'ssh dellwp "sudo -n (.*?)" </dev/null', line).group(1)
-        closed = next(s["name"] for s in v["real_wp_sites"] if s.get("state") == "closed")
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "wp-site-provision").write_text(text)
-            for name, want in ((closed, True), ("nosuchsite", False)):
-                out = subprocess.run(["bash", "-c", cmd.replace("$PARITY", name).replace("$BIN", d)], capture_output=True, text=True).stdout.strip()
-                self.assertEqual(int(out) > 0, want, "%s: grep said %s" % (name, out))
 
 
 class Harness(unittest.TestCase):
@@ -120,7 +106,6 @@ class Harness(unittest.TestCase):
 echo "ssh $*" >> "%(log)s"
 in=$(cat 2>/dev/null || true)
 [ -z "$in" ] || printf 'stdin of [%%s]: %%s\n' "$*" "$in" >> "%(stdins)s"
-[ -z "${SSH_PARITY_RC:-}" ] || case "$in" in *" render "*) exit $SSH_PARITY_RC ;; esac
 case "$*" in
   *"bash -s"*) exit ${SSH_BASH_RC:-0} ;;
   *"sudo -n true"*) exit ${SSH_SUDO_RC:-0} ;;
@@ -135,21 +120,9 @@ case "$*" in
   *"job-log"*) echo '{"ok": true, "data": "the log of the job"}'; exit 0 ;;
   *"wp-ctl install"*) echo '{"ok": true, "rc": 0, "out": ""}'; exit ${SSH_INSTALL_RC:-0} ;;
   *"base64 -d"*) echo "journal: ${SSH_JOURNAL_HITS:-0}"; [ -z "${SSH_FILE_HIT:-}" ] || echo "file: $SSH_FILE_HIT"; exit 0 ;;
-  *"grep -c"*) echo 1; exit 0 ;;
 esac
 exit ${SSH_RC:-0}
 ''' % {"log": self.log, "stdins": self.stdins, "repo": self.repo, "job": JOB, "jobrc": "${SSH_JOB_RC:-0}"})
-        # the old-way tool: records its arguments; `create` also puts the site into wp_sites as the real one does
-        (self.repo / "scripts/wp_sites.py").write_text('''#!/usr/bin/env python3
-import sys
-open(%r, 'a').write('wp_sites.py ' + ' '.join(sys.argv[1:]) + '\\n')
-if sys.argv[1] == 'create':
-    p = %r
-    t = open(p).read()
-    open(p, 'w').write(t.replace('wp_sites:\\n', 'wp_sites:\\n  - name: ' + sys.argv[3] + '\\n    port: 9150\\n    quota_id: 1150\\n    state: hold\\n    update_policy: notify\\n', 1))
-sys.exit(int(open(%r).read()) if sys.argv[1] in open(%r).read().split() else 0)
-''' % (str(self.log), str(self.repo / "host_vars/dellwp/vars.yml"), str(self.repo / "fail_rc"), str(self.repo / "fail_rc")))
-        (self.repo / "fail_rc").write_text("0")
         for p in (self.repo / "bin").iterdir():
             p.chmod(0o755)
         for cmd in (["init", "-q", "-b", "wp-test"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
@@ -172,32 +145,10 @@ sys.exit(int(open(%r).read()) if sys.argv[1] in open(%r).read().split() else 0)
 
 class Arguments(Harness):
     def test_bad_arguments_are_refused_before_anything_runs(self):
-        for args, needle in ((("--bogus",), "unknown option"), (("--site", "Bad Name"), "a site name is"), (("--site", "a"), "a site name is"), (("--parity-site", ""), "a site name is"),
-                             (("--site", "same", "--parity-site", "same"), "must differ")):
+        for args, needle in ((("--bogus",), "unknown option"), (("--site", "Bad Name"), "a site name is"), (("--site", "a"), "a site name is"), (("--parity-site", "x"), "unknown option")):
             r = self.run_script(*args, "--yes")
             self.assertEqual(r.returncode, 2, args)
             self.assertIn(needle, r.stderr, args)
-        self.assertEqual(self.calls(), [])
-
-    def test_the_parity_step_will_not_run_on_main_or_over_uncommitted_changes_but_the_rest_may(self):
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "-b", "main"], check=True, capture_output=True)
-        r = self.run_script("--yes")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("you are on main", r.stderr)
-        self.assertEqual(self.calls(), [])
-        r = self.run_script("--yes", "--skip-parity", stdin="%s\n%s\n" % (CANARY, CANARY))
-        self.assertEqual(r.returncode, 0, r.stdout[-800:])
-        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "wp-test"], check=True, capture_output=True)
-        (self.repo / "host_vars/dellwp/vars.yml").write_text((self.repo / "host_vars/dellwp/vars.yml").read_text() + "# x\n")
-        r = self.run_script("--yes")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("uncommitted changes", r.stderr)
-
-    def test_a_name_already_in_wp_sites_is_refused(self):
-        for args in (("--site", "wptest"), ("--parity-site", "wptest")):
-            r = self.run_script(*args, "--yes")
-            self.assertEqual(r.returncode, 2, args)
-            self.assertIn("already in wp_sites", r.stderr)
         self.assertEqual(self.calls(), [])
 
     def test_not_confirming_does_nothing(self):
@@ -210,31 +161,37 @@ class Arguments(Harness):
         r = self.run_script("--yes", env=dict(self.env, SSH_BASH_RC="3"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("the preflight found problems", r.stdout)
-        self.assertFalse([c for c in self.calls() if c.startswith("wp_sites.py") or "wp-ctl create" in c])
+        self.assertFalse([c for c in self.calls() if "wp-ctl create" in c])
 
     def test_sudo_that_does_not_work_and_no_ssh_are_their_own_stops(self):
         r = self.run_script("--yes", env=dict(self.env, SSH_SUDO_RC="1"))
         self.assertIn("sudo -n does not work", r.stdout)
         r = self.run_script("--yes", env=dict(self.env, SSH_RC="255"))
         self.assertIn("cannot ssh to dellwp", r.stdout)
-        self.assertFalse([c for c in self.calls() if c.startswith("wp_sites.py") or "wp-ctl create" in c])
+        self.assertFalse([c for c in self.calls() if "wp-ctl create" in c])
+
+    def test_it_works_on_a_branch_or_on_main_and_over_uncommitted_changes_because_it_changes_nothing_in_the_repo(self):
+        (self.repo / "host_vars/dellwp/vars.yml").write_text((self.repo / "host_vars/dellwp/vars.yml").read_text() + "# x\n")
+        r = self.run_script("--yes", stdin="%s\n%s\n" % (CANARY, CANARY))
+        self.assertEqual(r.returncode, 0, r.stdout[-800:])
+        status = subprocess.run(["git", "-C", str(self.repo), "status", "--short", "--untracked-files=no"], capture_output=True, text=True).stdout
+        self.assertEqual(status.split(), ["M", "host_vars/dellwp/vars.yml"], "only the change the test made")
 
 
 class Flow(Harness):
     def go(self, *args, stdin=None, env=None):
         return self.run_script("--yes", *args, stdin=stdin if stdin is not None else "%s\n%s\n" % (CANARY, CANARY), env=env)
 
-    def test_steps_two_to_five_make_exactly_these_requests_in_this_order(self):
-        r = self.go("--skip-parity")
+    def test_the_four_steps_make_exactly_these_requests_in_this_order(self):
+        r = self.go()
         self.assertEqual(r.returncode, 0, r.stdout[-1500:])
         self.assertEqual(self.ctl(), ["create name=provtest1 label=Provtest req=prov-provtest1", "create name=provtest1 label=Provtest req=prov-provtest1", "create name=provtest1",
                                       "create name=hub", "create name=Bad_Name", "apply site=nosuchprovtest1", "create name=provtest1 label=x set=1",
                                       "install site=provtest1 title=Provtest user=owner email=owner@example.org", "apply site=provtest1"])
         self.assertIn("All checks passed.", r.stdout)
-        self.assertFalse([c for c in self.calls() if c.startswith("wp_sites.py")], "no old-way call without the parity step")
 
     def test_the_password_is_asked_hidden_and_reaches_only_the_install_request_and_the_leak_check_on_their_standard_input(self):
-        r = self.go("--skip-parity")
+        r = self.go()
         self.assertNotIn(CANARY, r.stdout + r.stderr, "never shown")
         self.assertIn("password: %d characters" % len(CANARY), r.stdout)
         self.assertEqual([c for c in self.calls() if CANARY in c], [], "in no argument list")
@@ -245,55 +202,28 @@ class Flow(Harness):
 
     def test_a_password_that_differs_or_is_short_stops_before_the_install(self):
         for stdin in ("%s\nother-%s\n" % (CANARY, CANARY), "short\nshort\n"):
-            r = self.go("--skip-parity", stdin=stdin)
+            r = self.go(stdin=stdin)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("differ or are shorter", r.stdout)
         self.assertFalse([c for c in self.ctl() if c.startswith("install")])
 
     def test_a_password_found_in_a_file_or_the_journal_is_a_failure(self):
         for env in (dict(SSH_FILE_HIT="/var/lib/wp-ctl/jobs/x/log"), dict(SSH_JOURNAL_HITS="2")):
-            r = self.go("--skip-parity", env=dict(self.env, **env))
+            r = self.go(env=dict(self.env, **env))
             self.assertNotEqual(r.returncode, 0, env)
             self.assertIn("FAIL: the password is in no file", r.stdout)
 
     def test_a_failed_install_stops_the_run_and_says_nothing_of_the_password(self):
-        r = self.go("--skip-parity", env=dict(self.env, SSH_INSTALL_RC="1"))
+        r = self.go(env=dict(self.env, SSH_INSTALL_RC="1"))
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn(CANARY, r.stdout + r.stderr)
         self.assertNotIn("apply site=provtest1", self.ctl()[-1:])
 
     def test_a_create_job_that_fails_stops_the_run_before_anything_else(self):
-        r = self.go("--skip-parity", env=dict(self.env, SSH_JOB_RC="1"))
+        r = self.go(env=dict(self.env, SSH_JOB_RC="1"))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("the create job failed", r.stdout)
         self.assertEqual(self.ctl(), ["create name=provtest1 label=Provtest req=prov-provtest1"])
-
-    def test_the_parity_step_builds_the_record_from_the_wp_sites_entry_then_deletes_the_old_way_site_and_waits_for_the_play(self):
-        r = self.go("--site", "provtest1", stdin="y\n%s\n%s\n" % (CANARY, CANARY))
-        self.assertEqual(r.returncode, 0, r.stdout[-2000:])
-        old = [c for c in self.calls() if c.startswith("wp_sites.py")]
-        self.assertEqual(old, ["wp_sites.py create --name parity1 --no-install --policy notify --yes --commit", "wp_sites.py stop parity1 --yes --commit", "wp_sites.py delete parity1 --commit"])
-        record_call = [c for c in self.calls() if "write_site" in c]
-        self.assertEqual(len(record_call), 1)
-        self.assertIn('"name": "parity1"', record_call[0])
-        self.assertIn('"port": 9150', record_call[0])
-        self.assertIn('"quota_id": 1150', record_call[0])
-        self.assertIn("ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml --tags wp_tools,wp_ctl", r.stdout)
-        order = [i for i, c in enumerate(self.calls()) if c.startswith("wp_sites.py delete")][0], [i for i, c in enumerate(self.calls()) if "wp-ctl create name=provtest1 label" in c][0]
-        self.assertLess(*order)
-
-    def test_a_play_that_was_not_re_run_stops_before_the_create(self):
-        r = self.go("--site", "provtest1", stdin="n\n")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("re-run the tools play", r.stdout)
-        self.assertFalse([c for c in self.ctl() if c.startswith("create")])
-
-    def test_a_parity_failure_on_the_vm_stops_before_the_old_way_site_is_deleted(self):
-        r = self.go("--site", "provtest1", env=dict(self.env, SSH_PARITY_RC="1"))
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("the tool does not see the play", r.stdout)
-        self.assertFalse([c for c in self.calls() if c.startswith("wp_sites.py stop") or c.startswith("wp_sites.py delete")])
-
 
 if __name__ == "__main__":
     unittest.main()

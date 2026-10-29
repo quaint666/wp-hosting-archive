@@ -2,7 +2,7 @@
 """Render one WordPress site's files on dellwp from the templates the Ansible play also uses: .env, wp-config.php, php.ini, fpm-pool.conf, compose.yml, the systemd unit and the nginx vhost.
 The templates (templates/wp/site_*.j2 and templates/compose_stack.service.j2) stay the single source; this module is the Jinja environment of the play without Ansible: the same trim and newline
 settings, and the two Ansible-only filters the site templates use (hash, difference), written to give the same text. The platform values (images, uids, paths, limits) come from the caller
-as one dict, the master secret from a root-only file; the site's secrets derive from the master secret exactly as tasks/wp_site_one_common.yml derives them.
+as one dict, the master secret from a root-only file; the site's secrets derive from the master secret exactly as the Ansible tasks this replaced derived them (tasks/wp_site_one_common.yml, gone; git has it), so a site made either way has the same passwords.
 
 It returns the files with their owner, group and mode and writes nothing: the provisioning tool (a later batch) decides when and in which order they reach the disk.
 Needs python3-jinja2 (3.1.6 on dellwp). Tests: tests/test_wp_site_renderer.py renders every site shape through this and through the play's offline test helper and demands identical text."""

@@ -72,6 +72,7 @@ class Base(unittest.TestCase):
             d.mkdir()
         for site in ("wptest", "held"):
             (self.data / site).mkdir()
+            (self.data / site / "site.json").write_text("{}")          # what makes a directory a site: a registry record
         self.shim = self.tmp / "seen"
         for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-ctl"):
             self.script(name, TOOL)
@@ -82,7 +83,7 @@ class Base(unittest.TestCase):
         self.audit_file = self.tmp / "log" / "audit.jsonl"
         self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tools_bin": str(self.bin), "path": "/usr/bin:/bin",
                     "logger": str(self.bin / "logger"), "systemd_run": str(self.bin / "systemd-run"), "panel_user": "wpctl", "job_keep_days": 14, "max_request_bytes": 65536,
-                    "limits": LIMITS, "reserved_names": ["hub", "mail", "bloomy"], "sites": ["wptest", "held"]}
+                    "limits": LIMITS, "reserved_names": ["hub", "mail", "bloomy"]}
         self.env = {"SUDO_USER": "wpctl", "LEAK_ME": "must-not-reach-the-tools", "SUDO_COMMAND": "/usr/local/sbin/wp-ctl"}
 
     def script(self, name, text):
@@ -808,7 +809,7 @@ class Reads(Base):
 
     def test_show_adds_the_registry_record_and_never_guesses_a_broken_one(self):
         rc, reply = self.call({"verb": "show", "site": "wptest"})
-        self.assertEqual((reply["status"]["deployed"], reply["registry"]), ("live", None))
+        self.assertEqual((reply["status"]["deployed"], reply["registry"]), ("live", {}))
         (self.data / "wptest" / "site.json").write_text('{"label": "Friend"}')
         self.assertEqual(self.call({"verb": "show", "site": "wptest"})[1]["registry"], {"label": "Friend"})
         (self.data / "wptest" / "site.json").write_text("{broken")
@@ -830,7 +831,7 @@ class Reads(Base):
         (self.data / "Bad_Name").mkdir()
         (self.data / "Bad_Name" / "site.json").write_text("{}")
         self.assertNotIn("Bad_Name", wp_ctl.known_sites(self.cfg))
-        self.assertEqual(wp_ctl.known_sites(dict(self.cfg, data_dir=str(self.tmp / "missing"))), {"wptest", "held"})
+        self.assertEqual(wp_ctl.known_sites(dict(self.cfg, data_dir=str(self.tmp / "missing"))), set(), "no sites directory: no sites")
 
     def test_check_name_applies_every_rule_of_a_new_name(self):
         (self.data / "reg").mkdir()
@@ -906,8 +907,7 @@ class Provisioning(Base):
             self.assertEqual((rc, reply["ok"]), (0, True), label)
 
     def test_apply_needs_a_registry_record_and_an_existing_site(self):
-        rc, reply = self.call({"verb": "apply", "site": "wptest"})
-        self.assertEqual((rc, reply["error"]), (2, "not_registered"), "a site the play still builds")
+        self.assertNotIn("not_registered", (ROOT / "scripts/wp_ctl.py").read_text(), "a site is known only if it has a record, so there is no site without one to refuse")
         rc, reply = self.call({"verb": "apply", "site": "nosuch"})
         self.assertEqual((rc, reply["error"]), (2, "unknown_site"))
         link = self.tmp / "elsewhere"
@@ -955,10 +955,10 @@ class Provisioning(Base):
                                  ("the quota id", dict(s, key="quota_id", value="5"), "bad_value"), ("a hidden key", dict(s, key="fpm_max_children", value="5"), "bad_value"), ("no key", dict(s, value="5"), "missing_argument"),
                                  ("no value", dict(s, key="note"), "missing_argument"), ("a value with a control character", dict(s, key="note", value="a\nb"), "bad_value"),
                                  ("a note of 501 characters", dict(s, key="note", value="x" * 501), "bad_value"), ("a value that is a list", dict(s, key="note", value=["x"]), "bad_type"), ("a number where text is wanted (the page sends text; the command line coerces)", dict(s, key="php_mem_mb", value=640), "bad_type"),
-                                 ("two keys at once", dict(s, key="note", value="x", upload_mb=5), "unknown_argument"), ("a site the play builds", dict(s, site="wptest", key="note", value="x"), "not_registered"),
+                                 ("two keys at once", dict(s, key="note", value="x", upload_mb=5), "unknown_argument"),
                                  ("a site that does not exist", dict(s, site="nosuch", key="note", value="x"), "unknown_site"), ("a state that does not exist", dict(e, state="paused"), "bad_value"),
                                  ("closing by state", dict(e, state="closed"), "bad_value"), ("no state", e, "missing_argument"), ("a state in capitals", dict(e, state="HOLD"), "bad_value"),
-                                 ("a site the play builds", dict(e, site="wptest", state="hold"), "not_registered"), ("a site that does not exist", dict(e, site="nosuch", state="hold"), "unknown_site")):
+                                 ("a site that does not exist", dict(e, site="nosuch", state="hold"), "unknown_site")):
             with self.subTest(label):
                 rc, reply = self.call(req)
                 self.assertEqual((rc, reply["error"]), (2, code), reply)
@@ -1104,7 +1104,7 @@ class Wrapper(Base):
         exec(compile(text.replace("sys.exit(wp_ctl.main(CONFIG, sys.argv[1:]))", "RESULT = CONFIG").replace('sys.path.insert(0, "%s")' % v["wp_tools_lib"], 'sys.path.insert(0, %r)' % str(ROOT / "scripts")),
                      "wp_ctl.py.j2", "exec"), ns)
         cfg = ns["RESULT"]
-        self.assertEqual(cfg["sites"], ["alive", "held"])
+        self.assertNotIn("sites", cfg, "the sites are the registry's: no list is baked in")
         self.assertNotIn("closed_sites", cfg, "a closed site's name may be used again: the dispatcher does not keep the list")
         self.assertEqual(cfg["reserved_names"], v["wp_reserved_names"])
         for key, var in (("state_dir", "wp_ctl_state_dir"), ("run_dir", "wp_ctl_run_dir"), ("audit_file", "wp_ctl_audit_file"), ("tools_bin", "wp_tools_bin"), ("panel_user", "wp_ctl_user"), ("job_keep_days", "wp_ctl_job_keep_days"),
@@ -1113,7 +1113,7 @@ class Wrapper(Base):
         wp_ctl.check_limits(cfg, wp_ctl.VERBS)       # the repo's own table passes the dispatcher's check: every verb named exists and every job and the upload have a timeout of their own
         self.assertEqual(cfg["data_dir"], v["wp_data_mount"] + "/sites")
         needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tools_bin", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
-                  "reserved_names", "sites"}
+                  "reserved_names"}
         self.assertEqual(set(cfg), needed, "every key the dispatcher reads, and no stray one")
 
     def test_it_runs_as_a_program_and_refuses_a_hostile_request_with_status_2(self):
@@ -1236,18 +1236,17 @@ class Access(unittest.TestCase):
             self.assertIn(key, v)
         text = (ROOT / "host_vars/dellwp/vars.yml").read_text()
         self.assertEqual(len(re.findall(r"^wp_reserved_names:", text, re.M)), 1, "one variable in one place")
-        self.assertIn("wp_reserved_names", (ROOT / "tasks/wp_sites_common.yml").read_text())
+        self.assertIn("wp_reserved_names", (ROOT / "templates/wp/wp_ctl.py.j2").read_text(), "the dispatcher's wrapper carries the one list")
         self.assertNotIn("wp_ctl_inline_timeout_s", v, "the flat timeouts were replaced by the limits table; two places would disagree")
 
 
 class Registry(unittest.TestCase):
-    """require_site in the rendered tools library: a site exists if the play declared it or it has a registry record."""
+    """require_site in the rendered tools library: a site exists if it has a registry record."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wpctl-lib-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         v = base_vars()
-        v["wp_sites"] = [{"name": "alive"}, {"name": "gone", "state": "closed"}]
         text = render_env().get_template("wp/wp_tools_common.sh.j2").render(**v).replace("readonly WP_DATA='%s/sites'" % v["wp_data_mount"], "readonly WP_DATA='%s'" % (self.tmp / "sites"))
         self.assertIn(str(self.tmp / "sites"), text)
         self.lib = self.tmp / "common.sh"
@@ -1260,8 +1259,6 @@ class Registry(unittest.TestCase):
 
     def test_a_record_and_nothing_else(self):
         sites = self.tmp / "sites"
-        self.assertFalse(self.known("alive")[0], "a site only the play declares is not a site: the registry is the one source")
-        self.assertFalse(self.known("gone")[0], "a closed site is not a site")
         self.assertFalse(self.known("fresh")[0])
         (sites / "fresh").mkdir()
         self.assertFalse(self.known("fresh")[0], "a directory alone is not a site")

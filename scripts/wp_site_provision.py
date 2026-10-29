@@ -9,7 +9,7 @@
     wp-site-provision close  <name>                         leave the site's tombstone and remove its record (wp-site-delete does this before it removes the site's files; safe to repeat)
     wp-site-provision render <name> [--diff]                compare what the templates give today with the files on the VM (read-only; a secret file is compared by hash, never shown)
 
-The logic of tasks/wp_site_one_common.yml, step for step and in its order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
+The steps of the Ansible tasks this replaced (tasks/wp_site_one_common.yml, gone; git has it), in their order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
 the image once, the configuration files, the images, the systemd unit, start / restart / php reload as the play decides, the nginx vhost (validated; the previous one is put back on a failure), the
 probe through nginx and php, and the three timers. The rules and the record are scripts/wp_site_model.py, the files come from scripts/wp_site_renderer.py. The record holds only what differs from
 wp_site_defaults (the same convention as an entry of wp_sites), plus the name, the port, the quota id, the state and when it was made. Design: docs/handoff_wp_control_temp.md.

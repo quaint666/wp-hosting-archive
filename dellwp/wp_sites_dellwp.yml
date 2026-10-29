@@ -1,9 +1,10 @@
 ---
 # dellwp/wp_sites_dellwp.yml
-# The WordPress sites on dellwp: for each entry of wp_sites (host_vars/dellwp/vars.yml) a directory with a project quota, a MariaDB and a php-fpm container under a
-# systemd unit, and an nginx vhost. The tasks and the reasons are in tasks/wp_sites_common.yml and tasks/wp_site_one_common.yml; the pins are vars/wp.yml. Run
-# dellwp/wp_data_disk_dellwp.yml and dellwp/nginx_base_dellwp.yml first. A new site starts on hold (only a local curl reaches it); state: live opens it.
-# Tags: wp_tools = the tools, the Python modules, the job units, the backup check, the restore drill and the archive purge (what a fix to a script or a template needs: --tags wp_tools); wp_sites = the site engine, the disk check and the status tool (they need the merged site list). No tag = both.
+# What the WordPress sites on dellwp need around them, and the tools that make and run them. A site itself is NOT built here any more: it is a record in the registry (/srv/wp/sites/<name>/site.json)
+# made, changed and closed by wp-ctl over wp-site-provision (tasks/wp_tools_common.yml installs them; the pins are vars/wp.yml). This play installs the tools and the dispatcher's access, the nginx base
+# check, the quota projects of the archive and the intake, the must-use plugins, the disk check and the status tool (tasks/wp_sites_common.yml). Run dellwp/wp_data_disk_dellwp.yml and
+# dellwp/nginx_base_dellwp.yml first. A new site starts on hold (only a local curl reaches it); wp-ctl ensure-state state=live opens it.
+# Tags: wp_tools = the tools, the Python modules, the job units, the backup check, the restore drill and the archive purge (what a fix to a script or a template needs: --tags wp_tools); wp_sites = the shared pieces: nginx base check, archive and intake quotas, must-use plugins, the disk check and the status tool. No tag = both.
 # Secrets: the database password and the salts of every site derive from dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml) and the site's secret_rev.
 
 - name: Deploy the WordPress sites on dellwp

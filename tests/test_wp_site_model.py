@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""Offline tests of scripts/wp_site_model.py: the field rules, the registry on disk, the allocator and the fit check.
-
-Three things are tied to other code on purpose, because the same rule exists in more than one place until scripts/wp_sites.py retires: the fit check is run against the play's own assert
-(tasks/wp_sites_common.yml, evaluated with the helpers of tests/test_wp_sites_render.py) on hand-made lists and on a few hundred random ones, and must name the same broken rules; the field rules
-are run against scripts/wp_sites.py on a grid of values; the name pattern is compared with the other two copies. What they do not prove: that Ansible itself evaluates the assert as the offline
-helper does (the helper is a model of it), or anything on the host. Run: python3 -I tests/test_wp_site_model.py"""
+"""Offline tests of scripts/wp_site_model.py: the field rules, the registry on disk, the allocator and the fit check. The model is the one copy of these rules (the play and scripts/wp_sites.py that
+once had their own are gone); the name pattern is still compared with the dispatcher's, which has to agree with it. What they do not prove: anything on the host. Run: python3 -I tests/test_wp_site_model.py"""
 import json
 import os
 import random
@@ -19,7 +15,6 @@ sys.path.insert(0, str(HERE.parent / "scripts"))
 
 import wp_ctl  # noqa: E402
 import wp_site_model as m  # noqa: E402
-import wp_sites  # noqa: E402
 import test_wp_sites_render as play  # noqa: E402
 
 
@@ -38,21 +33,32 @@ def record(name="alpha", port=9101, quota_id=1001, state="hold", **more):
 
 
 class Fields(unittest.TestCase):
-    def test_the_ranges_are_those_of_the_script_this_replaces(self):
-        for key, spec in wp_sites.EDITABLE.items():
-            if key == "state":
-                continue
-            self.assertEqual(m.EDITABLE[key], spec, key)
-        self.assertEqual(set(m.EDITABLE) - set(wp_sites.EDITABLE), {"label", "note"})
+    def test_every_editable_field_has_a_rule_and_a_range_the_page_can_rely_on(self):
+        self.assertEqual(set(m.EDITABLE), {"update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note"})
+        self.assertNotIn("state", m.EDITABLE)
 
-    def test_the_same_verdict_as_the_script_on_a_grid_of_values(self):
-        grid = ["", " ", "0", "1", "7", "383", "384", "512", "4096", "4097", "100000", "100001", "999999", "1000000", "-1", "1.5", "abc", "true", "false", "True", "auto", "notify", "freeze",
-                "log", "send", "hold", " 512 ", "512\n", "٣٤٥"]
-        for key in wp_sites.EDITABLE:
-            if key == "state":
+    def test_the_boundaries_of_every_number_and_the_values_that_are_not_numbers(self):
+        for key, spec in m.EDITABLE.items():
+            if spec[0] != "int":
                 continue
-            for raw in grid:
-                self.assertEqual(m.validate_value(key, raw), wp_sites.validate_value(key, raw), (key, raw))
+            lo, hi = spec[1], spec[2]
+            for n, ok in ((lo - 1, False), (lo, True), (hi, True), (hi + 1, False)):
+                self.assertEqual(m.validate_value(key, str(n))[1] is None, ok, (key, n))
+            for raw in ("", " ", "-1", "1.5", "abc", "true", "٣٤٥", "1000000", "0x10"):
+                self.assertIsNotNone(m.validate_value(key, raw)[1], (key, raw))
+            self.assertEqual(m.validate_value(key, " %d " % lo), (lo, None), "surrounding spaces are ignored")
+            self.assertEqual(m.validate_value(key, "%d\n" % lo), (lo, None), "and a newline too")
+
+    def test_choices_and_switches_take_only_their_own_words(self):
+        for key, good, bad in (("update_policy", "freeze", "always"), ("mail_mode", "send", "smtp")):
+            self.assertEqual(m.validate_value(key, good), (good, None))
+            self.assertIsNotNone(m.validate_value(key, bad)[1])
+            self.assertIsNotNone(m.validate_value(key, "")[1])
+        for key in ("allow_xmlrpc", "allow_app_passwords", "allow_user_enum"):
+            self.assertEqual(m.validate_value(key, "true"), (True, None))
+            self.assertEqual(m.validate_value(key, "false"), (False, None))
+            for bad in ("yes", "1", "True", "FALSE", ""):
+                self.assertIsNotNone(m.validate_value(key, bad)[1], (key, bad))
 
     def test_a_typed_value_is_taken_as_a_string_would_be(self):
         self.assertEqual(m.validate_value("php_mem_mb", 512), (512, None))
@@ -91,7 +97,6 @@ STAMP = "20261028T120000Z"
 
 class Names(unittest.TestCase):
     def test_the_pattern_is_the_other_copies_pattern(self):
-        self.assertEqual(m.NAME_RE.pattern, wp_sites.NAME_RE.pattern)
         self.assertEqual(m.NAME_RE.pattern, wp_ctl.NAME_RE.pattern)
 
     def test_the_rules(self):
@@ -242,7 +247,7 @@ class RegistryTests(unittest.TestCase):
 
 class Allocation(unittest.TestCase):
     def test_a_first_site_gets_the_first_numbers(self):
-        self.assertEqual(m.next_numbers([]), (9101, 1001), "the same numbers scripts/wp_sites.py gives")
+        self.assertEqual(m.next_numbers([]), (9101, 1001), "the first numbers")
 
     def test_above_everything_ever_recorded(self):
         sites = [{"name": "a", "port": 9105, "quota_id": 1003}, {"name": "b", "port": 9102, "quota_id": 1009, "state": "closed"}]
@@ -339,25 +344,23 @@ class Transitions(unittest.TestCase):
 
 
 class Fit(unittest.TestCase):
-    """The fit check against the play's assert, expression by expression."""
+    """The fit rules of m.RULES, each named by its position, on hand-made lists. The limits are the real ones (vars/wp.yml, host_vars/dellwp/vars.yml and the VM's declared size)."""
 
     @classmethod
     def setUpClass(cls):
-        cls.v, cls.that, cls.defaults, cls.limits = play.base_vars(), play.assertions(), defaults(), limits()
+        cls.v, cls.defaults, cls.limits = play.base_vars(), defaults(), limits()
 
-    def ansible(self, sites):
-        bad = play.failing(self.that, self.v, sites)
-        return sorted(self.that.index(expr) for expr in bad)
+    def mine(self, sites, limits=None):
+        return m.broken_rules([m.merged(self.defaults, s) for s in sites], limits or self.limits)
 
-    def mine(self, sites):
-        return m.broken_rules([m.merged(self.defaults, s) for s in sites], self.limits)
+    def site(self, name, n, **more):
+        return {"name": name, "port": 9100 + n, "quota_id": 1000 + n, "state": "hold", "update_policy": "notify", **more}
 
-    def same(self, sites, msg=""):
-        expect = self.ansible(sites)
-        exist = [s["name"] for s in sites if s.get("state", "hold") != "closed"]
-        if 4 in expect and len(set(exist)) == len(exist):
-            expect.remove(4)             # the one deliberate difference: the play counts a closed site's name as taken, the model does not (a closed name may be used again). The play's copy goes with the play's per-site code
-        self.assertEqual(self.mine(sites), expect, msg or str(sites))
+    def test_there_is_a_rule_for_each_position_this_test_names(self):
+        self.assertEqual(len(m.RULES), 20)
+
+    def test_the_fixture_site_fits(self):
+        self.assertEqual(self.mine(self.v["wp_sites"]), [])
 
     def test_a_closed_name_does_not_break_the_uniqueness_rule_but_two_that_exist_do(self):
         a = self.site("alpha", 1)
@@ -366,65 +369,57 @@ class Fit(unittest.TestCase):
         self.assertEqual(self.mine([a, {**self.site("alpha", 2), "state": "stopped"}]), [4], "a stopped site still exists")
         self.assertEqual(self.mine([a, {**self.site("alpha", 2), "port": a["port"], "state": "closed"}]), [5], "ports are never shared, closed or not")
 
-    def test_there_is_a_rule_for_each_expression_in_the_same_order(self):
-        self.assertEqual(len(m.RULES), len(self.that))
-
-    def test_the_real_list_and_the_fixture_fit(self):
-        self.same(self.v["real_wp_sites"])
-        self.same(self.v["wp_sites"])
-        self.assertEqual(self.mine(self.v["wp_sites"]), [])
-
-    def site(self, name, n, **more):
-        return {"name": name, "port": 9100 + n, "quota_id": 1000 + n, "state": "hold", "update_policy": "notify", **more}
-
-    def test_hand_made_breakages_name_the_same_rule(self):
+    def test_hand_made_breakages_name_the_rule_they_break(self):
         a, b = self.site("alpha", 1), self.site("bravo", 2)
+        v = self.v
+        off = v["wp_backup_quota_offset"]
         cases = {
-            "fits": [a, b],
-            "duplicate name": [a, {**b, "name": "alpha"}],
-            "duplicate port": [a, {**b, "port": a["port"]}],
-            "duplicate quota": [a, {**b, "quota_id": a["quota_id"]}],
-            "low port": [{**a, "port": 80}],
-            "port 1024": [{**a, "port": 1024}],
-            "port 1025": [{**a, "port": 1025}],
-            "low quota": [{**a, "quota_id": 999}],
-            "quota 1000": [{**a, "quota_id": 1000}],
-            "reserved": [{**a, "name": "hub"}, b],
-            "vps-hub is reserved": [{**a, "name": "vps-hub"}],
-            "bad name": [{**a, "name": "A"}],
-            "one letter": [{**a, "name": "a"}],
-            "24 letters": [{**a, "name": "a" * 24}],
-            "25 letters": [{**a, "name": "a" * 25}],
-            "trailing hyphen": [{**a, "name": "abc-"}],
-            "bad state": [{**a, "state": "paused"}],
-            "bad policy": [{**a, "update_policy": "always"}],
-            "closed": [{**a, "state": "closed"}, b],
-            "too much memory": [a, {**b, "php_mem_mb": 99999}],
-            "stopped memory does not count": [a, {**b, "php_mem_mb": 99999, "state": "stopped"}],
-            "closed memory does not count": [a, {**b, "php_mem_mb": 99999, "state": "closed"}],
-            "too much disk": [a, {**b, "quota_mb": 999999}],
-            "stopped disk counts": [a, {**b, "quota_mb": 999999, "state": "stopped"}],
-            "closed disk does not count": [a, {**b, "quota_mb": 999999, "state": "closed"}],
-            "wide spread of ids": [a, {**b, "quota_id": 1000 + self.v["wp_backup_quota_offset"] + 5}],
-            "id at the scratch project": [{**a, "quota_id": self.v["wp_scratch_quota_id"] - self.v["wp_backup_quota_offset"]}],
-            "id just below it": [{**a, "quota_id": self.v["wp_scratch_quota_id"] - self.v["wp_backup_quota_offset"] - 1}],
-            "id at the archive project": [{**a, "quota_id": self.v["wp_archive_quota_id"] - self.v["wp_backup_quota_offset"]}],
-            "id at the intake project": [{**a, "quota_id": self.v["wp_intake_quota_id"] - self.v["wp_backup_quota_offset"]}],
+            "fits": ([a, b], []),
+            "duplicate port": ([a, {**b, "port": a["port"]}], [5]),
+            "duplicate quota": ([a, {**b, "quota_id": a["quota_id"]}], [6]),
+            "low port": ([{**a, "port": 80}], [7]),
+            "port 1024": ([{**a, "port": 1024}], [7]),
+            "port 1025": ([{**a, "port": 1025}], []),
+            "low quota": ([{**a, "quota_id": 999}], [8]),
+            "quota 1000": ([{**a, "quota_id": 1000}], []),
+            "reserved": ([{**a, "name": "hub"}, b], [3]),
+            "vps-hub is reserved": ([{**a, "name": "vps-hub"}], [3]),
+            "bad name": ([{**a, "name": "A"}], [2]),
+            "one letter": ([{**a, "name": "a"}], [2]),
+            "24 letters": ([{**a, "name": "a" * 24}], []),
+            "25 letters": ([{**a, "name": "a" * 25}], [2]),
+            "trailing hyphen passes the fit rule (the looser one; check_name refuses it when a site is made)": ([{**a, "name": "abc-"}], []),
+            "bad state": ([{**a, "state": "paused"}], [9]),
+            "bad policy": ([{**a, "update_policy": "always"}], [10]),
+            "closed": ([{**a, "state": "closed"}, b], []),
+            "too much memory": ([a, {**b, "php_mem_mb": 99999}], [11]),
+            "stopped memory does not count": ([a, {**b, "php_mem_mb": 99999, "state": "stopped"}], []),
+            "closed memory does not count": ([a, {**b, "php_mem_mb": 99999, "state": "closed"}], []),
+            "too much disk": ([a, {**b, "quota_mb": 999999}], [12]),
+            "stopped disk counts": ([a, {**b, "quota_mb": 999999, "state": "stopped"}], [12]),
+            "closed disk does not count": ([a, {**b, "quota_mb": 999999, "state": "closed"}], []),
+            "wide spread of ids": ([a, {**b, "quota_id": 1000 + off + 5}], [13]),
+            "id just below the scratch project": ([{**a, "quota_id": v["wp_scratch_quota_id"] - off - 1}], []),
         }
-        for label, sites in cases.items():
-            self.assertEqual(self.mine(sites), self.ansible(sites), label)
+        for label, (sites, want) in cases.items():
+            self.assertEqual(self.mine(sites), want, label)
+
+    def test_a_backup_id_that_would_reach_a_project_of_the_service_is_refused(self):
+        a = self.site("alpha", 1)
+        off = self.v["wp_backup_quota_offset"]
+        for key, rule in (("wp_scratch_quota_id", 14), ("wp_archive_quota_id", 16), ("wp_intake_quota_id", 19)):
+            broken = self.mine([{**a, "quota_id": self.v[key] - off}])
+            self.assertIn(rule, broken, key)
+            self.assertNotIn(rule, self.mine([{**a, "quota_id": self.v[key] - off - 1}]), key)
 
     def test_the_limits_themselves(self):
         a = self.site("alpha", 1)
-        for key, value in (("archive_quota_id", self.limits["scratch_quota_id"]), ("intake_quota_id", self.limits["scratch_quota_id"]), ("intake_quota_id", self.limits["archive_quota_id"]),
-                           ("backup_quota_offset", 0), ("backup_quota_offset", 1), ("ram_reserve_mb", 10 ** 6), ("data_reserve_mb", 10 ** 7)):
-            lim = {**self.limits, key: value}
-            v = {**self.v, {"archive_quota_id": "wp_archive_quota_id", "intake_quota_id": "wp_intake_quota_id", "backup_quota_offset": "wp_backup_quota_offset", "ram_reserve_mb": "wp_vm_ram_reserve_mb",
-                            "data_reserve_mb": "wp_data_reserve_mb"}[key]: value}
-            theirs = sorted(self.that.index(e) for e in play.failing(self.that, v, [a]))
-            self.assertEqual(m.broken_rules([m.merged(self.defaults, a)], lim), theirs, (key, value))
+        for key, value, want in (("archive_quota_id", self.limits["scratch_quota_id"], 15), ("intake_quota_id", self.limits["scratch_quota_id"], 17), ("intake_quota_id", self.limits["archive_quota_id"], 18),
+                                 ("backup_quota_offset", 0, 13), ("ram_reserve_mb", 10 ** 6, 11), ("data_reserve_mb", 10 ** 7, 12)):
+            self.assertIn(want, self.mine([a], {**self.limits, key: value}), (key, value))
+        self.assertEqual(self.mine([a], {**self.limits, "backup_quota_offset": 1}), [], "an offset of 1 is larger than the spread of one site")
 
-    def test_random_lists_name_the_same_rules(self):
+    def test_random_lists_never_crash_and_a_list_is_judged_the_same_each_time(self):
         rng = random.Random(20261028)
         names = ["alpha", "bravo", "charlie", "hub", "vps-hub", "wg", "x", "ok-1", "a" * 24, "Bad", "abc-"]
         for _ in range(400):
@@ -435,24 +430,18 @@ class Fit(unittest.TestCase):
                 if rng.random() < 0.3:
                     s["php_mem_mb"] = rng.choice([384, 4096, 9000])
                 if rng.random() < 0.3:
-                    s["db_mem_mb"] = rng.choice([192, 2000, 9000])
-                if rng.random() < 0.3:
                     s["quota_mb"] = rng.choice([512, 50000, 400000])
-                if rng.random() < 0.3:
-                    s["backup_quota_mb"] = rng.choice([512, 50000, 400000])
                 sites.append(s)
-            self.same(sites)
+            first = self.mine(sites)
+            self.assertEqual(first, self.mine(sites))
+            self.assertTrue(all(0 <= i < len(m.RULES) for i in first))
+            self.assertEqual(len(first), len(set(first)), "a rule is named once")
 
-    def test_an_empty_list_breaks_the_first_rule_in_both(self):
-        # Only the first rule is compared: the play's later expressions raise on the largest id of nothing, which the offline helper counts as failing. The tool never asks about an empty list
-        # (the site being created is always in it).
+    def test_an_empty_list_breaks_the_first_rule(self):
         self.assertIn(0, self.mine([]))
-        self.assertIn(0, self.ansible([]))
 
     def test_a_site_without_its_numbers_is_refused(self):
-        sites = [{"name": "alpha", "state": "hold", "update_policy": "notify"}]
-        self.assertIn(1, self.mine(sites))
-        self.assertIn(1, self.ansible(sites))
+        self.assertEqual(self.mine([{"name": "alpha", "state": "hold", "update_policy": "notify"}]), [1])
 
     def test_the_report_is_in_words(self):
         self.assertEqual(m.fit_report([m.merged(self.defaults, self.site("hub", 1))], self.limits), ["no name is reserved"])

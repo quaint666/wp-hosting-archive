@@ -154,7 +154,7 @@
   changed_when: false
   diff: false
 
-# The units the WordPress timers share. Per site only the timer is switched on or off (tasks/wp_site_one_common.yml, by the site's state). The notify unit needs
+# The units the WordPress timers share. Per site only the timer is switched on or off (scripts/wp_site_provision.py, by the site's state). The notify unit needs
 # ntfy-notify (tasks/ntfy_notify_common.yml, dellvms/ntfy_notify_dellvms.yml); a missing command fails the notify unit, which shows in `systemctl --failed`.
 - name: Stage the WordPress job units
   ansible.builtin.template:

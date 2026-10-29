@@ -1,6 +1,6 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_site_install.sh.j2). Install WordPress into a site that has none:   ssh -t dellwp sudo wp-site-install <site> [--title=T] [--user=U] [--email=E]
-# Asks for the title, the administrator's user name and email (any of them can be given as an option instead, which is what scripts/wp_sites.py does: none of the three is secret), and the
+# Asks for the title, the administrator's user name and email (any of them can be given as an option instead, which is what wp-ctl install does: none of the three is secret), and the
 # password twice at a hidden prompt (14 characters or more; there is no option for it, on purpose). The password goes to WP-CLI on stdin, and what WP-CLI prints is redacted; only
 # its length is ever printed. Then it proves the credentials: the right password must log in and the same password with a letter added must be refused. The site is left
 # discouraging search engines (blog_public 0) until it goes live. Nothing here sends mail (the VM cannot send SMTP).

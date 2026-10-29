@@ -8,8 +8,7 @@ the stamps, <name>.json, still counts), outside the site's directory so that del
 tombstones; the port and quota id of a closed site never are: every number ever recorded stays reserved, so a new site always gets numbers above all of them. Until the sites move out of
 host_vars/dellwp/vars.yml the allocator and the fit check also see that list (`known`): a record in the registry and an entry in the repo are one set of ports and ids.
 
-The checks of the fit rules are a port of the assert in tasks/wp_sites_common.yml, rule for rule and in the same order; tests/test_wp_site_model.py runs both on the same site lists and demands
-the same verdict, so a change to one that is not made to the other fails there. scripts/wp_sites.py keeps its own copies of the field rules until it retires; the same test ties those too."""
+The fit rules (RULES, broken_rules) are the one copy of what a list of sites must satisfy; the play used to carry the same rules as an assert and no longer does. tests/test_wp_site_model.py runs them."""
 import json
 import os
 import re
@@ -17,14 +16,14 @@ import tempfile
 from pathlib import Path
 
 SCHEMA = 1
-NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_sites.py and scripts/wp_ctl.py)
+NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_ctl.py)
 FIT_NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")                             # the play's own, looser rule (fullmatch: the play's `match` test also lets a trailing newline through)
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 STATES = ("hold", "live", "stopped", "closed")
 POLICIES = ("auto", "notify", "freeze")
 MAIL_MODES = ("log", "send")
-PORT_BASE, QUOTA_BASE = 9100, 1000                                            # a first site gets 9101 and 1001: above the base, as scripts/wp_sites.py does
-# What `set` may change: key -> (kind, minimum, maximum). The ranges are those of scripts/wp_sites.py EDITABLE, and `state` is not here: it has its own verb. `name`, `port` and `quota_id` are
+PORT_BASE, QUOTA_BASE = 9100, 1000                                            # a first site gets 9101 and 1001: above the base
+# What `set` may change: key -> (kind, minimum, maximum). `state` is not here: it has its own verb. `name`, `port` and `quota_id` are
 # never editable (the name is in the container, database, unit, vhost, directories and quota projects; the port and the id are assigned from the registry).
 EDITABLE = {
     "update_policy": ("choice", POLICIES),
@@ -287,7 +286,7 @@ def to_int(value):
         return 0
 
 
-# The rules of the assert in tasks/wp_sites_common.yml, in its order. broken_rules() returns the positions of those that do not hold.
+# The rules, in this order. broken_rules() returns the positions of those that do not hold.
 RULES = (
     "there is at least one site",
     "every site has a name, a port and a quota id",

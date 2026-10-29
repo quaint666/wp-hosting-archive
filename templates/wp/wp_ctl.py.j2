@@ -30,10 +30,5 @@ CONFIG = {
         "{{ n }}",
 {% endfor %}
     ],
-    "sites": [
-{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}
-        "{{ s.name }}",
-{% endfor %}
-    ],
 }
 sys.exit(wp_ctl.main(CONFIG, sys.argv[1:]))

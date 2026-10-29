@@ -233,49 +233,12 @@ class Tasks(unittest.TestCase):
         self.assertEqual(sorted(loop + ["20-wp-hosting-two-factor.php.j2"]), sources)
         self.assertEqual(self.by["Deploy the Two Factor loader"]["ansible.builtin.template"]["dest"], "{{ wp_mu_dir }}/20-wp-hosting-two-factor.php")
 
-    def test_the_play_stops_early_on_an_unknown_mail_mode_or_a_missing_key(self):
-        a = self.tasks[0]["ansible.builtin.assert"]
-        self.assertIn("dellwp_wp_resend_key is defined", " ".join(a["that"]))
-        self.assertIn("difference(['log', 'send'])", " ".join(a["that"]))
-        self.assertEqual(self.tasks[0]["name"].split(",")[0], "Stop early if a site has an unknown mail mode")
-
-    def test_the_assertion_expressions_pass_and_fail_where_they_should(self):
-        j = jinja2.Environment()
-        j.filters["difference"] = lambda a, b: [x for x in a if x not in b]
-
-        def holds(sites, key_defined):
-            ctx = {"wp_sites_merged": sites}
-            if key_defined:
-                ctx["dellwp_wp_resend_key"] = "k"
-            return all(bool(j.compile_expression(e.replace("is defined", "is defined"))(**ctx)) for e in self.tasks[0]["ansible.builtin.assert"]["that"])
-        log, send, closed = {"mail_mode": "log", "state": "hold"}, {"mail_mode": "send", "state": "live"}, {"mail_mode": "send", "state": "closed"}
-        self.assertTrue(holds([log], False))
-        self.assertFalse(holds([send], False))
-        self.assertTrue(holds([send], True))
-        self.assertTrue(holds([log, closed], False), "a closed site's mode does not need a key")
-        self.assertFalse(holds([{"mail_mode": "smtp", "state": "hold"}], True))
-
-    def test_the_sites_tasks_import_it_before_any_site_is_deployed(self):
-        names = [t.get("name") for t in load("tasks/wp_sites_common.yml")]
-        i = names.index("Deploy the must-use plugins (tasks/wp_mu_common.yml)")
-        self.assertLess(i, names.index("Deploy each site that exists (tasks/wp_site_one_common.yml)"))
-        self.assertEqual(load("tasks/wp_sites_common.yml")[i]["ansible.builtin.import_tasks"], "wp_mu_common.yml")
+    # An unknown mail mode is refused by the registry's rules (tests/test_wp_site_model.py) and a site in mode send without the provider key by the provisioning tool
+    # (tests/test_wp_site_provision.py: test_mail_send_needs_the_provider_key_file).
 
     def test_the_tool_for_a_locked_out_user_is_installed(self):
         tools = {t["name"]: t for t in load("tasks/wp_tools_common.yml")}
         self.assertIn({"src": "wp_site_2fa_reset.sh.j2", "dest": "wp-site-2fa-reset"}, tools["Stage the tools"]["loop"])
-
-
-class EditableFields(unittest.TestCase):
-    def test_the_new_flags_can_be_changed_with_modify_and_are_validated(self):
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import wp_sites as w
-        for key, good, bad in (("allow_app_passwords", "true", "yes"), ("allow_user_enum", "false", "1"), ("mail_mode", "send", "smtp")):
-            self.assertIsNone(w.validate_value(key, good)[1], key)
-            self.assertIsNotNone(w.validate_value(key, bad)[1], key)
-            self.assertIn(key, w.RESTARTS)
-        self.assertEqual(w.validate_value("mail_mode", "log")[0], "log")
-        self.assertIs(w.validate_value("allow_user_enum", "true")[0], True)
 
 
 class Reset(Base):

@@ -310,7 +310,7 @@ class Delete(Base):
 
     def test_the_newest_snapshot_must_be_a_final_one(self):
         self.snapshot("20261025T031500Z")   # a nightly newer than the final one
-        r = self.delete(); self.assertEqual(r.returncode, 2); self.assertIn("is not a final one", r.stderr); self.assertIn("wp_sites.py stop wptest", r.stderr)
+        r = self.delete(); self.assertEqual(r.returncode, 2); self.assertIn("is not a final one", r.stderr); self.assertIn("wp-ctl ensure-state site=wptest state=stopped", r.stderr)
         self.assertTrue(self.site.exists() and self.bk.exists() and self.final().exists() is False)
         import shutil
         shutil.rmtree(self.bk / "20261025T031500Z"); self.snapshot("20261025T041500Z", tag="pre-update")
@@ -495,13 +495,6 @@ class Purge(Base):
         self.assertIn("OnCalendar={{ wp_archive_purge_calendar }}", tim); self.assertIn("Persistent=true", tim)
         self.assertEqual(by["Enable the archive purge timer"]["ansible.builtin.systemd"]["name"], "wp-archive-purge.timer")
         self.assertRegex(self.v["wp_archive_purge_calendar"], r"^\*-\*-\* \d\d:\d\d:\d\d$")
-
-    def test_the_verifier_reads_the_paths_from_the_repo_and_hard_codes_none(self):
-        v = (ROOT / "scripts/wp_site_verify_dellwp.sh").read_text()
-        self.assertNotIn("/etc/nginx/conf.d", v); self.assertNotIn("/etc/systemd/system", v)
-        for needle in ('h["wp_unit_dir"]', 'h["wp_vhost_dir"]', 'h["wp_data_mount"] + "/archive"', "$UNITDIR/wp-$SITE.service", "$VHOSTDIR/wp_site_$SITE.conf"):
-            self.assertIn(needle, v)
-        self.assertEqual(self.v["wp_archive_dir"], self.v["wp_data_mount"] + "/archive", "the verifier derives the archive path the way the variable is built")
 
     def test_the_two_tools_agree_on_the_archive_layout(self):
         # wp-site-delete writes <site>-<stamp> with expires=YYYY-MM-DD, and the purge reads exactly that

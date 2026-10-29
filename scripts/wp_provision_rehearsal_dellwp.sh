@@ -1,50 +1,34 @@
 #!/bin/bash
 # Rehearses the PROVISIONING TOOL (wp-site-provision, and the wp-ctl verbs create, apply and install over it) on dellwp against the real thing, from the ThinkPad:   bash scripts/wp_provision_rehearsal_dellwp.sh [options]
-#   1. parity   a throwaway site is made the OLD way (wp_sites.py create --no-install, the Ansible play); a registry record is written for it from its wp_sites entry; then `wp-site-provision render --diff` must
-#               say every file is the same as the play wrote it (this is the proof that the Jinja environment of the tool equals Ansible's), and `apply` on it must change nothing (containers, unit and files
-#               untouched). Then the site is stopped and deleted the old way (you type its name twice) and you re-run the tools play, so the tool's list of the repo's sites is current
-#   2. create   `wp-ctl create` as a job: a site that exists only in the registry is built (record, directory, quota projects, database and php containers, unit, vhost, timers) and answers on hold, with no WordPress
-#   3. refuse   a second create of the same name, a reserved name and an apply of a site that does not exist are refused (exit status 2) and change nothing
-#   4. install  `wp-ctl install`: WordPress into that site with a password you type here (hidden; only its length is shown). The password must be in no audit line, journal, job file or reply on the VM
-#   5. apply    `wp-ctl apply` on the finished site changes nothing
-# The site made in 2 stays on dellwp, on hold, with WordPress in it: scripts/wp_state_rehearsal_dellwp.sh changes its settings and state and deletes it (a delete needs it stopped, with a final backup); until
-# then it is used by nothing. The parity site is deleted by step 1 and its tombstone stays in vars.yml for good (a name is never reused). Both names are used up.
-# Step 1 makes real commits to host_vars/dellwp/vars.yml on your current branch, which must not be main. Options:  --parity-site NAME (default parity1)  --site NAME (default provtest1)
-# --skip-parity (steps 2 to 5 only)  --yes (do not ask before starting)
+#   1. create   `wp-ctl create` as a job: a site that exists only in the registry is built (record, directory, quota projects, database and php containers, unit, vhost, timers) and answers on hold, with no WordPress
+#   2. refuse   a second create of the same name, a reserved name and an apply of a site that does not exist are refused (exit status 2) and change nothing
+#   3. install  `wp-ctl install`: WordPress into that site with a password you type here (hidden; only its length is shown). The password must be in no audit line, journal, job file or reply on the VM
+#   4. apply    `wp-ctl apply` on the finished site changes nothing
+# The site made in 1 stays on dellwp, on hold, with WordPress in it: scripts/wp_monitor_rehearsal_dellwp.sh works on it and scripts/wp_state_rehearsal_dellwp.sh changes its settings and state and deletes
+# it (a delete needs it stopped, with a final backup); until then it is used by nothing. The script makes no commit and edits nothing in the repo. Options:  --site NAME (default provtest1)  --yes (do not
+# ask before starting)
 # It stops at the first step that fails badly. What it does not prove: the tool's behaviour with a site that has data, a state change (the next batch), anything the control app does, or that two creates
 # at once are safe (the offline tests prove the locks). Paste the whole output, including the FAIL lines if any.
 set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PARITY=parity1; SITE=provtest1; SKIP=no; YES=no
-usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+SITE=provtest1; YES=no
+usage() { sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case $1 in
-    --parity-site) PARITY=${2:-}; shift 2 ;;
     --site) SITE=${2:-}; shift 2 ;;
-    --skip-parity) SKIP=yes; shift ;;
     --yes) YES=yes; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-for n in "$PARITY" "$SITE"; do [[ $n =~ ^[a-z][a-z0-9-]{1,23}$ ]] || { echo "a site name is lowercase letters, digits and hyphens, 2 to 24 characters: $n" >&2; exit 2; }; done
-[ "$PARITY" != "$SITE" ] || { echo "--parity-site and --site must differ" >&2; exit 2; }
+[[ $SITE =~ ^[a-z][a-z0-9-]{1,23}$ ]] || { echo "a site name is lowercase letters, digits and hyphens, 2 to 24 characters: $SITE" >&2; exit 2; }
 cd "$REPO" || exit 2
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ "$SKIP" = no ]; then
-  [ "$BRANCH" != main ] || { echo "you are on main: the parity step commits to vars.yml, do it on a branch" >&2; exit 2; }
-  git diff --quiet HEAD -- host_vars/dellwp/vars.yml || { echo "host_vars/dellwp/vars.yml has uncommitted changes: commit or revert them first" >&2; exit 2; }
-fi
 
 # everything the VM side needs comes from the repo's own variables, nothing is typed here twice
-read -r DOMAIN BIN MOUNT LISTEN BDIR LIB SECRETS UID_PHP < <(python3 -I - "$REPO" "$PARITY" "$SITE" "$SKIP" <<'PY'
+read -r DOMAIN BIN MOUNT LISTEN BDIR LIB SECRETS UID_PHP < <(python3 -I - "$REPO" <<'PY'
 import sys, yaml
-repo, parity, site, skip = sys.argv[1:5]
+repo = sys.argv[1]
 h = {**yaml.safe_load(open(repo + "/vars/wp.yml")), **yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))}
-names = {s["name"] for s in h["wp_sites"]}
-for n in ([site] if skip == "yes" else [parity, site]):
-    if n in names:
-        sys.exit("'%s' is already in wp_sites (a name is never reused): choose another" % n)
 m = h["wp_data_mount"]
 def r(v):
     out = str(v).replace("{{ wp_data_mount }}", m)
@@ -93,7 +77,7 @@ say() { echo; echo "== $*"; }
 bump() { local rc=$1; shift; if [ "$rc" != 0 ]; then echo "FAIL: $* (exit $rc)"; FAIL=$((FAIL+1)); return 1; fi; echo "ok: $*"; return 0; }
 yn() { local a; read -r -p "$1 [y/N] " a; [ "$a" = y ]; }
 summary() { echo; echo "== summary"; [ "$FAIL" = 0 ] && echo "All checks passed." || echo "$FAIL check(s) failed."; }
-fatal() { echo "FAIL: $*"; FAIL=$((FAIL+1)); summary; echo "The step stopped here; the sites '$PARITY' and '$SITE' may exist. Read the output above; nothing is cleaned up for you."; exit "$FAIL"; }
+fatal() { echo "FAIL: $*"; FAIL=$((FAIL+1)); summary; echo "The step stopped here; the site '$SITE' may exist. Read the output above; nothing is cleaned up for you."; exit "$FAIL"; }
 ctl() { ssh dellwp "sudo -n $BIN/wp-ctl $*" </dev/null; }                       # one JSON line on standard output
 jfield() { python3 -I -c 'import json,sys; v = json.loads(sys.stdin.read()).get(sys.argv[1]); print("" if v is None else v)' "$1"; }
 waitjob() {     # $1 = job id, $2 = seconds; prints the job's log tail; returns the job's exit code (or 99 when it did not finish)
@@ -108,7 +92,7 @@ waitjob() {     # $1 = job id, $2 = seconds; prints the job's log tail; returns 
   return 99
 }
 
-echo "Provisioning rehearsal on dellwp ($DOMAIN), branch $BRANCH. Throwaway sites: $([ "$SKIP" = yes ] && echo "none for parity" || echo "$PARITY (old way, deleted again)"), $SITE (registry only, left standing)."
+echo "Provisioning rehearsal on dellwp ($DOMAIN). Throwaway site: $SITE (registry only, left standing)."
 [ "$YES" = yes ] || yn "Go on?" || { echo "Nothing was done."; exit 1; }
 
 say "0. preflight"
@@ -133,46 +117,8 @@ finish
 EOF
 [ "$FAIL" = 0 ] || fatal "the preflight found problems; fix them first"
 
-if [ "$SKIP" = yes ]; then echo; echo "(1. parity: skipped)"; else
-say "1. parity: a site made the old way, then the tool's view of it"
-python3 scripts/wp_sites.py create --name "$PARITY" --no-install --policy notify --yes --commit; bump $? "wp_sites.py create --no-install" || fatal "the old-way create failed"
-REC=$(python3 -I - "$PARITY" "$REPO" <<'PY'
-import json, sys, yaml, datetime
-name, repo = sys.argv[1:3]
-h = yaml.safe_load(open(repo + "/host_vars/dellwp/vars.yml"))
-e = next(s for s in h["wp_sites"] if s["name"] == name)
-print(json.dumps({"schema": 1, **e, "created": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))
-PY
-) || fatal "could not build the record from the wp_sites entry"
-DEF=$(python3 -I -c 'import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))["wp_site_defaults"]))' "$REPO/host_vars/dellwp/vars.yml")
-VMSITE=$PARITY
-ssh dellwp "sudo -n env LIB=$LIB DATA=$SITES TOMB=$TOMB REC='$REC' DEF='$DEF' python3 -I -c 'import json,os,sys; sys.path.insert(0, os.environ[\"LIB\"]); import wp_site_model as m; m.Registry(os.environ[\"DATA\"], os.environ[\"TOMB\"], json.loads(os.environ[\"DEF\"])).write_site(json.loads(os.environ[\"REC\"]))'" </dev/null
-bump $? "a registry record was written for $PARITY from its wp_sites entry (through the tool's own model, which checks it)" || fatal "could not write the record"
-vmrun <<'EOF'
-out=$("$BIN/wp-site-provision" render "$S" --diff </dev/null 2>&1); rc=$?
-echo "$out" | sed 's/^/   | /'
-check "render --diff: every file of the play's site is the same as the tool renders it" "$rc" 0
-check "none of the seven files differs or is missing" "$(echo "$out" | grep -c -E '^(differs|missing) ')" 0
-before=$(fingerprint)
-"$BIN/wp-site-provision" apply "$S" </dev/null 2>&1 | sed 's/^/   | /'; check "apply on the play's site succeeds" "${PIPESTATUS[0]}" 0
-check "apply left the containers, the unit and the files exactly as they were" "$([ "$(fingerprint)" = "$before" ] && echo same || echo changed)" same
-diff <(echo "$before") <(fingerprint) | head -n 12 | sed 's/^/   (diff) /' || true
-running "$UP" && running "$DB" && ok "both containers are still running" || bad "a container is not running"
-hold_checks
-finish
-EOF
-[ "$FAIL" = 0 ] || fatal "the tool does not see the play's site as the play made it: do not go on; the output above says which file"
-python3 scripts/wp_sites.py stop "$PARITY" --yes --commit; bump $? "wp_sites.py stop (final backup first)" || fatal "stop failed"
-python3 scripts/wp_sites.py delete "$PARITY" --commit; bump $? "wp_sites.py delete (type the name twice)" || fatal "delete failed"
-echo
-echo "   The tool's list of the repo's sites is baked into its wrapper, so it must be refreshed now (the closed $PARITY must be in it, or a new site could be given its port):"
-echo "     ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml --tags wp_tools,wp_ctl"
-yn "Did that run finish without errors?" || fatal "re-run the tools play, then run this again with --skip-parity"
-ssh dellwp "sudo -n grep -c '$PARITY' $BIN/wp-site-provision" </dev/null | grep -q '^[1-9]'; bump $? "the wrapper names $PARITY (so its port and quota id are never reused)" || fatal "the wrapper does not name $PARITY: the play did not refresh it"
-fi
-
 VMSITE=$SITE
-say "2. create $SITE through wp-ctl"
+say "1. create $SITE through wp-ctl"
 R=$(ctl create name="$SITE" label=Provtest req="prov-$SITE"); echo "   $R"
 JOB=$(printf '%s' "$R" | jfield job); [ -n "$JOB" ] || fatal "no job was started"
 waitjob "$JOB" 900; bump $? "the create job finished with exit 0" || fatal "the create job failed or did not finish: read its log above (wp-ctl job-log job=$JOB)"
@@ -202,7 +148,7 @@ R2=$(ctl create name="$SITE" label=Provtest req="prov-$SITE"); echo "   $R2"
 check_same=$([ "$(printf '%s' "$R2" | jfield job)" = "$JOB" ] && echo yes || echo no)
 [ "$check_same" = yes ]; bump $? "the same request id again returns the same job (no second build)"
 
-say "3. refusals change nothing"
+say "2. refusals change nothing"
 for item in "create name=$SITE:name_taken" "create name=hub:reserved_name" "create name=Bad_Name:invalid_name" "apply site=nosuch$SITE:unknown_site" "create name=$SITE label=x set=1:unknown_argument"; do
   req=${item%:*}; want=${item##*:}
   out=$(ctl $req); rc=$?
@@ -213,7 +159,7 @@ check "still one record, and the site still runs" "$(ls "$SITES" | grep -c "^$S\
 finish
 EOF
 
-say "4. install WordPress with a password typed here"
+say "3. install WordPress with a password typed here"
 echo "   Choose the administrator password for $SITE (14 or more characters). It is not shown and not stored anywhere but on the site."
 read -r -s -p "   Password: " PW; echo; read -r -s -p "   Again:    " PW2; echo
 [ "$PW" = "$PW2" ] && [ "${#PW}" -ge 14 ] || fatal "the two entries differ or are shorter than 14 characters"
@@ -237,7 +183,7 @@ hold_checks
 finish
 EOF
 
-say "5. apply on the finished site changes nothing"
+say "4. apply on the finished site changes nothing"
 vmtest <<'EOF' > $TMPD/fp
 fingerprint
 EOF
@@ -256,5 +202,5 @@ finish
 EOF
 
 summary
-echo "   $SITE is standing on hold on dellwp. The parity site ${PARITY} is closed in vars.yml (commits: $(git log --oneline "$BRANCH" | head -n 6 | grep -c "$PARITY"))."
+echo "   $SITE is standing on hold on dellwp. Nothing was committed or edited in the repo."
 exit "$FAIL"

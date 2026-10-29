@@ -431,11 +431,10 @@ class Update(Base):
         self.assertTrue({"wp-update@.service", "wp-update@.timer"} <= units)
         self.assertNotIn("wp_update_policies", tool.get("vars", {}), "the policy is read from the registry at every run, not baked in")
         self.assertEqual(self.v["wp_site_defaults"]["update_policy"], "notify", "the default is the safe one")
-        one = (ROOT / "tasks/wp_site_one_common.yml").read_text()
-        self.assertIn('name: "wp-update@{{ wp_s.name }}.timer"', one)
-        common = yaml.safe_load((ROOT / "tasks/wp_sites_common.yml").read_text())
-        asserts = [a for t in common if "ansible.builtin.assert" in t for a in t["ansible.builtin.assert"]["that"]]
-        self.assertTrue([a for a in asserts if "update_policy" in a and "'auto', 'notify', 'freeze'" in a], "the play refuses an unknown policy")
+        prov = (ROOT / "scripts/wp_site_provision.py").read_text()
+        self.assertIn('"wp-%s@%s.timer"', prov, "the provisioning tool enables the site's timers, update among them (tests/test_wp_site_provision.py runs it)")
+        self.assertIn('("update", lambda state: state != "stopped")', prov, "the update timer runs on hold and live, not on a stopped site")
+        self.assertIn('POLICIES = ("auto", "notify", "freeze")', (ROOT / "scripts/wp_site_model.py").read_text(), "an unknown policy is refused by the registry's rules (tests/test_wp_site_model.py)")
 
     def test_the_script_never_touches_wp_config_or_secrets_and_never_restarts_with_docker(self):
         text = (ROOT / "templates/wp/wp_site_update.sh.j2").read_text()

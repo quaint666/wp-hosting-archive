@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_sites.py)
+NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # a hostname label (the same rule as scripts/wp_site_model.py)
 USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                        # an existing WordPress user (wp-site-password)
 ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")                        # the administrator wp-site-install creates (the tool's own rule)
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                         # what wp-site-install accepts as an email address
@@ -179,9 +179,8 @@ def check_limits(cfg, verbs):
 
 # ------------------------------------------------------------------------------------------------------------------------------------- sites and names
 def known_sites(cfg):
-    """Sites that exist: those the play rendered (cfg["sites"]) and those with a registry record, <data_dir>/<site>/site.json. The union is the transition; the registry becomes the only source
-    when the sites leave the repo."""
-    found = set(cfg["sites"])
+    """Sites that exist: those with a registry record, <data_dir>/<site>/site.json (a real file; the directory is a real directory)."""
+    found = set()
     try:
         with os.scandir(cfg["data_dir"]) as it:
             for e in it:
@@ -596,12 +595,6 @@ def h_delete(call):
     return call.job([call.ctl.tool("wp-site-delete"), call.args["site"]], tty=[call.args["confirm_again"]])
 
 
-def registered(call):
-    """The site's directory must hold a registry record: the provisioning tool works from it. A site the Ansible play still builds has none until it is migrated."""
-    if not os.path.isfile(os.path.join(call.ctl.cfg["data_dir"], call.args["site"], "site.json")):
-        raise Refuse("not_registered", "%s has no registry record; the play still builds it, so wp-site-provision cannot change it" % call.args["site"])
-
-
 def h_create(call):
     """A new, empty site on hold (no WordPress in it yet: `install` does that). The name is checked here as `check-name` does, and again by the tool, which also allocates the ports and ids."""
     a = call.args
@@ -611,20 +604,17 @@ def h_create(call):
 
 
 def h_apply(call):
-    registered(call)
     return call.job([call.ctl.tool("wp-site-provision"), "apply", call.args["site"]])
 
 
 def h_set(call):
     """One editable field of a site's record, changed and applied. The key must be one of the editable ones; the tool checks the value against that field's rule and that the sites still fit."""
-    registered(call)
     a = call.args
     return call.job([call.ctl.tool("wp-site-provision"), "set", a["site"], "%s=%s" % (a["key"], a["value"])])
 
 
 def h_ensure_state(call):
     """Move a site to hold, live or stopped. Going live is confirmed by the site's name (a page that is wrong cannot make a site public); the move rules and the final backup before a stop are the tool's."""
-    registered(call)
     return call.job([call.ctl.tool("wp-site-provision"), "state", call.args["site"], call.args["state"]])
 
 

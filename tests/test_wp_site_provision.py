@@ -6,7 +6,7 @@ chattr, repquota and setquota are one in-process stand-in (FakeHost) that KEEPS 
 so "a second apply changes nothing" means no call that changes anything, not just a quiet exit; it also checks that each call is an argument list with the clean environment and no stdin. chown is recorded
 (the tests do not run as root); the HTTP probe is a list of statuses.
 
-They prove: the steps and their order are those of tasks/wp_site_one_common.yml; every command is the argument list the play builds (the quota project and limit, the seed container's equal memory and swap);
+They prove: the steps and their order (the ones tasks/wp_site_one_common.yml had before the tool replaced it; git has it); every command is the argument list the tool is meant to run (the quota project and limit, the seed container's equal memory and swap);
 a repeat changes nothing; a changed record restarts the stack only when the compose file or the database settings changed and recreates only php otherwise; a vhost nginx rejects is taken back; a create
 that stops half-way is finished by apply; a refusal leaves nothing behind; the lock; the stopped, hold and live states; render tells the truth and never shows a secret; no secret is in any output or argument.
 They do not prove that docker, nginx, systemd or the quota tools behave as the stand-in does (scripts/wp_provision_rehearsal_dellwp.sh will, on the host), nor that chown works. Run: python3 -I tests/test_wp_site_provision.py"""
