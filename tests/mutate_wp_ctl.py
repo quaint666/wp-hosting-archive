@@ -171,6 +171,17 @@ M = [
  ('a tombstone that is a link counts', 'templates/wp/wp_site_delete.sh.j2', '&& [ ! -L "$TOMBSTONES/$site.json" ]', '', 'tests/test_wp_delete.py'),
  ('the status tool no longer flags a vhost that differs from the record', 'scripts/wp_sites_status.py', 'if r["deployed"] != r["actual"]:\n            out.append', 'if False:\n            out.append', 'tests/test_wp_status.py'),
  ('the status tool flags a registry-only site as a stray', 'scripts/wp_sites_status.py', 'out = []\n    for r in rows:\n        s = r["site"]\n', 'out = []\n    for r in rows:\n        s = r["site"]\n        out.append((s, "the host reports it but the repo does not declare it"))\n', 'tests/test_wp_status.py'),
+ ('the policy is not set back to what it was', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'job "set update_policy back to $POLICY" "set site=$SITE key=update_policy value=$POLICY"', 'job "set update_policy back to $POLICY" "set site=$SITE key=update_policy value=notify"', 'tests/test_wp_monitor_script.py'),
+ ('the policy is never set back', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'job "set update_policy back to $POLICY" "set site=$SITE key=update_policy value=$POLICY" 600 || fatal "setting the policy back failed"', 'true', 'tests/test_wp_monitor_script.py'),
+ ('a failed policy job does not stop the run', 'scripts/wp_monitor_rehearsal_dellwp.sh', '|| fatal "set update_policy failed"', '|| true', 'tests/test_wp_monitor_script.py'),
+ ('a site already on freeze is not refused', 'scripts/wp_monitor_rehearsal_dellwp.sh', '[ "$POLICY" != freeze ] || fatal', 'true || fatal', 'tests/test_wp_monitor_script.py'),
+ ('a bad preflight does not stop the run', 'scripts/wp_monitor_rehearsal_dellwp.sh', '[ "$FAIL" = 0 ] || fatal "the preflight found problems; fix them first"', 'true', 'tests/test_wp_monitor_script.py'),
+ ('the cleanup leaves the broken record', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'rm -rf "$SITES/$BROKEN" /run/wp-monitor-rehearsal "$SITES/$S/html', 'rm -rf /run/wp-monitor-rehearsal "$SITES/$S/html', 'tests/test_wp_monitor_script.py'),
+ ('no cleanup at exit after the confirmation', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'trap \'[ "$CLEANED" = yes ] || cleanup_vm; rm -rf "$TMPD"\' EXIT', 'true', 'tests/test_wp_monitor_script.py'),
+ ('declining the prompt still touches the VM', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'trap \'rm -rf "$TMPD"\' EXIT ', 'trap \'[ "$CLEANED" = yes ] || cleanup_vm; rm -rf "$TMPD"\' EXIT ', 'tests/test_wp_monitor_script.py'),
+ ('an unconfirmed cleanup is not a failure', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'bump "$([ "$CLEANED" = yes ] && echo 0 || echo 1)"', 'bump 0', 'tests/test_wp_monitor_script.py'),
+ ('the ntfy stand-in is not on the path', 'scripts/wp_monitor_rehearsal_dellwp.sh', 'export PATH="$R/bin:$PATH"', 'export PATH="$PATH"', 'tests/test_wp_monitor_script.py'),
+ ('a stray site is not a failure', 'scripts/wp_monitor_rehearsal_dellwp.sh', '[ $? -ne 0 ]; bump $? "the ThinkPad half', '[ 0 -ne 0 ]; bump 0 "the ThinkPad half', 'tests/test_wp_monitor_script.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
