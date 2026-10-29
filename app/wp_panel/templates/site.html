@@ -3,6 +3,46 @@
 {% block body %}
 <h1>{{ name | clip(40) }}</h1>
 <p><a href="{{ url_for('sites') }}">All sites</a></p>
+<h2>State</h2>
+<p>Now: <span class="badge {{ 'state-' ~ state if state in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ (state or 'unknown') | clip(20) }}</span></p>
+{% for target, what in (('hold', 'Closes the site to visitors and turns its cron timer off.'), ('live', 'Opens the site to visitors and turns its cron timer on. Type its name to confirm.'), ('stopped', 'Takes a final backup, then stops the stack: visitors get a 503. A stopped site comes back on hold, never straight to live.')) %}
+{% if target in moves %}
+<form method="post" action="{{ url_for('set_state', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ target }}">
+  <input type="hidden" name="state" value="{{ target }}">
+  {% if target == 'live' %}<label>{{ what }} <input name="confirm_name" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ name | clip(40) }}"></label>
+  {% else %}<span>{{ what }}</span>{% endif %}
+  <button type="submit">Move to {{ target }}</button>
+</form>
+{% endif %}
+{% endfor %}
+<h2>Settings</h2>
+<p class="small">One setting at a time. wp-ctl checks the value; what applying it costs is written beside it.</p>
+<table class="kv">
+{% for key, title, kind, rule, cost in settings %}
+{% set current = registry.get(key) %}
+<tr><th>{{ title }}</th><td>
+<form method="post" action="{{ url_for('set_value', name=name) }}" class="inline">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="req" value="{{ req ~ key }}">
+  <input type="hidden" name="key" value="{{ key }}">
+  {% if kind in ('choice', 'bool') %}
+  <select name="value" required aria-label="{{ title }}">
+    {% if current is none %}<option value="" disabled selected>choose</option>{% endif %}
+    {% for v in rule %}<option value="{{ v }}"{% if (current | string | lower) == v %} selected{% endif %}>{{ v }}</option>{% endfor %}
+  </select>
+  {% elif kind == 'int' %}
+  <input name="value" type="number" required min="{{ rule[0] }}" max="{{ rule[1] }}" step="1" value="{{ '' if current is none else current | string | clip(10) }}" aria-label="{{ title }}">
+  {% else %}
+  <input name="value" maxlength="{{ rule }}" value="{{ '' if current is none else current | string | clip(rule) }}" aria-label="{{ title }}">
+  {% endif %}
+  <button type="submit">Set</button>
+</form>
+<span class="small">{{ cost }}{% if kind == 'int' %}; {{ rule[0] }} to {{ rule[1] }}{% endif %}</span>
+</td></tr>
+{% endfor %}
+</table>
 <h2>What dellwp reports</h2>
 {% if status %}
 <table class="kv">{% for k, v in status.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(300) }}</td></tr>{% endfor %}</table>

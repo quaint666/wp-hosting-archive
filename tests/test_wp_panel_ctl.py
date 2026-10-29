@@ -55,13 +55,40 @@ class Allowlist(unittest.TestCase):
             for name, (required, _) in spec.items():
                 self.assertEqual(required, theirs.args[name].required, (verb, name))
 
-    def test_no_verb_that_changes_anything_is_in_the_list(self):
+    def test_no_verb_that_changes_anything_is_in_the_read_list(self):
         reads = {v for v, spec in wp_ctl.VERBS.items() if spec.kind == "read"}
         self.assertTrue(set(ctl.READ_VERBS) <= reads)
-        for verb in set(wp_ctl.VERBS) - reads:
+        self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
+
+    def test_the_action_verbs_are_exactly_these_and_each_is_a_job_verb_with_the_dispatchers_argument_names(self):
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state"}, "a new action verb is a decision of its batch: add it here on purpose")
+        for verb, spec in ctl.ACTION_VERBS.items():
+            theirs = wp_ctl.VERBS[verb]
+            self.assertEqual(theirs.kind, "job", verb)
+            self.assertEqual(set(spec), set(theirs.args), verb)
+            for name, (required, _) in spec.items():
+                self.assertEqual(required or name == "confirm_name", theirs.args[name].required or name == "confirm_name", (verb, name))
+        self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS))
+
+    def test_every_verb_that_is_in_neither_list_is_refused(self):
+        for verb in set(wp_ctl.VERBS) - set(ctl.ALLOWED):
             with self.assertRaises(ctl.CtlError) as cm:
-                client().request(verb, {})
+                client().request(verb, {"site": "alpha", "confirm_name": "alpha", "confirm_again": "alpha", "file": "x", "user": "u", "name": "alpha"})
             self.assertEqual(cm.exception.kind, "not_allowed", verb)
+            self.assertIn("may not ask", str(cm.exception), verb)
+
+    def test_the_editable_keys_the_states_and_the_limits_are_the_dispatchers(self):
+        self.assertEqual(ctl.SET_KEYS, wp_ctl.SET_KEYS)
+        self.assertEqual(ctl.STATES, wp_ctl.STATES)
+        self.assertEqual(ctl.SET_VALUE_MAX, wp_ctl.SET_VALUE_MAX)
+        self.assertEqual(ctl.LABEL_RE.pattern, wp_ctl.LABEL_RE.pattern)
+        self.assertEqual(ctl.REQ_RE.pattern, wp_ctl.REQ_RE.pattern)
+        self.assertEqual(ctl.CONTROL_RE.pattern, wp_ctl.CONTROL_RE.pattern)
+        self.assertEqual(ctl.NAME_RE.pattern, wp_ctl.NAME_RE.pattern)
+
+    def test_the_names_that_are_never_editable_are_not_keys(self):
+        for k in ("name", "port", "quota_id", "state", "secret_rev", "created", "schema", "cpus"):
+            self.assertNotIn(k, ctl.SET_KEYS)
 
     def test_the_ranges_are_the_dispatchers(self):
         a = wp_ctl.VERBS["job-log"].args["offset"]
@@ -85,7 +112,7 @@ class Request(unittest.TestCase):
         self.assertTrue(line.endswith("\n") and line.count("\n") == 1, "one line")
 
     def test_a_verb_that_is_not_listed_or_not_text_is_refused(self):
-        for verb in ("delete", "create", "set", "ensure-state", "password", "import-run", "apply", "install", "", "LIST", "list ", None, 5, ["list"], {"verb": "list"}):
+        for verb in ("delete", "password", "import-run", "apply", "install", "import-receive", "import-approve", "import-reset", "import-discard", "backup", "check-name", "", "LIST", "list ", None, 5, ["list"], {"verb": "list"}):
             with self.subTest(repr(verb)), self.assertRaises(ctl.CtlError) as cm:
                 client().request(verb, {})
             self.assertEqual(cm.exception.kind, "not_allowed")
@@ -306,6 +333,87 @@ class Source(unittest.TestCase):
             self.assertNotIn(bad, code, bad)
         imports = {l.split()[1].split(".")[0] for l in text.splitlines() if l.startswith(("import ", "from "))}
         self.assertLessEqual(imports, {"json", "re", "subprocess"})
+
+
+class Actions(unittest.TestCase):
+    def line(self, verb, **args):
+        return json.loads(client().request(verb, args))
+
+    def refused(self, verb, **args):
+        with self.assertRaises(ctl.CtlError) as cm:
+            client().request(verb, args)
+        self.assertEqual(cm.exception.kind, "not_allowed", (verb, args))
+        return str(cm.exception)
+
+    def test_create_set_and_ensure_state_are_sent_as_one_json_line_with_the_request_id(self):
+        self.assertEqual(self.line("create", name="delta", label="Delta", req="pa1"), {"verb": "create", "name": "delta", "label": "Delta", "req": "pa1"})
+        self.assertEqual(self.line("create", name="delta"), {"verb": "create", "name": "delta"})
+        self.assertEqual(self.line("set", site="alpha", key="note", value="", req="pa1"), {"verb": "set", "site": "alpha", "key": "note", "value": "", "req": "pa1"})
+        self.assertEqual(self.line("ensure-state", site="alpha", state="hold", req="pa1"), {"verb": "ensure-state", "site": "alpha", "state": "hold", "req": "pa1"})
+        self.assertEqual(self.line("ensure-state", site="alpha", state="live", confirm_name="alpha"), {"verb": "ensure-state", "site": "alpha", "state": "live", "confirm_name": "alpha"})
+        self.assertEqual(client().request("create", {"name": "delta"}).count("\n"), 1)
+
+    def test_the_request_id_is_only_for_actions_and_must_look_like_wp_ctls(self):
+        self.refused("show", site="alpha", req="p1")
+        self.refused("jobs", req="p1")
+        for req in ("", " ", "a b", "x" * 65, "a/b", "a\n", "日本", None, 5, ["p"]):
+            with self.subTest(req=req):
+                self.refused("create", name="delta", req=req)
+        self.line("create", name="delta", req="x" * 64)
+        self.line("create", name="delta", req="a.b_c-D9")
+
+    def test_create_refuses_a_name_that_is_not_a_site_name_and_a_label_that_is_not_a_label(self):
+        for name in ("", "A", "a", "a--b", "-ab", "ab-", "a_b", "x" * 25, "../x", "ab\n", 'a","verb":"delete', "日本", None, 5, True, ["delta"]):
+            with self.subTest(name=name):
+                self.refused("create", name=name)
+        for label in ("", " x", "x ", "x" * 101, "a\nb", "a\x00b", "a\x7fb", None, 5, ["x"]):
+            with self.subTest(label=label):
+                self.refused("create", name="delta", label=label)
+        self.line("create", name="delta", label="x")
+        self.line("create", name="delta", label="x" * 100)
+        self.refused("create")
+        self.refused("create", name="delta", site="alpha")
+        self.refused("create", name="delta", note="x")
+
+    def test_set_refuses_a_key_that_is_not_editable_and_a_value_that_is_long_or_has_control_characters(self):
+        for key in ("name", "port", "state", "", "Note", "note ", None, 5, ["note"]):
+            with self.subTest(key=key):
+                self.refused("set", site="alpha", key=key, value="x")
+        for value in ("x" * 501, "a\nb", "a\x00b", "a\x1fb", "a\x7fb", None, 5, True, ["x"]):
+            with self.subTest(value=value):
+                self.refused("set", site="alpha", key="note", value=value)
+        for key in ctl.SET_KEYS:
+            self.line("set", site="alpha", key=key, value="x" * 500)
+        self.refused("set", site="alpha", key="note")
+        self.refused("set", key="note", value="x")
+        self.refused("set", site="Alpha", key="note", value="x")
+        self.refused("set", site="alpha", key="note", value="x", state="hold")
+
+    def test_the_longest_set_request_fits_the_size_limit_even_when_every_character_is_escaped(self):
+        line = client().request("set", {"site": "a" * 24, "key": "note", "value": "é" * 500, "req": "x" * 64})
+        self.assertLessEqual(len(line.encode()), ctl.MAX_REQUEST_BYTES)
+
+    def test_ensure_state_wants_one_of_the_three_states_and_the_name_typed_only_for_live(self):
+        for state in ("", "closed", "LIVE", "live,hold", "stopped ", None, 5):
+            with self.subTest(state=state):
+                self.refused("ensure-state", site="alpha", state=state)
+        self.assertIn("name", self.refused("ensure-state", site="alpha", state="live"))
+        for typed in ("", "bravo", "Alpha", "alpha ", None, 5):
+            with self.subTest(typed=typed):
+                self.refused("ensure-state", site="alpha", state="live", confirm_name=typed)
+        for state in ("hold", "stopped"):
+            self.refused("ensure-state", site="alpha", state=state, confirm_name="alpha")
+        self.refused("ensure-state", site="alpha")
+        self.refused("ensure-state", state="hold")
+
+    def test_an_action_is_sent_to_the_same_forced_command_and_a_refusal_comes_back_as_refused(self):
+        fake = Fake(stdout=(json.dumps({"ok": False, "error": "name_reserved", "detail": "hub is reserved"}) + "\n").encode(), returncode=2)
+        with self.assertRaises(ctl.CtlError) as cm:
+            client(run=fake).call("create", name="hub", req="p1")
+        self.assertEqual((cm.exception.kind, cm.exception.code), ("refused", "name_reserved"))
+        cmd, kw = fake.calls[0]
+        self.assertEqual(json.loads(kw["input"]), {"verb": "create", "name": "hub", "req": "p1"})
+        self.assertEqual(cmd[-1], "wpctl@dellwp", "the remote command is never named: the key is forced to wp-ctl")
 
 
 if __name__ == "__main__":

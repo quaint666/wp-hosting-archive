@@ -17,6 +17,9 @@ th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(-
 .state-live { color: var(--ok); } .state-hold { color: var(--warn); } .state-stopped { color: var(--muted); } .state-unknown { color: var(--bad); }
 .error { color: var(--bad); }
 pre.log { background: var(--card); border: 1px solid var(--line); padding: .8rem; overflow: auto; max-height: 32rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+form.inline { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: .4rem 0; }
+form.inline label { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+select { font: inherit; padding: .5rem; border: 1px solid var(--line); border-radius: .3rem; background: var(--card); color: var(--fg); }
 form.login { display: grid; gap: .8rem; max-width: 22rem; }
 label { display: grid; gap: .25rem; }
 input { font: inherit; padding: .5rem; border: 1px solid var(--line); border-radius: .3rem; background: var(--card); color: var(--fg); }

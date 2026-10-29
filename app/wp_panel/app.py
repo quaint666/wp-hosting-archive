@@ -21,7 +21,7 @@ HEADERS = {
     "Cache-Control": "no-store",
     "Cross-Origin-Opener-Policy": "same-origin",
 }
-MAX_BODY = 16 * 1024                    # the login form is the largest thing any page takes; the upload page (step 6) sets its own limit on its own route
+MAX_BODY = 16 * 1024                    # the login form and the action forms are the largest things any page takes; the upload page (batch 12) sets its own limit on its own route
 
 
 def create_app(settings, ctl, clock=time.time):
@@ -47,6 +47,7 @@ def create_app(settings, ctl, clock=time.time):
         iat = session.get("iat")
         return session.get("uid") == "operator" and isinstance(iat, (int, float)) and not isinstance(iat, bool) and 0 <= clock() - iat < settings.session_s
 
+    app.extensions["panel_check_csrf"] = check_csrf
     app.jinja_env.globals["csrf_token"] = csrf_token
     app.jinja_env.globals["logged_in"] = logged_in
 

@@ -2,8 +2,9 @@
 
 The ssh key on the control VM is forced to `sudo -n /usr/local/sbin/wp-ctl` in dellwp's authorized_keys, so this client names no remote command: whatever it sends arrives as the request on wp-ctl's
 standard input, and wp-ctl checks the verb against its own allowlist and every argument against its own rules. That is the real lock. This module is a second one on the app's side: it refuses a verb
-that is not in READ_VERBS, an argument the verb does not take, and a value that does not look the way wp-ctl wants it, BEFORE anything is sent, so a bug in a page cannot ask for more than the page
-is for. Step 5 of the plan has the read-only pages: only the verbs that read. The verbs that change something are added to ACTION_VERBS in step 6, not here.
+that is not in READ_VERBS or ACTION_VERBS, an argument the verb does not take, and a value that does not look the way wp-ctl wants it, BEFORE anything is sent, so a bug in a page cannot ask for more
+than the page is for. ACTION_VERBS are the verbs that change something and that a page has been written for; each step-6 batch adds its own (batch 11: create, set, ensure-state; delete, import and the
+password verbs are not here yet). An action may carry a request id (`req`): the same id again returns the job the first one started, so a form sent twice runs once.
 
 Nothing here builds a shell line: ssh gets an argument list, the request travels on standard input, and the environment ssh sees holds nothing but a PATH. What goes wrong is reported as CtlError with a
 kind the pages can show: not_allowed (this client refused), unreachable (no answer from dellwp), refused (wp-ctl said no, status 2), failed (wp-ctl ran and failed, status 1), bad_reply (the answer
@@ -11,6 +12,13 @@ was not what wp-ctl sends). The messages are plain text for the page to escape."
 import json
 import re
 import subprocess
+
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")                                 # wp-ctl's REQ_RE
+LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")                          # wp-ctl's LABEL_RE
+SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note")
+STATES = ("hold", "live", "stopped")
+SET_VALUE_MAX = 500
 
 NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])$")                  # the site-name rule of scripts/wp_site_model.py and scripts/wp_ctl.py
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")                      # the job id wp-ctl makes (scripts/wp_ctl.py JOB_RE)
@@ -41,6 +49,34 @@ READ_VERBS = {
 }
 
 
+def _text(limit, rx=None, empty=False):
+    def check(v):
+        return (isinstance(v, str) and (empty or v != "") and len(v) <= limit and CONTROL_RE.search(v) is None and (rx is None or rx.fullmatch(v) is not None))
+    return check
+
+
+def _one_of(values):
+    return lambda v: isinstance(v, str) and v in values
+
+
+# verb -> {argument: (required, check)}, for the verbs that change something; the names are the Verb table's in scripts/wp_ctl.py (a test compares them)
+ACTION_VERBS = {
+    "create": {"name": (True, _site), "label": (False, _text(100, LABEL_RE))},
+    "set": {"site": (True, _site), "key": (True, _one_of(SET_KEYS)), "value": (True, _text(SET_VALUE_MAX, empty=True))},
+    "ensure-state": {"site": (True, _site), "state": (True, _one_of(STATES)), "confirm_name": (False, _site)},
+}
+ALLOWED = dict(READ_VERBS, **ACTION_VERBS)
+
+
+def _rules(verb, args):
+    """What the argument table cannot say: going live needs the site's own name typed (wp-ctl: confirm_name, equal to the site), and nothing else takes one."""
+    if verb == "ensure-state":
+        if args.get("state") == "live" and args.get("confirm_name") != args.get("site"):
+            raise CtlError("not_allowed", "going live needs the site's name typed exactly")
+        if args.get("state") != "live" and "confirm_name" in args:
+            raise CtlError("not_allowed", "only going live is confirmed by the name")
+
+
 class CtlError(Exception):
     """kind: not_allowed | unreachable | refused | failed | bad_reply. `code` is wp-ctl's error code when it gave one. str(e) is a sentence for the page."""
 
@@ -67,9 +103,14 @@ class Ctl:
 
     def request(self, verb, args):
         """The one JSON line to send, or CtlError(not_allowed). Checks the verb, the argument names and every value before anything leaves."""
-        spec = READ_VERBS.get(verb) if isinstance(verb, str) else None
+        spec = ALLOWED.get(verb) if isinstance(verb, str) else None
         if spec is None:
             raise CtlError("not_allowed", "this page may not ask for %r" % (verb if isinstance(verb, str) else "that"))
+        args = dict(args)
+        has_req = verb in ACTION_VERBS and "req" in args
+        req = args.pop("req") if has_req else None
+        if has_req and not (isinstance(req, str) and REQ_RE.fullmatch(req)):
+            raise CtlError("not_allowed", "%s: the request id is not valid" % verb)
         extra = sorted(set(args) - set(spec))
         if extra:
             raise CtlError("not_allowed", "%s takes no argument %s" % (verb, ", ".join(repr(k) for k in extra)))
@@ -80,6 +121,9 @@ class Ctl:
                 continue
             if not check(args[name]):
                 raise CtlError("not_allowed", "%s is not a valid %s" % (verb, name))
+        _rules(verb, args)
+        if has_req:
+            args["req"] = req
         line = json.dumps(dict(args, verb=verb), sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
         if len(line.encode()) > MAX_REQUEST_BYTES:
             raise CtlError("not_allowed", "the request is too long")

@@ -1,10 +1,13 @@
-"""The read-only pages: Sites, Site, Jobs, Job, Audit. Each asks dellwp (through the ctl client, read verbs only) and renders what it was told. Whatever dellwp sends is text to show, never markup:
+"""The pages: Sites, Site, Jobs, Job, Audit (they only read), and the first forms: create a site, change one setting, move a site to hold, live or stopped (batch 11 of step 6). Each asks dellwp through the
+ctl client and renders what it was told. A form is a POST with the session's token (checked before anything else), asks for ONE verb, and answers with a redirect to that verb's job page; wp-ctl decides, the
+page only asks. Every form carries a request id made when the page was drawn, so a form sent twice (a double click, a reload) starts one job. Whatever dellwp sends is text to show, never markup:
 the templates escape it, and a job log goes in a <pre>. A page that cannot be had says why, in a page of its own, with a status the browser understands."""
 import json
+import secrets
 
-from flask import current_app, redirect, render_template, request, url_for
+from flask import abort, current_app, redirect, render_template, request, url_for
 
-from .ctl import CtlError
+from .ctl import JOB_RE, SET_KEYS, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -20,7 +23,54 @@ def error_page(e):
     return render_template("error.html", status=status, title=titles.get(status, "Error"), message=str(e)), status
 
 
+def form_error(e):
+    """A POST that the client or wp-ctl refused: the reason, in a page of its own. Nothing was started."""
+    if e.kind == "not_allowed":
+        return render_template("error.html", status=400, title="The form was not accepted", message=str(e)), 400
+    return error_page(e)
+
+
+def new_req():
+    return "p" + secrets.token_hex(16)
+
+
+def field(name, limit=600):
+    """One form field as text (an absent one is empty; a field sent twice counts as absent: only the first is read and the rest ignored by form.get)."""
+    value = request.form.get(name, "")
+    return value if isinstance(value, str) and len(value) <= limit else ""
+
+
+def started(reply):
+    """Redirect to the page of the job a verb started; anything else is not an answer wp-ctl gives for these verbs."""
+    job = reply.get("job")
+    if not isinstance(job, str) or not JOB_RE.fullmatch(job):
+        raise CtlError("bad_reply", "wp-ctl did not name the job it started")
+    return redirect(url_for("job", job=job), 303)
+
+
+# the moves wp-ctl allows (scripts/wp_site_model.py TRANSITIONS): a stopped site comes back on hold, never straight to live; the page offers only these, wp-ctl refuses the rest anyway
+MOVES = {"hold": ("live", "stopped"), "live": ("hold", "stopped"), "stopped": ("hold",)}
+
+# what the Site page offers to change: key -> (what it is, the kind of input, the choices or the range, what applying it costs); the rules are wp-ctl's, these only shape the form
+SETTINGS = [
+    ("update_policy", "Update policy", "choice", ("auto", "notify", "freeze"), "nothing is restarted"),
+    ("quota_mb", "Disk quota (MB)", "int", (512, 100000), "applied to the site's disk quota"),
+    ("backup_quota_mb", "Backup quota (MB)", "int", (512, 100000), "applied to the backup quota"),
+    ("php_mem_mb", "PHP memory (MB)", "int", (384, 4096), "restarts the stack: about ten seconds offline"),
+    ("db_mem_mb", "Database memory (MB)", "int", (192, 4096), "restarts the stack: about ten seconds offline"),
+    ("upload_mb", "Upload size (MB)", "int", (1, 512), "reloads nginx and PHP"),
+    ("allow_xmlrpc", "Allow XML-RPC", "bool", ("true", "false"), "a reload"),
+    ("allow_app_passwords", "Allow application passwords", "bool", ("true", "false"), "a reload"),
+    ("allow_user_enum", "Allow user enumeration", "bool", ("true", "false"), "a reload"),
+    ("mail_mode", "Mail", "choice", ("log", "send"), "send needs the Resend key in the vault"),
+    ("label", "Label", "text", 100, "registry only: nothing is applied"),
+    ("note", "Note", "text", 500, "registry only: nothing is applied"),
+]
+
+
 def register(app):
+    check_csrf = app.extensions["panel_check_csrf"]
+
     def page(fn):
         def wrapper(*a, **kw):
             try:
@@ -44,7 +94,49 @@ def register(app):
     @page
     def site(name):
         reply = ask("show", site=name)
-        return render_template("site.html", name=name, status=reply.get("status") or {}, registry=reply.get("registry") or {}, registry_error=reply.get("registry_error"))
+        registry = reply.get("registry") or {}
+        status = reply.get("status") or {}
+        state = status.get("deployed") if status.get("deployed") in ("hold", "live", "stopped") else registry.get("state")
+        return render_template("site.html", name=name, status=status, registry=registry, registry_error=reply.get("registry_error"), state=state, moves=MOVES.get(state, ()), settings=SETTINGS, req=new_req())
+
+    def action(fn):
+        """A POST page: the token first, then the verb; a refusal is shown, never retried."""
+        def wrapper(*a, **kw):
+            check_csrf()
+            try:
+                return fn(*a, **kw)
+            except CtlError as e:
+                return form_error(e)
+        wrapper.__name__ = fn.__name__
+        return wrapper
+
+    @app.get("/new-site")
+    def new_site():
+        return render_template("new_site.html", req=new_req())
+
+    @app.post("/new-site")
+    @action
+    def create_site():
+        args = {"name": field("name", 100), "req": field("req", 80)}
+        if field("label", 200):
+            args["label"] = field("label", 200)
+        return started(ask("create", **args))
+
+    @app.post("/sites/<name>/set")
+    @action
+    def set_value(name):
+        key = field("key", 40)
+        if key not in SET_KEYS:
+            abort(400)
+        return started(ask("set", site=name, key=key, value=field("value", 600), req=field("req", 80)))
+
+    @app.post("/sites/<name>/state")
+    @action
+    def set_state(name):
+        args = {"site": name, "state": field("state", 20), "req": field("req", 80)}
+        if args["state"] == "live":
+            args["confirm_name"] = field("confirm_name", 60)
+        return started(ask("ensure-state", **args))
 
     @app.get("/jobs")
     @page

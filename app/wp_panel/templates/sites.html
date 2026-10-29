@@ -2,6 +2,7 @@
 {% block title %}Sites{% endblock %}
 {% block body %}
 <h1>Sites</h1>
+<p><a href="{{ url_for('new_site') }}">New site</a></p>
 {% if rows %}
 <table>
   <thead><tr><th>Site</th><th>Recorded state</th><th>What nginx does</th><th>Unit</th></tr></thead>

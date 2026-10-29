@@ -6,6 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <title>{% block title %}WordPress hosting{% endblock %} · dellwp</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+{% block head %}{% endblock %}
 </head>
 <body>
 {% if logged_in() %}
