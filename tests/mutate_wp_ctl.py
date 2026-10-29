@@ -367,6 +367,23 @@ M = [
  ("the key line is not tied to the control app's address", 'tasks/wp_ctl_common.yml', '      from="{{ wp_ctl_panel_from }}",restrict,command=', '      restrict,command=', 'tests/test_wp_ctl.py'),
  ('the from address is not checked', 'tasks/wp_ctl_common.yml', "      - wp_ctl_panel_from is match('^[0-9]{1,3}(\\.[0-9]{1,3}){3}$')\n", '', 'tests/test_wp_ctl.py'),
  ('a newline in the from address is let through', 'tasks/wp_ctl_common.yml', '      - wp_ctl_panel_from == (wp_ctl_panel_from | trim)\n', '', 'tests/test_wp_ctl.py'),
+ ('a chain goes on after a failed step', W, '                if rc != 0:\n                    if len(steps) > 1 and number < len(steps):', '                if False:\n                    if len(steps) > 1 and number < len(steps):'),
+ ('each step of a chain gets the whole time limit', W, 'timeout=max(1.0, t_end - time.monotonic())', 'timeout=spec["timeout_s"]'),
+ ('a failing import-list is passed on as an answer', W, 'if rc != 0 or not isinstance(files, list)', 'if not isinstance(files, list)'),
+ ('import-list passes on a list that is not a list', W, 'or not isinstance(imports, list):', 'or False:'),
+ ('vuln-check calls a tool error an answer', W, '"ok": rc in (0, 1, 3)', '"ok": rc in (0, 1, 2, 3)'),
+ ('vuln-check calls a finding a failure', W, '"ok": rc in (0, 1, 3)', '"ok": rc in (0,)'),
+ ("accepting an import's failures needs no name", W, '"confirm_name": Arg("text", rx=NAME_RE, same="site", needs="accept_failures")}, h_import_approve)', '"confirm_name": Arg("text", required=False, rx=NAME_RE, same="site")}, h_import_approve)'),
+ ('import-new does not check the new name', W, 'check_new_name(call.ctl.cfg, a["name"])\n    create = ', 'pass\n    create = '),
+ ('import-new loads the file before the site exists', W, 'return call.chain([create, [call.ctl.tool("wp-site-import"), a["name"], a["file"]]])', 'return call.chain([[call.ctl.tool("wp-site-import"), a["name"], a["file"]], create])'),
+ ('import-new drops the label', W, 'create = [call.ctl.tool("wp-site-provision"), "create", a["name"]] + (["--set", "label=" + a["label"]] if "label" in a else [])', 'create = [call.ctl.tool("wp-site-provision"), "create", a["name"]]'),
+ ('update-apply only looks', W, 'call.ctl.tool("wp-site-update"), call.args["site"], "--apply"', 'call.ctl.tool("wp-site-update"), call.args["site"], "--check"'),
+ ('update-check applies', W, 'call.ctl.tool("wp-site-update"), call.args["site"], "--check"', 'call.ctl.tool("wp-site-update"), call.args["site"], "--apply"'),
+ ("the tool's own list takes the import lock", 'scripts/wp_site_import.py', '    if args == ["list"] and not (plan_only or accept or if_present or replace or reject):\n        return run_list(cfg, out)          # reads only: no lock, so it answers while an import runs\n', '', 'tests/test_wp_import.py'),
+ ("the tool's list shows a partial upload as a file", 'scripts/wp_site_import.py', '        if FILE_RE.match(e.name) and e.is_file() and not e.is_symlink():\n            st = e.stat()', '        if e.is_file():\n            st = e.stat()', 'tests/test_wp_import.py'),
+ ("the tool's list follows a linked work directory", 'scripts/wp_site_import.py', 'if not SITE_RE.match(site) or not work.is_dir() or work.is_symlink():', 'if not SITE_RE.match(site):', 'tests/test_wp_import.py'),
+ ("the tool's list calls an unfinished import reported", 'scripts/wp_site_import.py', 'stage = "reported" if rec.get("stage") == "reported" else "unfinished"', 'stage = "reported"', 'tests/test_wp_import.py'),
+ ("the tool's list hides why an import is not clean", 'scripts/wp_site_import.py', '"problems": unclean_reasons(rec) if stage == "reported" else []', '"problems": []', 'tests/test_wp_import.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

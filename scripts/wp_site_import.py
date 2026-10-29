@@ -9,6 +9,7 @@ wp_wpress.py are copied to the tools library by tasks/wp_tools_common.yml).
     wp-site-import report <site>                     (prints the report again)
     wp-site-import receive <file.wpress>             (the file on standard input: how the laptop sends it; the intake directory is root-only)
     wp-site-import discard <file.wpress> [--if-present]   (removes a file from the intake directory, unless an import was made from it; --if-present: silent when it is not there)
+    wp-site-import list                              (one JSON line for the control app: the files in the intake and the imports that wait for a decision; reads only, takes no lock)
     wp-site-import resolve <token>                   (what the phone's Approve and Deny buttons lead to, through the listener: scripts/wp_approval_listener.py)
 
 --replace (a friend sends a newer archive for a site that already has data): the site must be on hold and have tables; you type the site name; a snapshot of the old site is taken first
@@ -1220,6 +1221,41 @@ def run_discard(cfg, name, out, if_present=False):
     return 0
 
 
+def run_list(cfg, out):
+    """What the intake holds, as ONE JSON line for the control app: `files` (name, bytes, mtime, and the site whose import was made from it, else null) and `imports` (one per work directory: the site,
+    its file, its stage (`reported` = waiting for a decision, anything else = unfinished: reset it), and for a reported one the reasons it may not be approved from a phone, empty when it is clean).
+    It only reads and takes no lock, so it answers while an import is running. A record that cannot be read is listed as unfinished, never an error: the page must still open."""
+    intake = Path(cfg["intake_dir"])
+    imports, used = [], {}
+    for work in sorted(intake.glob("work-*")):
+        site = work.name[len("work-"):]
+        if not SITE_RE.match(site) or not work.is_dir() or work.is_symlink():
+            continue
+        try:
+            rec = json.loads((work / "PLAN.json").read_text())
+            if not isinstance(rec, dict):
+                raise ValueError
+        except (OSError, ValueError):
+            imports.append({"site": site, "file": None, "stage": "unfinished", "problems": []})
+            continue
+        name = rec.get("file") if FILE_RE.match(str(rec.get("file"))) else None
+        stage = "reported" if rec.get("stage") == "reported" else "unfinished"
+        if name:
+            used[name] = site
+        imports.append({"site": site, "file": name, "stage": stage, "problems": unclean_reasons(rec) if stage == "reported" else []})
+    files = []
+    try:
+        entries = sorted(intake.iterdir(), key=lambda e: e.name)
+    except OSError:
+        entries = []
+    for e in entries:
+        if FILE_RE.match(e.name) and e.is_file() and not e.is_symlink():
+            st = e.stat()
+            files.append({"name": e.name, "bytes": st.st_size, "mtime": int(st.st_mtime), "site": used.get(e.name)})
+    out(json.dumps({"files": files, "imports": imports}, sort_keys=True))
+    return 0
+
+
 def run_report(cfg, site, out):
     if not SITE_RE.match(site or ""):
         raise Refuse("'%s' is not a site name" % site)
@@ -1237,7 +1273,7 @@ def tty_ask(prompt):
         return t.readline()
 
 
-USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan] [--replace]\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
+USAGE = ("usage: wp-site-import <site> <file.wpress> [--plan] [--replace]\n       wp-site-import list\n       wp-site-import approve <site> [--reject a,b] [--accept-failures]\n       wp-site-import reset <site>\n"
          "       wp-site-import report <site>\n       wp-site-import receive <file.wpress>      (the file on standard input)\n       wp-site-import discard <file.wpress> [--if-present]\n"
          "       wp-site-import resolve <token>            (a signed token from the phone: approve a clean import, or deny)")
 
@@ -1251,6 +1287,8 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
         reject = [x for x in (args[i + 1] if i + 1 < len(args) else "").split(",") if x]
         args = args[:i] + args[i + 2:]
     plan_only, accept, if_present, replace = "--plan" in argv, "--accept-failures" in argv, "--if-present" in argv, "--replace" in argv
+    if args == ["list"] and not (plan_only or accept or if_present or replace or reject):
+        return run_list(cfg, out)          # reads only: no lock, so it answers while an import runs
     tools = Tools(cfg, run, popen, chown, which, clock, post)
     raw_out = out
 
@@ -1265,7 +1303,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             raise Refuse("another import is running")
         if "sites" not in cfg:           # the sites, their states and quotas come from the registry at every run; cfg["sites"] in the config replaces them (the tests do that)
             cfg["sites"] = registry_sites(cfg, run)
-        command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") else "import"
+        command = args[0] if args[:1] and args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list") else "import"
         if (plan_only and command != "import") or ((reject or accept) and command != "approve") or (if_present and command != "discard") or (replace and command != "import"):
             out(USAGE)           # a flag belongs to one command; one that is given to another is not quietly dropped
             return 2
@@ -1281,7 +1319,7 @@ def main(cfg, argv, get=w.fetch, run=subprocess.run, ask=tty_ask, out=print, pop
             return run_report(cfg, args[1], out)
         if args[:1] == ["approve"] and len(args) == 2:
             return run_approve(cfg, args[1], reject, accept, tools, out)
-        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve") or reject or accept:
+        if len(args) != 2 or args[0] in ("reset", "approve", "receive", "discard", "report", "resolve", "list") or reject or accept:
             out(USAGE)
             return 2
         return run_import(cfg, args[0], args[1], plan_only, get, tools, out, replace, ask)

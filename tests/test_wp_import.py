@@ -1736,6 +1736,100 @@ class Discard(Base):
         self.assertEqual(self.run_main(["discard", "friend.wpress"])[0], 0)
 
 
+class ListCommand(Base):
+    """`list`: one JSON line for the control app. It reads and takes no lock."""
+
+    def listing(self):
+        code, text = self.run_main(["list"])
+        self.assertEqual(code, 0, text)
+        self.assertEqual(len(text.splitlines()), 1, "one line")
+        return json.loads(text)
+
+    def test_an_empty_intake_lists_nothing(self):
+        self.assertEqual(self.listing(), {"files": [], "imports": []})
+
+    def test_a_file_is_listed_with_its_size_and_time_and_no_site(self):
+        self.put(b"abcdef", "friend.wpress")
+        got = self.listing()
+        (f,) = got["files"]
+        self.assertEqual((f["name"], f["bytes"], f["site"]), ("friend.wpress", 6, None))
+        self.assertIsInstance(f["mtime"], int)
+        self.assertEqual(got["imports"], [])
+
+    def test_a_file_that_is_not_a_plain_wpress_file_is_not_listed(self):
+        self.put(b"x", "ok.wpress")
+        self.put(b"x", "notes.txt")
+        self.put(b"x", ".recv-half.wpress")
+        outside = self.tmp / "victim.wpress"
+        outside.write_text("secret")
+        (self.intake / "link.wpress").symlink_to(outside)
+        (self.intake / "dir.wpress").mkdir()
+        self.assertEqual([f["name"] for f in self.listing()["files"]], ["ok.wpress"])
+
+    def test_an_import_that_waits_for_a_decision_is_listed_with_its_file_and_why_it_is_not_clean(self):
+        self.import_ok()
+        got = self.listing()
+        (imp_,) = got["imports"]
+        self.assertEqual((imp_["site"], imp_["file"], imp_["stage"]), ("wptest", "friend.wpress", "reported"))
+        self.assertIsInstance(imp_["problems"], list)
+        rec = json.loads((self.intake / "work-wptest/PLAN.json").read_text())
+        self.assertEqual(imp_["problems"], imp.unclean_reasons(rec), "the same reasons the phone notification gives")
+        self.assertEqual([f["site"] for f in got["files"]], ["wptest"], "the file knows which site it was imported into")
+
+    def test_a_known_vulnerability_in_the_scan_shows_as_a_problem_of_the_import(self):
+        self.import_ok()
+        plan = self.intake / "work-wptest/PLAN.json"
+        rec = json.loads(plan.read_text())
+        rec["scan"]["vuln"] = "FOUND: 7 finding(s): core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3"
+        plan.write_text(json.dumps(rec))
+        (imp_,) = self.listing()["imports"]
+        self.assertEqual(imp_["stage"], "reported")
+        self.assertTrue(any(p.startswith("known vulnerabilities: FOUND: 7 finding(s)") for p in imp_["problems"]), imp_["problems"])
+
+    def test_an_unfinished_unpack_is_listed_as_unfinished_with_no_problems(self):
+        self.put(b"x")
+        (self.intake / "work-wptest").mkdir()
+        (self.intake / "work-wptest/PLAN.json").write_text(json.dumps({"file": "friend.wpress", "stage": "unpacked"}))
+        (imp_,) = self.listing()["imports"]
+        self.assertEqual((imp_["stage"], imp_["file"], imp_["problems"]), ("unfinished", "friend.wpress", []))
+
+    def test_a_record_that_cannot_be_read_does_not_stop_the_listing(self):
+        (self.intake / "work-other").mkdir()
+        (self.intake / "work-other/PLAN.json").write_text("{not json")
+        (self.intake / "work-third").mkdir()
+        (self.intake / "work-third/PLAN.json").write_text("[1, 2]")
+        got = self.listing()
+        self.assertEqual(sorted((i["site"], i["stage"], i["file"]) for i in got["imports"]), [("other", "unfinished", None), ("third", "unfinished", None)])
+
+    def test_a_work_directory_that_is_not_a_site_name_or_is_a_link_is_not_listed(self):
+        (self.intake / "work-Bad_Name").mkdir()
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.intake / "work-linked").symlink_to(elsewhere)
+        self.assertEqual(self.listing()["imports"], [])
+
+    def test_it_answers_while_an_import_holds_the_lock(self):
+        import fcntl
+        fd = os.open(self.intake / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertEqual(self.run_main(["wptest", "friend.wpress"])[0], 2, "another import is refused")
+        self.assertEqual(self.listing(), {"files": [], "imports": []})
+
+    def test_it_changes_nothing_and_a_flag_or_a_second_word_is_a_usage_error(self):
+        self.put(b"x")
+        before = self.tree()
+        self.listing()
+        self.assertEqual(self.tree(), before)
+        for argv in (["list", "--plan"], ["list", "--accept-failures"], ["list", "--if-present"], ["list", "--replace"], ["list", "--reject", "a"], ["list", "wptest"], ["list", "friend.wpress"]):
+            self.assertEqual(self.run_main(argv)[0], 2, argv)
+
+    def test_a_name_with_odd_characters_cannot_break_the_json(self):
+        self.put(b"x", "a-b_c.1.wpress")
+        got = self.listing()
+        self.assertEqual(got["files"][0]["name"], "a-b_c.1.wpress")
+
+
 class ReportCommand(Base):
     def test_prints_the_report_again(self):
         self.import_ok()

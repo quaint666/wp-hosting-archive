@@ -43,6 +43,7 @@ if [ -n "${WP_SITE_TTY:-}" ]; then cat "$WP_SITE_TTY" > "$D/tty.seen.$$"; stat -
 if [ "$name" = wp-site-import ] && [ "${1:-}" = receive ]; then cat > "$D/received.bin"; fi
 [ -f "$D/sleep" ] && exec sleep "$(cat "$D/sleep")"
 [ -f "$D/leak" ] && echo "leaked: $(head -1 "$WP_SITE_TTY")"
+[ -f "$D/stdout.$name" ] && { cat "$D/stdout.$name"; exit "$(cat "$D/rc" 2>/dev/null || echo 0)"; }
 echo "$name ran"
 exit "$(cat "$D/rc" 2>/dev/null || echo 0)"
 """
@@ -58,7 +59,7 @@ exit 0
 SYSTEMD_RUN = "#!/bin/bash\n{ printf 'systemd-run'; for a in \"$@\"; do printf ' [%%s]' \"$a\"; done; printf '\\n'; } >> '%(dir)s/calls.log'\nexit \"$(cat '%(dir)s/sd_rc' 2>/dev/null || echo 0)\"\n"
 LOGGER = "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> '%(dir)s/journal'\nexit \"$(cat '%(dir)s/logger_rc' 2>/dev/null || echo 0)\"\n"
 LIMITS = {"default": {"timeout_s": 30, "memory_mb": 512, "tasks": 256}, "password": {"timeout_s": 30}, "backup": {"timeout_s": 600}, "delete": {"timeout_s": 600, "memory_mb": 384},
-          "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "set": {"timeout_s": 720}, "ensure-state": {"timeout_s": 730}, "install": {"timeout_s": 40},
+          "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "update-check": {"timeout_s": 750}, "update-apply": {"timeout_s": 760, "memory_mb": 1024}, "import-new": {"timeout_s": 770, "memory_mb": 1024}, "set": {"timeout_s": 720}, "ensure-state": {"timeout_s": 730}, "install": {"timeout_s": 40},
           "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}}
 HOSTILE_SITES = ["../x", "Site", "a;id", "x y", "", "a" * 25, "-a", "a-", "wp test", "wptest\n", "wptest/../held", "*", "wptest\x00", "WPTEST", "a", "nosuch", "wptest ", "$(id)"]
 
@@ -74,7 +75,7 @@ class Base(unittest.TestCase):
             (self.data / site).mkdir()
             (self.data / site / "site.json").write_text("{}")          # what makes a directory a site: a registry record
         self.shim = self.tmp / "seen"
-        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-ctl"):
+        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-ctl"):
             self.script(name, TOOL)
         self.script("wp-sites-status", STATUS)
         self.script("systemd-run", SYSTEMD_RUN)
@@ -252,9 +253,15 @@ class Argv(Base):
                 ("import, replace", {"verb": "import-run", "site": "wptest", "file": "f.wpress", "replace": True, "confirm_name": "wptest"},
                  [b + "/wp-site-import", "wptest", "f.wpress", "--replace"], "wptest\n"),
                 ("approve", {"verb": "import-approve", "site": "wptest"}, [b + "/wp-site-import", "approve", "wptest"], None),
-                ("approve, all options", {"verb": "import-approve", "site": "wptest", "reject": "a,b-c", "accept_failures": True},
+                ("approve, all options", {"verb": "import-approve", "site": "wptest", "reject": "a,b-c", "accept_failures": True, "confirm_name": "wptest"},
                  [b + "/wp-site-import", "approve", "wptest", "--reject", "a,b-c", "--accept-failures"], None),
-                ("reset", {"verb": "import-reset", "site": "wptest", "confirm_name": "wptest"}, [b + "/wp-site-import", "reset", "wptest"], "wptest\n")):
+                ("reset", {"verb": "import-reset", "site": "wptest", "confirm_name": "wptest"}, [b + "/wp-site-import", "reset", "wptest"], "wptest\n"),
+                ("update, check", {"verb": "update-check", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--check"], None),
+                ("update, apply", {"verb": "update-apply", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--apply"], None),
+                ("import into a new site", {"verb": "import-new", "name": "newshop", "file": "f.wpress"},
+                 [[b + "/wp-site-provision", "create", "newshop"], [b + "/wp-site-import", "newshop", "f.wpress"]], None),
+                ("import into a new site, with a label", {"verb": "import-new", "name": "newshop", "file": "f.wpress", "label": "My shop"},
+                 [[b + "/wp-site-provision", "create", "newshop", "--set", "label=My shop"], [b + "/wp-site-import", "newshop", "f.wpress"]], None)):
             with self.subTest(label):
                 rc, reply = self.call(req)
                 self.assertEqual((rc, reply["ok"]), (0, True), reply)
@@ -765,6 +772,134 @@ class Limits(Base):
         self.assertIn("wp-site-backup [wptest]", self.calls())
 
 
+class Intake(Base):
+    """import-list, vuln-check, the update verbs, the approval's typed name and the job of several steps (import-new)."""
+
+    LISTING = {"files": [{"name": "friend.wpress", "bytes": 5, "mtime": 1, "site": "held"}], "imports": [{"site": "held", "file": "friend.wpress", "stage": "reported", "problems": ["7 vulnerabilities"]}]}
+
+    def test_import_list_passes_the_tools_one_json_line_on(self):
+        self.control("stdout.wp-site-import", json.dumps(self.LISTING) + "\n")
+        rc, reply = self.call({"verb": "import-list"})
+        self.assertEqual((rc, reply), (0, dict(self.LISTING, ok=True)))
+        self.assertEqual(self.calls(), ["wp-site-import [list]"])
+        self.assertEqual(self.audit(), [], "a read is not audited")
+
+    def test_import_list_refuses_what_is_not_the_tools_one_line(self):
+        for text, rc_ in (("not json\n", 0), ("", 0), ("[1]\n", 0), (json.dumps({"files": 1, "imports": []}) + "\n", 0), (json.dumps({"files": [], "imports": "x"}) + "\n", 0), (json.dumps({"files": []}) + "\n", 0), (json.dumps(self.LISTING) + "\n", 3)):
+            with self.subTest(text=text[:20], rc=rc_):
+                self.control("stdout.wp-site-import", text)
+                self.control("rc", rc_)
+                rc, reply = self.call({"verb": "import-list"})
+                self.assertEqual((rc, reply["ok"], reply["error"]), (2, False, "tool_output"))
+        self.assertEqual(self.jobs(), [])
+
+    def test_import_list_takes_no_arguments(self):
+        for extra in ({"site": "wptest"}, {"file": "a.wpress"}):
+            rc, reply = self.call(dict({"verb": "import-list"}, **extra))
+            self.assertEqual((rc, reply["error"]), (2, "unknown_argument"))
+
+    def test_vuln_check_returns_the_answer_whether_something_was_found_or_not_and_fails_only_on_a_real_error(self):
+        self.control("stdout.wp-vulnfeed", "core wordpress 7.1.3: 7 findings\n")
+        for rc_, ok in ((0, True), (1, True), (3, True), (2, False), (124, False), (127, False)):
+            with self.subTest(rc=rc_):
+                self.control("rc", rc_)
+                rc, reply = self.call({"verb": "vuln-check", "site": "wptest"})
+                self.assertEqual((reply["ok"], reply["rc"]), (ok, rc_))
+                self.assertEqual(rc, 0 if ok else 1)
+                self.assertIn("7 findings", reply["out"])
+        self.assertEqual(set(self.calls()), {"wp-vulnfeed [check] [wptest]"})
+
+    def test_vuln_check_needs_an_existing_site(self):
+        for site in HOSTILE_SITES:
+            rc, reply = self.call({"verb": "vuln-check", "site": site})
+            self.assertEqual(rc, 2)
+        self.assert_nothing_happened()
+
+    def test_the_update_verbs_are_jobs_on_an_existing_site_only(self):
+        for verb in ("update-check", "update-apply"):
+            for site in HOSTILE_SITES:
+                rc, reply = self.call({"verb": verb, "site": site})
+                self.assertEqual(rc, 2, (verb, site))
+            rc, reply = self.call({"verb": verb, "site": "wptest"})
+            self.assertEqual((rc, reply["ok"], "job" in reply), (0, True, True))
+            self.assertEqual(self.spec(reply["job"])["verb"], verb)
+        self.assertEqual(len(self.jobs()), 2)
+
+    def test_the_update_job_runs_the_tool_and_keeps_its_exit_code(self):
+        rc, reply = self.call({"verb": "update-apply", "site": "wptest"})
+        self.control("rc", 3)
+        self.run_job(reply["job"])
+        self.assertEqual(self.call({"verb": "job-status", "job": reply["job"]})[1]["rc"], 3)
+        self.assertIn("wp-site-update [wptest] [--apply]", self.calls())
+
+    def test_accepting_the_failures_of_an_import_needs_the_name_typed_and_nothing_else_does(self):
+        for req in ({"verb": "import-approve", "site": "wptest", "accept_failures": True}, {"verb": "import-approve", "site": "wptest", "accept_failures": True, "confirm_name": "held"},
+                    {"verb": "import-approve", "site": "wptest", "accept_failures": True, "confirm_name": "WPTEST"}, {"verb": "import-approve", "site": "wptest", "accept_failures": True, "confirm_name": ""}):
+            rc, reply = self.call(req)
+            self.assertEqual(rc, 2, req)
+            self.assertIn(reply["error"], ("missing_argument", "confirm_mismatch", "bad_value"), req)
+        self.assert_nothing_happened()
+        rc, reply = self.call({"verb": "import-approve", "site": "wptest", "accept_failures": True, "confirm_name": "wptest"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        rc, reply = self.call({"verb": "import-approve", "site": "held"})
+        self.assertEqual((rc, reply["ok"]), (0, True), "a clean approval asks for no name")
+
+    def test_import_new_refuses_a_bad_taken_or_reserved_name_before_anything_starts(self):
+        for name, code in (("Bad_Name", "bad_value"), ("a", "bad_value"), ("hub", "reserved_name"), ("wptest", "name_taken"), ("held", "name_taken"), ("-x", "bad_value")):
+            rc, reply = self.call({"verb": "import-new", "name": name, "file": "f.wpress"})
+            self.assertEqual(rc, 2, name)
+            self.assertIn(reply["error"], (code, "invalid_name"), name)
+        self.assert_nothing_happened()
+
+    def test_import_new_is_one_job_whose_two_steps_run_in_order_and_whose_log_names_each(self):
+        rc, reply = self.call({"verb": "import-new", "name": "newshop", "file": "f.wpress", "label": "New shop", "req": "pn1"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        job = reply["job"]
+        self.assertEqual(self.run_job(job), 0)
+        self.assertEqual([c for c in self.calls() if not c.startswith("systemd-run")], ["wp-site-provision [create] [newshop] [--set] [label=New shop]", "wp-site-import [newshop] [f.wpress]"])
+        log = (self.state / "jobs" / job / "log").read_text()
+        self.assertLess(log.index("== step 1 of 2: wp-site-provision create newshop"), log.index("== step 2 of 2: wp-site-import newshop f.wpress"))
+        self.assertEqual((self.state / "jobs" / job / "exit").read_text(), "0\n")
+        self.assertEqual(self.call({"verb": "job-status", "job": job})[1]["rc"], 0)
+        result = [l for l in self.audit() if l["phase"] == "result"][0]
+        self.assertEqual((result["verb"], result["site"], result["rc"], result["caller"]), ("import-new", "newshop", 0, "panel"))
+
+    def test_the_first_step_that_fails_ends_the_job_with_its_status_and_the_next_does_not_run(self):
+        rc, reply = self.call({"verb": "import-new", "name": "newshop", "file": "f.wpress"})
+        self.control("rc", 2)
+        self.run_job(reply["job"])
+        self.assertEqual([c for c in self.calls() if not c.startswith("systemd-run")], ["wp-site-provision [create] [newshop]"])
+        self.assertEqual((self.state / "jobs" / reply["job"] / "exit").read_text(), "2\n")
+        self.assertIn("step 1 of 2 ended with status 2; the next step was not run", (self.state / "jobs" / reply["job"] / "log").read_text())
+
+    def test_a_failing_second_step_leaves_its_status_too(self):
+        rc, reply = self.call({"verb": "import-new", "name": "newshop", "file": "f.wpress"})
+        (self.bin / "wp-site-import").write_text("#!/bin/bash\necho second step failed\nexit 7\n")
+        (self.bin / "wp-site-import").chmod(0o755)
+        self.run_job(reply["job"])
+        self.assertEqual((self.state / "jobs" / reply["job"] / "exit").read_text(), "7\n")
+        self.assertIn("second step failed", (self.state / "jobs" / reply["job"] / "log").read_text())
+
+    def test_a_chain_shares_one_time_limit_and_a_slow_step_is_stopped(self):
+        cfg = self.limits(**{"import-new": {"timeout_s": 2, "memory_mb": 1024}})
+        rc, reply = self.call({"verb": "import-new", "name": "newshop", "file": "f.wpress"}, cfg=cfg)
+        self.control("sleep", 1.3)                    # each tool takes 1.3 s: either alone fits in the 2 s of the job, the two together do not
+        t0 = time.time()
+        wp_ctl.main(cfg, ["--run-job", reply["job"]], env=self.env, now=self.clock)
+        self.assertLess(time.time() - t0, 10)
+        self.assertEqual((self.state / "jobs" / reply["job"] / "exit").read_text(), "124\n", "the second step had only what the first left")
+        self.assertEqual([c for c in self.calls() if not c.startswith("systemd-run")], ["wp-site-provision [create] [newshop]", "wp-site-import [newshop] [f.wpress]"])
+
+    def test_the_same_request_again_is_the_same_job_and_the_site_it_makes_is_locked_meanwhile(self):
+        req = {"verb": "import-new", "name": "newshop", "file": "f.wpress", "req": "pn2"}
+        rc, first = self.call(req)
+        rc, again = self.call(req)
+        self.assertEqual((again["job"], again.get("duplicate")), (first["job"], True))
+        self.assertEqual(len(self.jobs()), 1)
+        rc, other = self.call({"verb": "import-new", "name": "newshop", "file": "g.wpress", "req": "pn2"})
+        self.assertEqual((rc, other["error"]), (2, "req_reused"))
+
+
 class Handlers(Base):
     def test_every_verb_is_one_handler_taking_one_call(self):
         for name, verb in wp_ctl.VERBS.items():
@@ -776,7 +911,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "import-new", "update-check", "update-apply"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)

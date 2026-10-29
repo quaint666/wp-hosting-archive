@@ -156,6 +156,10 @@ class Call:
     def job(self, argv, tty=None):
         return start_job(self.ctl, self.name, self.args, (argv, tty), self.rec)
 
+    def chain(self, steps):
+        """A job of several tools one after another, in one unit under one lock; the first that fails ends it and its status is the job's."""
+        return start_job(self.ctl, self.name, self.args, (steps, None), self.rec)
+
 
 # ------------------------------------------------------------------------------------------------------------------------------------- the config
 def check_limits(cfg, verbs):
@@ -436,15 +440,25 @@ def run_job(ctl, argv):
             rc = BUSY
             log.write(b"wp-ctl: another verb holds this site; nothing was run\n")
         else:
-            try:
-                rc = ctl.run(spec["argv"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=spec["timeout_s"],
-                             env=ctl.child_env({"WP_SITE_TTY": str(tty)} if tty.exists() else None)).returncode
-            except subprocess.TimeoutExpired:
-                rc = 124
-                log.write(("\nwp-ctl: the tool was stopped after %d s\n" % spec["timeout_s"]).encode())
-            except OSError as e:
-                rc = 127
-                log.write(("wp-ctl: the tool could not be started (%s)\n" % e.strerror).encode())
+            steps = spec["argv"] if spec["argv"] and isinstance(spec["argv"][0], list) else [spec["argv"]]          # one tool, or several in a row (`Call.chain`)
+            t_end = time.monotonic() + spec["timeout_s"]
+            for number, argv in enumerate(steps, 1):
+                if len(steps) > 1:
+                    log.write(("== step %d of %d: %s\n" % (number, len(steps), " ".join([os.path.basename(argv[0])] + argv[1:]))).encode())
+                    log.flush()
+                try:
+                    rc = ctl.run(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=max(1.0, t_end - time.monotonic()),
+                                 env=ctl.child_env({"WP_SITE_TTY": str(tty)} if tty.exists() else None)).returncode
+                except subprocess.TimeoutExpired:
+                    rc = 124
+                    log.write(("\nwp-ctl: the tool was stopped after %d s\n" % spec["timeout_s"]).encode())
+                except OSError as e:
+                    rc = 127
+                    log.write(("wp-ctl: the tool could not be started (%s)\n" % e.strerror).encode())
+                if rc != 0:
+                    if len(steps) > 1 and number < len(steps):
+                        log.write(("wp-ctl: step %d of %d ended with status %d; the next step was not run\n" % (number, len(steps), rc)).encode())
+                    break
     finally:
         log.close()
         if lock is not None:
@@ -580,6 +594,43 @@ def h_audit_tail(call):
     return {"ok": True, "lines": out}
 
 
+def h_import_list(call):
+    """What the intake holds and which imports wait for a decision: the tool's one JSON line, checked and passed on."""
+    rc, text = call.run([call.ctl.tool("wp-site-import"), "list"])
+    try:
+        data = json.loads(text.strip().splitlines()[-1])
+        files, imports = data["files"], data["imports"]
+        if rc != 0 or not isinstance(files, list) or not isinstance(imports, list):
+            raise ValueError
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise Refuse("tool_output", "wp-site-import list did not answer with its one JSON line (status %d)" % rc)
+    return {"ok": True, "files": files, "imports": imports}
+
+
+def h_vuln_check(call):
+    """What a site runs against the vulnerability index. The tool's own statuses are answers, not failures: 0 nothing known, 1 something found, 3 not run (no key, no index, or one too old to trust)."""
+    rc, text = call.run([call.ctl.tool("wp-vulnfeed"), "check", call.args["site"]])
+    return {"ok": rc in (0, 1, 3), "rc": rc, "ran": True, "out": text}
+
+
+def h_update_check(call):
+    return call.job([call.ctl.tool("wp-site-update"), call.args["site"], "--check"])
+
+
+def h_update_apply(call):
+    """Apply every available update by hand, as the nightly job's `--apply`: snapshot first, probe after, roll back by itself when the site does not come up healthy."""
+    return call.job([call.ctl.tool("wp-site-update"), call.args["site"], "--apply"])
+
+
+def h_import_new(call):
+    """A new site and the import into it as one job: create the site (on hold, empty), then load the file. The name is checked as `create` does before anything starts; if the import fails the empty site stays (reset or delete it)."""
+    a = call.args
+    if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):
+        check_new_name(call.ctl.cfg, a["name"])
+    create = [call.ctl.tool("wp-site-provision"), "create", a["name"]] + (["--set", "label=" + a["label"]] if "label" in a else [])
+    return call.chain([create, [call.ctl.tool("wp-site-import"), a["name"], a["file"]]])
+
+
 def h_import_report(call):
     return call.reply([call.ctl.tool("wp-site-import"), "report", call.args["site"]])
 
@@ -676,6 +727,8 @@ VERBS = {
     "job-log": Verb("read", {"job": Arg("text", rx=JOB_RE), "offset": Arg("int", required=False, lo=0, hi=2 ** 40, default=0)}, h_job_log),
     "audit-tail": Verb("read", {"lines": Arg("int", required=False, lo=1, hi=200, default=50)}, h_audit_tail),
     "import-report": Verb("read", {"site": SITE}, h_import_report),
+    "import-list": Verb("read", {}, h_import_list),
+    "vuln-check": Verb("read", {"site": SITE}, h_vuln_check),
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
     "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),
@@ -688,7 +741,11 @@ VERBS = {
     "import-discard": Verb("inline", {"file": Arg("text", rx=IMPORT_FILE_RE), "if_present": Arg("flag")}, h_import_discard),
     "import-run": Verb("job", {"site": SITE, "file": Arg("text", rx=IMPORT_FILE_RE), "plan": Arg("flag"), "replace": Arg("flag"),
                                "confirm_name": Arg("text", rx=NAME_RE, same="site", needs="replace")}, h_import_run),
-    "import-approve": Verb("job", {"site": SITE, "reject": Arg("text", required=False, rx=REJECT_RE), "accept_failures": Arg("flag")}, h_import_approve),
+    "import-approve": Verb("job", {"site": SITE, "reject": Arg("text", required=False, rx=REJECT_RE), "accept_failures": Arg("flag"),
+                                   "confirm_name": Arg("text", rx=NAME_RE, same="site", needs="accept_failures")}, h_import_approve),
+    "import-new": Verb("job", {"name": Arg("name"), "label": Arg("text", required=False, rx=LABEL_RE), "file": Arg("text", rx=IMPORT_FILE_RE)}, h_import_new),
+    "update-check": Verb("job", {"site": SITE}, h_update_check),
+    "update-apply": Verb("job", {"site": SITE}, h_update_apply),
     "import-reset": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site")}, h_import_reset),
 }
 
