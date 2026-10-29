@@ -1,6 +1,5 @@
 # Managed by Ansible (templates/wp/wp_tools_common.sh.j2). Sourced by wp-site-cli, wp-site-install and wp-site-login-check; not run on its own. Root-only tools:
 # there is no sudoers entry and no setuid bit, so nobody can reach them who cannot already be root on this VM.
-readonly WP_SITES='{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}{{ ' ' if not loop.last }}{% endfor %}'
 readonly WP_DATA='{{ wp_data_mount }}/sites'
 readonly WP_DOMAIN='{{ wp_domain }}'
 readonly WP_LISTEN='{{ wp_nginx_listen_port }}'
@@ -9,19 +8,21 @@ readonly WP_FREEZE='{{ wp_freeze_file }}'
 {% raw %}
 die() { echo "$(basename "$0"): $*" >&2; exit 2; }
 
-# Sets site, dir and host. The name must look like a site name AND be one that exists: the regex keeps path tricks and globs out, the list keeps typos out. A site exists if the repo declares it
-# (WP_SITES, rendered by the play) OR it has a registry record, site.json, in its directory (written by the control app's provisioning; a link does not count). This is the TRANSITION: while the
-# sites are still declared in the repo the two agree; when they leave the repo WP_SITES is empty and the record is the only source. The tools that loop over $WP_SITES themselves (wp-backup-check,
-# wp-restore-drill) do not see a site that only has a record; they move to the registry in the step that moves the sites.
+# Sets site, dir and host. The name must look like a site name AND be one that exists: the regex keeps path tricks and globs out, the record keeps typos out. A site exists if it has a registry
+# record, site.json, in its directory (written by wp-site-provision; a link does not count). Only the file is looked at, not the registry as a whole, so the tools that finish a half-done job
+# (wp-site-delete after an interrupted close) still run when another site's record is bad.
 require_site() {
   site=${1:-}
   [[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || die "'$site' is not a site name"
-  local s known=0
-  for s in $WP_SITES; do [ "$s" = "$site" ] && known=1; done
-  [ "$known" = 1 ] || { [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || die "'$site' is not in wp_sites (add it and run dellwp/wp_sites_dellwp.yml)"
+  { [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || die "'$site' is not a site (it has no registry record: create it with wp-ctl create)"
   dir=$WP_DATA/$site
   host=$site.$WP_DOMAIN
 }
+
+# One line for every site that is not closed, from the registry, as wp-site-provision rows prints them: name state quota_id quota_mb backup_quota_id backup_quota_mb update_policy. The tools that
+# watch or report on the sites read this instead of a list baked in by the play. It FAILS when the registry cannot be read, so a caller must take it into a variable first
+# (rows=$(site_rows) stops a `set -e` script; a pipe or a `for` over $(site_rows) would turn a broken registry into "no sites" and hide it).
+site_rows() { "$WP_BIN/wp-site-provision" rows </dev/null; }
 
 # A stopped site has no containers (templates/wp/site_nginx.conf.j2, tasks/wp_site_one_common.yml render stopped.flag from the state). A tool that needs the stack says so, instead of
 # failing on a missing container or network. Call it after require_site.

@@ -5,6 +5,7 @@
     wp-site-provision apply  <name>                         make the VM match the site's record; safe to run again, and the way to finish a create that stopped half-way
     wp-site-provision set    <name> key=value [...]         change editable fields of the record and apply them (label and note are only recorded)
     wp-site-provision state  <name> hold|live|stopped       move the site to that state (model.plan_state: the moves that exist); the final backup is taken before it stops
+    wp-site-provision rows                                  one line for every site that is not closed, for the tools that watch or report on the sites (see rows(); read-only)
     wp-site-provision close  <name>                         leave the site's tombstone and remove its record (wp-site-delete does this before it removes the site's files; safe to repeat)
     wp-site-provision render <name> [--diff]                compare what the templates give today with the files on the VM (read-only; a secret file is compared by hash, never shown)
 
@@ -235,6 +236,20 @@ class Provisioner:
                 self.out("taking the final backup of %s" % name)
                 self.cmd("backup", name, "--tag=final", timeout=self.cfg["backup_timeout_s"])
         return self.change(name, {"state": target}, check=check, before=backup)
+
+    ROW_FIELDS = "name state quota_id quota_mb backup_quota_id backup_quota_mb update_policy"
+
+    def rows(self):
+        """One line per site that is not closed, the facts the monitors and the status tool need, from the registry (and the repo's list while it still declares sites), each over the defaults:
+        `name state quota_id quota_mb backup_quota_id backup_quota_mb update_policy`, separated by single spaces, sorted by name. The backup project is the site's plus the platform's offset, as in
+        the play. Read-only. It raises Failed when the registry cannot be read (a record that is not valid, a site with both a record and a tombstone): a monitor that cannot read its input
+        must say so, and a caller that treats no output as no sites would hide a broken registry."""
+        try:
+            sites = [s for s in self.all_merged() if s["state"] != "closed"]
+        except model.RegistryError as e:
+            raise Failed(str(e))
+        offset = int(self.platform["wp_backup_quota_offset"])
+        return ["%s %s %d %d %d %d %s" % (s["name"], s["state"], int(s["quota_id"]), int(s["quota_mb"]), int(s["quota_id"]) + offset, int(s["backup_quota_mb"]), s["update_policy"]) for s in sites]
 
     def close(self, name):
         """Leave the site's tombstone and remove its record, so its name, port and quota id are never given out again. wp-site-delete calls this after its archive is verified and before it removes
@@ -510,6 +525,7 @@ def main(cfg, argv, out=print, err=None, **kw):
     sw = sub.add_parser("state")
     sw.add_argument("name")
     sw.add_argument("target", choices=("hold", "live", "stopped"))
+    sub.add_parser("rows")
     cl = sub.add_parser("close")
     cl.add_argument("name")
     r = sub.add_parser("render")
@@ -532,6 +548,9 @@ def main(cfg, argv, out=print, err=None, **kw):
             prov.state(args.name, args.target)
         elif args.verb == "close":
             prov.close(args.name)
+        elif args.verb == "rows":
+            for line in prov.rows():
+                out(line)
         else:
             rows, text = prov.render(args.name, args.diff)
             for path, status in rows:

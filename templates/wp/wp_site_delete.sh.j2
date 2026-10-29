@@ -18,6 +18,7 @@ set -eu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
 readonly PROVISION='{{ wp_tools_bin }}/wp-site-provision'
+readonly TOMBSTONES='{{ wp_data_mount }}/tombstones'
 readonly ARCHIVE='{{ wp_archive_dir }}'
 readonly KEEP_DAYS='{{ wp_archive_keep_days }}'
 readonly UNIT_DIR='{{ wp_unit_dir }}'
@@ -29,7 +30,12 @@ readonly HOST_NAME='{{ inventory_hostname }}'
 {% raw %}
 usage() { echo "usage: wp-site-delete <site>   (run with ssh -t: it asks you to type the site's name)" >&2; exit 2; }
 [ "$#" -eq 1 ] || usage
-require_site "$1"
+# Not require_site: a delete interrupted after the registry was closed has no record any more, and has to be finishable. The registry knows the site if it has a record or a tombstone (not a link).
+site=${1:-}
+[[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || die "'$site' is not a site name"
+{ [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || { [ -f "$TOMBSTONES/$site.json" ] && [ ! -L "$TOMBSTONES/$site.json" ]; } || die "'$site' is not a site (it has no registry record and no tombstone)"
+dir=$WP_DATA/$site
+host=$site.$WP_DOMAIN
 bk=$BACKUPS/$site
 unit=wp-$site.service; vhost=$VHOST_DIR/wp_site_$site.conf
 php=wp_${site//-/_}_php; db=wp_${site//-/_}_db; net=wp-${site}_default

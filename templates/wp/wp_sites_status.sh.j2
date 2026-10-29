@@ -1,9 +1,9 @@
 #!/bin/bash
 # Managed by Ansible (templates/wp/wp_sites_status.sh.j2). What is each site doing right now?   wp-sites-status
-# Prints tab-separated values: a header and one line per site. It is the host's half of scripts/wp_sites_status.py, which adds what the repo declares, lines the three up and flags
+# Prints tab-separated values: a header and one line per site. It is the host's half of scripts/wp_sites_status.py, which lines the report up and flags
 # what needs attention; read it on the VM with   wp-sites-status | column -t -s "$(printf '\t')"   Read-only and quick: the filesystem, systemctl, one docker ps and one repquota, no
 # WP-CLI container, so it works when a stack is down. Columns:
-#   deployed  the state the sites play last rendered (a held site is on hold for the tool too)    actual  what the nginx vhost on disk really does (hold = deny all; live; none)
+#   deployed  the state in the site's registry record (a held site is on hold for the tool too)    actual  what the nginx vhost on disk really does (hold = deny all; live; none)
 #   unit      systemctl is-active wp-<site>     containers  how many of the two are up and not unhealthy, starting or restarting
 #   core      WordPress version from the files    plugins  installed plugins, directories and single-file ones (not "active": that needs the database)
 #   backup_age_h / backup_stamp   hours since the last good backup (.last-success) and its stamp      quota_pct / backup_quota_pct   share of the site's and the backups' quota used
@@ -14,9 +14,10 @@ set -u
 readonly BACKUPS='{{ wp_backup_dir }}'
 readonly MOUNT='{{ wp_data_mount }}'
 readonly VHOSTS="${WP_STATUS_VHOST_DIR:-{{ wp_vhost_dir }}}"
-# name:state:quota project id:quota MB:backup project id:backup quota MB
-readonly TABLE='{{ wp_status_sites }}'
 {% raw %}
+# The sites come from the registry at every run (name:state:quota project id:quota MB:backup project id:backup quota MB); if it cannot be read this fails, and the ThinkPad half says so.
+rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed)"
+TABLE=$(printf '%s\n' "$rows" | awk 'NF {print $1 ":" $2 ":" $3 ":" $4 ":" $5 ":" $6}')
 report=$(repquota -P -n "$MOUNT" 2>/dev/null) || report=""
 dps=$(docker ps -a --format '{{.Names}}|{{.Status}}' 2>/dev/null) || dps=""
 now=$(date +%s)

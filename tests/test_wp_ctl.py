@@ -1272,9 +1272,9 @@ class Registry(unittest.TestCase):
         r = subprocess.run(["bash", "-c", '. "$1"; require_site "$2"; echo "$site|$dir"', "x", str(self.lib), name], capture_output=True, text=True)
         return r.returncode == 0, r
 
-    def test_a_declared_site_a_record_and_nothing_else(self):
+    def test_a_record_and_nothing_else(self):
         sites = self.tmp / "sites"
-        self.assertTrue(self.known("alive")[0], "declared by the play")
+        self.assertFalse(self.known("alive")[0], "a site only the play declares is not a site: the registry is the one source")
         self.assertFalse(self.known("gone")[0], "a closed site is not a site")
         self.assertFalse(self.known("fresh")[0])
         (sites / "fresh").mkdir()
@@ -1296,10 +1296,10 @@ class Registry(unittest.TestCase):
             with self.subTest(name):
                 self.assertFalse(self.known(name)[0], name)
 
-    def test_the_message_for_an_unknown_site_is_unchanged(self):
+    def test_the_message_for_an_unknown_site_names_the_registry(self):
         ok, r = self.known("nosuch")
         self.assertFalse(ok)
-        self.assertIn("'nosuch' is not in wp_sites", r.stderr)
+        self.assertIn("'nosuch' is not a site (it has no registry record: create it with wp-ctl create)", r.stderr)
 
 
 if __name__ == "__main__":

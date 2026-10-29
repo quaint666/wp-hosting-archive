@@ -90,6 +90,7 @@ class Base(unittest.TestCase):
         (self.site / "html/wp-includes").mkdir(parents=True)
         (self.site / "html/wp-includes/version.php").write_text("<?php\n$wp_version = '7.1.3';\n")
         (self.site / "wp-config.php").write_text("<?php\n")
+        (self.site / "site.json").write_text("{}")           # a site exists when it has a registry record (templates/wp/wp_tools_common.sh.j2 require_site)
         (self.site / ".env").write_text("MARIADB_USER=wp\n")
         self.backups = data / "backups"
         (self.backups / "wptest").mkdir(parents=True)
@@ -100,6 +101,12 @@ class Base(unittest.TestCase):
                         wp_freeze_file=str(self.tmp / "freeze"), wp_disk_state_dir=str(self.tmp / "state"), inventory_hostname="dellwp")
         self.env_j = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
         self.install("wp_tools_common.sh.j2", "lib/common.sh")
+        # wp-site-provision rows, the one reader of the registry: it prints what the test puts in $SHIM/rows, or fails when $SHIM/rows_fail exists
+        prov = self.tmp / "bin" / "wp-site-provision"
+        prov.write_text('#!/bin/bash\n[ "$1" = rows ] || exit 64\n[ -f "$SHIM/rows_fail" ] && { echo "wp-site-provision: the registry is unreadable" >&2; exit 1; }\ncat "$SHIM/rows" 2>/dev/null\nexit 0\n')
+        prov.chmod(0o755)
+        d = self.v["wp_site_defaults"]
+        self.rows("wptest hold 1001 %d 2001 %d %s" % (d["quota_mb"], d["backup_quota_mb"], d["update_policy"]))
         self.env = dict(os.environ, PATH="%s:%s" % (self.tmp / "shim", os.environ["PATH"]), SHIM=str(self.tmp / "shim"))
         self.put("dump.sql", DUMP_OK)
         for name, body in (("ntfy-notify", NTFY), ("date", DATE), ("chattr", "#!/bin/bash\nexit 0\n"), ("chown", "#!/bin/bash\nexit 0\n"),
@@ -113,6 +120,10 @@ class Base(unittest.TestCase):
         f = self.tmp / "shim" / name
         f.write_text(body)
         f.chmod(f.stat().st_mode | stat.S_IXUSR)
+
+    def rows(self, *lines):
+        """The lines wp-site-provision rows prints: name state quota_id quota_mb backup_quota_id backup_quota_mb update_policy."""
+        self.put("rows", "".join(l + "\n" for l in lines))
 
     def put(self, name, text):
         (self.tmp / "shim" / name).write_text(text)
@@ -559,6 +570,37 @@ class BackupCheck(Base):
         self.assertEqual(len(self.said()), 2)
         self.assertIn("has a fresh backup again", self.said()[1])
 
+    def test_a_site_that_only_the_registry_knows_is_judged_like_any_other(self):
+        d = self.v["wp_site_defaults"]
+        self.rows("wptest hold 1001 %d 2001 %d notify" % (d["quota_mb"], d["backup_quota_mb"]), "newsite live 1002 %d 2002 %d notify" % (d["quota_mb"], d["backup_quota_mb"]))
+        (self.site.parent / "newsite").mkdir(); (self.backups / "newsite").mkdir()
+        self.mark(2)
+        f = self.backups / "newsite" / ".last-success"
+        f.write_text("20261024T201500Z")
+        t = time.time() - 40 * 3600
+        os.utime(f, (t, t))
+        self.assertEqual(self.run_script(self.script).returncode, 0)
+        self.assertEqual(len(self.said()), 1, self.said())
+        self.assertIn("site newsite has no backup newer than 30 hours", self.said()[0])
+
+    def test_a_site_the_registry_does_not_list_is_not_judged(self):
+        self.rows()                                     # a closed site, or one that was never registered
+        self.mark(100)
+        self.assertEqual(self.run_script(self.script).returncode, 0)
+        self.assertEqual(self.said(), [])
+
+    def test_a_registry_that_cannot_be_read_fails_the_check_loudly_and_does_not_clear_or_raise_anything(self):
+        self.mark(100)
+        self.run_script(self.script)
+        told = self.said()
+        self.assertEqual(len(told), 1)
+        self.put("rows_fail", "")
+        r = self.run_script(self.script)
+        self.assertEqual(r.returncode, 2, "the unit fails, so OnFailure= tells ntfy")
+        self.assertIn("cannot read the site registry", r.stderr)
+        self.assertEqual(self.said(), told, "no new message, and the stale flag of the site is still up")
+        self.assertTrue((self.tmp / "state" / "backup-stale-wptest.flag").exists())
+
     def waiting_for_an_import(self, tables="0"):
         self.shim("docker", DOCKER_COUNT)
         self.put("tables", tables)
@@ -650,12 +692,16 @@ class Drill(Base):
         # the drill calls wp-site-restore in the tools directory: a recording stand-in there
         (self.tmp / "bin" / "wp-site-restore").write_text('#!/bin/bash\necho "$*" >> "%s"\n' % (self.tmp / "shim" / "restore.calls"))
         (self.tmp / "bin" / "wp-site-restore").chmod(0o755)
-        self.script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=[{"name": n} for n in ("wptest", "alpha", "beta", "gamma")])
-        self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=[{"name": n} for n in ("wptest", "alpha", "beta", "gamma")])
+        self.script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill")
+        self.row_names("wptest", "alpha", "beta", "gamma")
         for n in ("wptest", "alpha", "beta"):
             (self.backups / n).mkdir(exist_ok=True)
             (self.backups / n / ".last-success").write_text("20261024T201500Z")
         (self.backups / "gamma").mkdir(exist_ok=True)   # a site with no good backup yet
+
+    def row_names(self, *names):
+        d = self.v["wp_site_defaults"]
+        self.rows(*["%s hold %d %d %d %d %s" % (n, 1001 + i, d["quota_mb"], 2001 + i, d["backup_quota_mb"], d["update_policy"]) for i, n in enumerate(names)])
 
     def picks(self, n=1, **env):
         for _ in range(n):
@@ -677,23 +723,25 @@ class Drill(Base):
         self.assertEqual(self.log("restore.calls").count("\n"), 1, "nothing else was run")
 
     def test_with_no_site_at_all_there_is_nothing_to_drill_and_nothing_is_wrong(self):
-        for label, sites in (("none ever made", []), ("every one closed", [{"name": "gone", "state": "closed"}, {"name": "gone2", "state": "closed"}])):
-            with self.subTest(label):
-                script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=sites)
-                self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=sites)   # the drill reads its site list from the shared library
-                (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
-                r = self.run_script(script)
-                self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("there are no sites", r.stdout)
-                self.assertEqual(self.log("restore.calls"), "", "no restore was started")
+        self.rows()                                     # the registry is readable and holds no site that is not closed
+        r = self.run_script(self.script)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("there are no sites", r.stdout)
+        self.assertEqual(self.log("restore.calls"), "", "no restore was started")
+
+    def test_a_registry_that_cannot_be_read_fails_the_drill_and_is_not_no_sites(self):
+        self.put("rows_fail", "")
+        r = self.run_script(self.script)
+        self.assertEqual(r.returncode, 2); self.assertIn("cannot read the site registry", r.stderr)
+        self.assertNotIn("there are no sites", r.stdout)
+        self.assertEqual(self.log("restore.calls"), "")
 
     def test_a_closed_site_with_an_old_backup_is_never_drilled(self):
-        script = self.install("wp_restore_drill.sh.j2", "bin/wp-restore-drill", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
-        self.install("wp_tools_common.sh.j2", "lib/common.sh", wp_sites=[{"name": "gone", "state": "closed"}, {"name": "alpha"}])
+        self.row_names("alpha")                         # `gone` is closed: the registry does not list it
         (self.backups / "alpha").mkdir(exist_ok=True); (self.backups / "alpha" / ".last-success").write_text("20261024T201500Z")
         (self.backups / "gone").mkdir(exist_ok=True); (self.backups / "gone" / ".last-success").write_text("20261024T201500Z")
         for _ in range(8):
             (self.tmp / "shim" / "restore.calls").unlink(missing_ok=True)
-            self.assertEqual(self.run_script(script).returncode, 0)
+            self.assertEqual(self.run_script(self.script).returncode, 0)
             self.assertEqual(self.log("restore.calls").split()[0], "alpha")
 
     def test_with_no_backup_anywhere_it_fails_so_that_the_unit_alerts(self):

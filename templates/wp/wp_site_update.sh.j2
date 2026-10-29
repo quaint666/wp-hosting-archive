@@ -24,7 +24,6 @@
 # WP_UPDATE_FAIL_PROBE=1 in the environment makes the probe fail, for the rehearsal (scripts/wp_update_rehearsal_dellwp.sh); nothing else reads it.
 set -eEu -o pipefail
 . {{ wp_tools_lib }}/common.sh
-readonly POLICIES='{{ wp_update_policies }}'
 readonly PROBE_PORT='{{ wp_nginx_probe_port }}'
 readonly PROBE_TRIES='{{ wp_update_probe_tries }}'
 readonly PROBE_WAIT='{{ wp_update_probe_wait_s }}'
@@ -37,9 +36,9 @@ require_site "$1"; shift
 mode=policy
 for a in "$@"; do case $a in --check) mode=check ;; --apply) mode=apply ;; *) usage ;; esac; done
 refuse_if_stopped
-policy=""
-for p in $POLICIES; do [ "${p%%:*}" = "$site" ] && policy=${p#*:}; done
-case $policy in auto|notify|freeze) ;; *) die "no valid update policy for $site ('$policy'): run dellwp/wp_sites_dellwp.yml" ;; esac
+rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed): no update policy for $site"
+policy=$(printf '%s\n' "$rows" | awk -v s="$site" '$1 == s {print $7}')
+case $policy in auto|notify|freeze) ;; *) die "no valid update policy for $site ('$policy'): is it in the registry (wp-site-provision rows)?" ;; esac
 flag=$dir/maintenance.flag; last=$dir/.update-last; notified=$dir/.update-notified; failed_set=$dir/.update-failed; held_marker=$dir/.update-held; core_major_file=$dir/.update-core-major
 php=wp_${site//-/_}_php; unit=wp-$site.service
 cli() { "$WP_BIN/wp-site-cli" "$site" "$@" </dev/null; }

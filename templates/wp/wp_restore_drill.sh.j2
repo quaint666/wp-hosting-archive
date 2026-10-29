@@ -9,9 +9,11 @@ set -eu
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
 {% raw %}
-if [ -z "${WP_SITES// /}" ]; then echo "restore drill: there are no sites on this VM (none made, or all closed); nothing to drill"; exit 0; fi
+rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed): a drill that cannot even start is a finding"
+sites=$(printf '%s\n' "$rows" | awk 'NF {print $1}')
+if [ -z "$sites" ]; then echo "restore drill: there are no sites on this VM (none made, or all closed); nothing to drill"; exit 0; fi
 candidates=()
-for s in $WP_SITES; do
+for s in $sites; do
   [[ $s =~ ^[a-z][a-z0-9-]{1,23}$ ]] && [ -f "$BACKUPS/$s/.last-success" ] && candidates+=("$s")
 done
 [ "${#candidates[@]}" -gt 0 ] || die "no site has a good backup yet, so there is nothing to drill"

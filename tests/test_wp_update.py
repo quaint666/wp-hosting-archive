@@ -88,9 +88,13 @@ class Update(Base):
             f.write_text(body); f.chmod(0o755)
         self.policy("wptest:auto")
         self.flag = self.site / "maintenance.flag"
+        self.script = self.install("wp_site_update.sh.j2", "bin/wp-site-update")
 
     def policy(self, text):
-        self.script = self.install("wp_site_update.sh.j2", "bin/wp-site-update", wp_update_policies=text)
+        """`site:policy`: what the registry says of the site (wp-site-provision rows). The tool reads it at every run, so only the stand-in's answer changes."""
+        name, pol = text.split(":")
+        d = self.v["wp_site_defaults"]
+        self.rows("%s hold 1001 %d 2001 %d %s" % (name, d["quota_mb"], d["backup_quota_mb"], pol))
 
     def have(self, core=None, plugins=(), themes=()):
         if core:
@@ -401,7 +405,13 @@ class Update(Base):
         self.policy("wptest:sometimes")
         self.assertEqual(self.run_update().returncode, 2)
         self.policy("other:auto")
-        self.assertEqual(self.run_update().returncode, 2, "a site with no policy in the list")
+        self.assertEqual(self.run_update().returncode, 2, "a site the registry does not list")
+        self.assertEqual(self.steps("backup"), [])
+        self.policy("wptest:auto")
+        self.put("rows_fail", "")
+        r = self.run_update()
+        self.assertEqual(r.returncode, 2, "a registry that cannot be read is an error, not a default policy")
+        self.assertIn("cannot read the site registry", r.stderr)
         self.assertEqual(self.steps("backup"), [])
 
     # --- what the files promise
@@ -412,16 +422,14 @@ class Update(Base):
         self.assertLess(self.v["wp_update_timeout_s"] + 2 * 3600 + 300, 3 * 3600 + 15 * 60, "start 02:00 plus the jitter plus the limit must end before the 03:15 backup")
         self.assertLessEqual(2 * 3600 + self.v["wp_update_jitter_s"] + self.v["wp_update_timeout_s"], 3 * 3600 + 15 * 60 - 5 * 60)
 
-    def test_the_tool_the_units_and_the_timer_are_deployed_and_the_policies_come_from_the_sites(self):
+    def test_the_tool_the_units_and_the_timer_are_deployed_and_the_policies_come_from_the_registry(self):
         tasks = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
         by = {t["name"]: t for t in tasks}
         tool = by["Stage the tools"]
         self.assertIn({"src": "wp_site_update.sh.j2", "dest": "wp-site-update"}, tool["loop"])
         units = {i["dest"] for i in by["Stage the WordPress job units"]["loop"]}
         self.assertTrue({"wp-update@.service", "wp-update@.timer"} <= units)
-        sites = [{"name": "a", "update_policy": "auto"}, {"name": "b"}, {"name": "c", "update_policy": "freeze"}]
-        got = jinja2.Environment().from_string(tool["vars"]["wp_update_policies"]).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()
-        self.assertEqual(got, "a:auto b:%s c:freeze" % self.v["wp_site_defaults"]["update_policy"])
+        self.assertNotIn("wp_update_policies", tool.get("vars", {}), "the policy is read from the registry at every run, not baked in")
         self.assertEqual(self.v["wp_site_defaults"]["update_policy"], "notify", "the default is the safe one")
         one = (ROOT / "tasks/wp_site_one_common.yml").read_text()
         self.assertIn('name: "wp-update@{{ wp_s.name }}.timer"', one)

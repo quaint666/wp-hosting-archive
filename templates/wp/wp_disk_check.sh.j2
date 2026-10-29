@@ -11,8 +11,7 @@ readonly STATE_DIR='{{ wp_disk_state_dir }}'
 readonly TOPIC='{{ wp_ntfy_topic }}'
 readonly HOST='{{ inventory_hostname }}'
 readonly SITE_WARN='{{ wp_disk_warn_pct }}' SITE_CRIT='{{ wp_disk_crit_pct }}' DATA_WARN='{{ wp_data_warn_pct }}' DATA_CRIT='{{ wp_data_crit_pct }}'
-# name:project id:quota in MB for each site. WP_DISK_SITES in the environment replaces it (the alert rehearsal uses that to watch a throwaway project).
-readonly SITES="${WP_DISK_SITES:-{{ wp_disk_sites }}}"
+readonly PROVISION='{{ wp_tools_bin }}/wp-site-provision'
 {% raw %}
 notify() { ntfy-notify "$TOPIC" "$HOST $1"; }
 mkdir -p "$STATE_DIR"
@@ -46,6 +45,18 @@ flag() {
 used=$(df --output=pcent "$MOUNT" 2>/dev/null | tail -n 1 | tr -dc '0-9')
 if [ -n "$used" ]; then flag data-unreadable 0 "" "df reads $MOUNT again"; judge data "data disk $MOUNT" "$used" "$DATA_WARN" "$DATA_CRIT"
 else flag data-unreadable 1 "df cannot read $MOUNT: the data disk is not being watched" ""; fi
+
+# The sites come from the registry at every run: name:project id:quota in MB for each site and for its backups. WP_DISK_SITES in the environment replaces them (the alert rehearsal uses that to watch
+# a throwaway project). A registry that cannot be read is an alert of its own, not an empty list: otherwise no quota would be watched and nothing would say so.
+SITES=""
+if [ -n "${WP_DISK_SITES:-}" ]; then
+  SITES=$WP_DISK_SITES
+elif rows=$("$PROVISION" rows </dev/null 2>/dev/null); then
+  flag registry-unreadable 0 "" "the site registry reads again"
+  SITES=$(printf '%s\n' "$rows" | awk 'NF {printf "%s:%s:%s backup-%s:%s:%s ", $1, $3, $4, $1, $5, $6}')
+else
+  flag registry-unreadable 1 "wp-site-provision rows failed: no site's quota is being watched" ""
+fi
 
 # the sites' project quotas
 if report=$(repquota -P -n "$MOUNT" 2>/dev/null); then

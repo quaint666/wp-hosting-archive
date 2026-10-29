@@ -784,6 +784,70 @@ class Close(Base):
         self.assertEqual(self.record()["name"], "alpha")
 
 
+class Rows(Base):
+    def want(self, name, state="hold", **over):
+        d = {**self.cfg["defaults"], **over}
+        rec = self.record(name)
+        return "%s %s %d %d %d %d %s" % (name, state, rec["quota_id"], d["quota_mb"], rec["quota_id"] + self.cfg["platform"]["wp_backup_quota_offset"], d["backup_quota_mb"], d["update_policy"])
+
+    def test_no_sites_is_no_lines_and_the_closed_site_of_the_repo_is_not_one(self):
+        self.assertEqual(self.make().rows(), [])
+
+    def test_a_site_is_one_line_of_its_record_over_the_defaults(self):
+        self.make().create("alpha")
+        self.assertEqual(self.make().rows(), [self.want("alpha")])
+        self.make().set("alpha", ["quota_mb=777", "backup_quota_mb=888", "update_policy=auto"])
+        self.assertEqual(self.make().rows(), [self.want("alpha", quota_mb=777, backup_quota_mb=888, update_policy="auto")])
+
+    def test_sites_are_sorted_and_a_stopped_site_is_listed_with_its_state(self):
+        self.make().create("bravo")
+        self.make().create("alpha")
+        self.make().state("bravo", "stopped")
+        self.assertEqual(self.make().rows(), [self.want("alpha"), self.want("bravo", "stopped")])
+
+    def test_a_closed_site_is_gone_from_the_rows(self):
+        self.make().create("alpha")
+        self.make().create("bravo")
+        self.make().close("alpha")
+        self.assertEqual(self.make().rows(), [self.want("bravo")])
+
+    def test_a_site_the_repo_still_declares_and_has_no_record_is_listed_over_the_defaults(self):
+        self.cfg["known"] = self.cfg["known"] + [{"name": "legacy", "port": 9150, "quota_id": 1050, "update_policy": "auto"}]
+        self.assertEqual(self.make().rows(), ["legacy hold 1050 %d %d %d auto" % (self.cfg["defaults"]["quota_mb"], 1050 + self.cfg["platform"]["wp_backup_quota_offset"], self.cfg["defaults"]["backup_quota_mb"])])
+
+    def test_rows_runs_nothing_and_needs_no_secret(self):
+        self.make().create("alpha")
+        mark = len(self.calls())
+        self.secret.unlink()
+        self.assertEqual(self.make().rows(), [self.want("alpha")])
+        self.assertEqual(self.calls()[mark:], [], "a read: no docker, systemctl or quota tool")
+
+    def test_a_registry_that_cannot_be_read_is_an_error_and_not_an_empty_list(self):
+        self.make().create("alpha")
+        reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
+        reg.write_tombstone(reg.read_site("alpha"))                 # a record AND a tombstone
+        with self.assertRaises(prov.Failed):
+            self.make().rows()
+        reg.site_file("alpha").unlink()
+        self.make().create("bravo")
+        (self.site_dir("bravo") / "site.json").write_text("{not json")
+        with self.assertRaises(prov.Failed):
+            self.make().rows()
+
+    def test_the_command_prints_the_lines_and_a_broken_registry_is_exit_1(self):
+        out, err = [], []
+        run = lambda *a: prov.main(self.cfg, list(a), out=out.append, err=err.append, run=self.host, sleep=self.sleeps.append, probe=lambda u, h: 200, chown=lambda *x: None, now=lambda: self.clock)
+        self.assertEqual(run("create", "alpha"), 0)
+        out.clear()
+        self.assertEqual(run("rows"), 0)
+        self.assertEqual(out, [self.want("alpha")])
+        (self.site_dir() / "site.json").write_text("{not json")
+        out.clear()
+        self.assertEqual((run("rows"), out), (1, []))
+        self.assertTrue(err)
+        self.assertEqual(run("rows", "extra"), 2)
+
+
 class Render(Base):
     def setUp(self):
         super().setUp()

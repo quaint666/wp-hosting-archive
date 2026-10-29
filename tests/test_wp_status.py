@@ -61,8 +61,10 @@ class HostTool(Base):
         t = time.time() - hours * 3600
         os.utime(self.backups / "wptest" / ".last-success", (t, t))
 
-    def rows(self, table=None):
-        script = self.install("wp_sites_status.sh.j2", "bin/wp-sites-status", wp_status_sites=table or self.table)
+    def report(self, table=None):
+        """Run the host tool. `table` is name:state:quota id:quota MB:backup id:backup MB for each site, as wp-site-provision rows would give them (it reads them from the registry at every run)."""
+        self.rows(*[" ".join(e.split(":")) + " notify" for e in (table or self.table).split()])
+        script = self.install("wp_sites_status.sh.j2", "bin/wp-sites-status")
         r = self.run_script(script, WP_STATUS_VHOST_DIR=str(self.vhosts))
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = r.stdout.splitlines()
@@ -70,10 +72,10 @@ class HostTool(Base):
         return [dict(zip(W.COLUMNS, l.split("\t"))) for l in lines[1:]], r.stdout
 
     def one(self, **kw):
-        return self.rows()[0][0]
+        return self.report()[0][0]
 
     def test_a_healthy_live_site_reads_as_it_is(self):
-        r = self.rows()[0][0]
+        r = self.report()[0][0]
         self.assertEqual((r["site"], r["deployed"], r["actual"], r["unit"], r["containers"], r["core"], r["plugins"]), ("wptest", "live", "live", "active", "2/2", "7.1.3", "1"))
         self.assertEqual((r["backup_age_h"], r["backup_stamp"], r["frozen"]), ("5", "20261024T201500Z", "no"))
         self.assertEqual((r["quota_pct"], r["backup_quota_pct"], r["cron_timer"], r["backup_timer"]), ("10", "3", "active", "active"))
@@ -87,7 +89,7 @@ class HostTool(Base):
 
     def test_every_line_has_the_same_number_of_fields_and_no_stray_tabs(self):
         self.table = "wptest:live:1001:3072:2001:3072 other-site:hold:1002:3072:2002:3072"
-        _, out = self.rows()
+        _, out = self.report()
         for l in out.splitlines():
             self.assertEqual(len(l.split("\t")), len(W.COLUMNS), l)
 
@@ -111,7 +113,7 @@ class HostTool(Base):
         (self.site.parent / "my-site").mkdir()
         self.put("ps.txt", "wp_my_site_php|Up 1 hour\nwp_my_site_db|Up 1 hour (healthy)\n")
         self.units("wp-my-site active")
-        r = self.rows()[0][0]
+        r = self.report()[0][0]
         self.assertEqual((r["site"], r["containers"], r["unit"]), ("my-site", "2/2", "active"))
 
     def test_no_backup_yet_and_unreadable_quotas_are_shown_as_such_and_an_unknown_unit_is_inactive(self):
@@ -132,20 +134,28 @@ class HostTool(Base):
         (self.tmp / "freeze").unlink(); (self.site / "freeze").write_text("")
         self.assertEqual(self.one()["frozen"], "yes")
         self.table = "../x:live:1:1:1:1 a;id:live:1:1:1:1 zero:live:1:0:1:1 wptest:live:1001:3072:2001:3072 bad"
-        self.assertEqual([r["site"] for r in self.rows()[0]], ["wptest"])
+        self.assertEqual([r["site"] for r in self.report()[0]], ["wptest"])
 
-    def test_the_tool_is_installed_root_only_from_the_merged_site_list(self):
+    def test_the_tool_is_installed_root_only_and_reads_the_sites_from_the_registry_at_every_run(self):
         t = {x["name"]: x for x in yaml.safe_load((ROOT / "tasks/wp_status_common.yml").read_text())}["Deploy the sites status tool"]
         self.assertEqual((t["ansible.builtin.template"]["owner"], t["ansible.builtin.template"]["mode"]), ("root", "0750"))
-        import jinja2
-        # a fixture, not the repo's list: the repo gains sites, and this test is about how the list is built
-        merged = [{**self.v["wp_site_defaults"], **s} for s in [{"name": "wptest", "port": 9101, "quota_id": 1001, "state": "live"}]]
-        got = jinja2.Environment().from_string(t["vars"]["wp_status_sites"]).render(wp_sites_merged=merged, wp_backup_quota_offset=self.v["wp_backup_quota_offset"]).strip()
-        self.assertEqual(got, "wptest:live:1001:3072:2001:3072")
-        closed = merged + [{**self.v["wp_site_defaults"], "name": "gone", "port": 9103, "quota_id": 1003, "state": "closed"}]
-        self.assertEqual(jinja2.Environment().from_string(t["vars"]["wp_status_sites"]).render(wp_sites_merged=closed, wp_backup_quota_offset=self.v["wp_backup_quota_offset"]).strip(), got, "the host is not asked about a tombstone")
+        self.assertNotIn("wp_status_sites", t.get("vars", {}), "no list of sites is baked in")
         sites = [x.get("name", "") for x in yaml.safe_load((ROOT / "tasks/wp_sites_common.yml").read_text())]
         self.assertIn("Install the status tool (tasks/wp_status_common.yml)", sites)
+
+    def test_a_site_only_the_registry_knows_is_reported_and_a_closed_one_is_not(self):
+        self.table = "wptest:live:1001:3072:2001:3072 newsite:hold:1002:3072:2002:3072"
+        self.assertEqual([(r["site"], r["deployed"]) for r in self.report()[0]], [("wptest", "live"), ("newsite", "hold")])
+        self.table = "newsite:stopped:1002:3072:2002:3072"
+        self.assertEqual([(r["site"], r["deployed"]) for r in self.report()[0]], [("newsite", "stopped")], "the registry is the whole list: a site it does not list is not reported")
+
+    def test_a_registry_that_cannot_be_read_fails_the_report_and_prints_no_header(self):
+        self.put("rows_fail", "")
+        script = self.install("wp_sites_status.sh.j2", "bin/wp-sites-status")
+        r = self.run_script(script, WP_STATUS_VHOST_DIR=str(self.vhosts))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot read the site registry", r.stderr)
+        self.assertEqual(r.stdout, "", "no partial report that the ThinkPad half could mistake for 'no sites'")
 
 
 def row(**kw):
@@ -160,8 +170,8 @@ def tsv(*rows):
 
 
 class Wrapper(unittest.TestCase):
-    def check(self, r, declared=None, stale=30, warn=80):
-        return [m for _, m in W.attention([r], declared or {"wptest": r["deployed"]}, stale, warn)]
+    def check(self, r, stale=30, warn=80):
+        return [m for _, m in W.attention([r], stale, warn)]
 
     def stopped(self, **kw):
         base = dict(deployed="stopped", actual="stopped", unit="inactive", containers="0/2", cron_timer="inactive", backup_timer="inactive", backup_stamp="20261024T201500Z", backup_age_h="400")
@@ -179,46 +189,38 @@ class Wrapper(unittest.TestCase):
             r = self.stopped(); r.update(kw)
             self.assertTrue([m for m in self.check(r) if text in m], (kw, self.check(r)))
 
-    def test_a_running_site_that_the_repo_says_is_stopped_is_flagged_as_not_deployed(self):
-        self.assertTrue([m for m in self.check(row(), declared={"wptest": "stopped"}) if "repo says stopped but the host was last deployed as live" in m])
-
     def test_the_table_says_stopped_for_a_stopped_site_and_shouts_for_one_that_is_not_really(self):
-        out = W.render([self.stopped(site="a"), self.stopped(site="b", containers="2/2", unit="active")], {"a": "stopped", "b": "stopped"})
+        out = W.render([self.stopped(site="a"), self.stopped(site="b", containers="2/2", unit="active")])
         lines = {l.split()[0]: l for l in out.splitlines()[1:]}
         self.assertIn("stopped", lines["a"].split()[2]); self.assertIn("NOT STOPPED", lines["b"])
 
-    def test_a_closed_site_is_a_tombstone_the_host_is_not_expected_to_report(self):
+    def test_the_names_the_repo_keeps_as_closed_are_listed_and_nothing_is_expected_of_the_host_for_them(self):
         import tempfile
         d = Path(tempfile.mkdtemp(prefix="wpstatus-")); (d / "host_vars/dellwp").mkdir(parents=True)
-        text = fixture_vars_text()
-        text = text.rstrip("\n") + "\n"
+        text = fixture_vars_text().rstrip("\n") + "\n"
         a = text.index("wp_sites:\n") + len("wp_sites:\n")
         text = text[:a] + "  - name: gone\n    port: 9190\n    quota_id: 1090\n    state: closed\n" + text[a:]
         (d / "host_vars/dellwp/vars.yml").write_text(text)
-        declared, *_ = W.load_declaration(d)
-        self.assertNotIn("gone", declared, "a tombstone is not declared as something the host should run")
-        self.assertEqual(W.closed_sites(d), ["gone"])
-        self.assertEqual([s for s, _ in W.attention([], declared, 30, 80) if s == "gone"], [], "and nobody is told it is missing")
+        self.assertIn("gone", W.closed_sites(d))
         out = io.StringIO()
         old = sys.stdout; sys.stdout = out
         try:
-            W.main(["--file", "-"], repo=d, stdin=io.StringIO(tsv(*[row(site=s, deployed=declared[s], actual=declared[s], cron_timer="active" if declared[s] == "live" else "inactive") for s in declared])))
+            self.assertEqual(W.main(["--file", "-"], repo=d, stdin=io.StringIO(tsv(row()))), 0, "one healthy site and nothing declared by the repo: nothing needs attention")
         finally:
             sys.stdout = old
-        self.assertIn("Closed (tombstones, nothing on the VM): gone", out.getvalue())
-        self.assertNotIn("gone:", out.getvalue().split("Closed (tombstones")[1].split("\n", 1)[1] if "Needs attention" in out.getvalue() else "")
+        self.assertIn("Closed in the repo (names never reused; the registry's own tombstones are on the VM): ", out.getvalue())
+        self.assertIn("gone", out.getvalue().split("Closed in the repo")[1].split("\n")[0])
+        self.assertIn("Nothing needs attention.", out.getvalue())
 
     def test_a_healthy_site_needs_no_attention(self):
         self.assertEqual(self.check(row()), [])
         self.assertEqual(self.check(row(deployed="hold", actual="hold", cron_timer="inactive")), [])
 
-    def test_the_repo_and_the_host_disagreeing_is_the_first_thing_flagged(self):
-        m = self.check(row(), declared={"wptest": "hold"})
-        self.assertEqual(len(m), 1); self.assertIn("the repo says hold but the host was last deployed as live: run dellwp/wp_sites_dellwp.yml", m[0])
+    def test_a_vhost_that_does_not_do_what_the_record_says_is_flagged_and_a_site_the_registry_holds_is_never_called_undeclared(self):
         m = self.check(row(actual="hold"))
-        self.assertEqual(len(m), 1); self.assertIn("the vhost on the host is hold but the play deployed live", m[0])
-        self.assertIn("does not declare it", W.attention([row(site="stray")], {}, 30, 80)[0][1])
-        self.assertIn("not deployed yet", W.attention([], {"ghost": "live"}, 30, 80)[0][1])
+        self.assertEqual(len(m), 1); self.assertIn("the vhost on the host is hold but the record says live", m[0])
+        self.assertEqual(self.check(row(site="registry-only")), [], "the repo declares no sites: a site that only the registry holds is healthy, not a stray")
+        self.assertEqual(W.attention([], 30, 80), [], "and no site at all is no complaint")
 
     def test_a_stack_that_is_not_fully_up_is_flagged_once(self):
         self.assertIn("unit wp-wptest is failed", self.check(row(unit="failed", containers="0/2"))[0])
@@ -244,8 +246,8 @@ class Wrapper(unittest.TestCase):
         self.assertIn("backup quota is 95% used", self.check(row(backup_quota_pct="95"))[0])
         self.assertIn("site quota could not be read", self.check(row(quota_pct="?"))[0])
 
-    def test_the_table_shows_the_state_with_a_star_when_the_repo_disagrees_and_marks_a_freeze(self):
-        text = W.render([row(), row(site="b", actual="hold", frozen="yes", backup_stamp="never", backup_age_h="-", unit="inactive", containers="0/2", quota_pct="?")], {"wptest": "live", "b": "live"})
+    def test_the_table_shows_the_state_with_a_star_when_the_vhost_differs_from_the_record_and_marks_a_freeze(self):
+        text = W.render([row(), row(site="b", actual="hold", frozen="yes", backup_stamp="never", backup_age_h="-", unit="inactive", containers="0/2", quota_pct="?")])
         lines = text.splitlines()
         self.assertEqual(lines[0].split(), ["SITE", "STATE", "STACK", "WP", "PLUGINS", "BACKUP", "QUOTA", "BACKUPS", "CRON"])
         self.assertIn("live", lines[2]); self.assertNotIn("*", lines[2])
@@ -253,45 +255,42 @@ class Wrapper(unittest.TestCase):
         self.assertEqual({len(l) - len(l.lstrip()) for l in lines}, {0}, "no ragged indentation")
 
     def test_main_prints_the_table_then_the_attention_list_and_returns_how_many(self):
-        declared, stale, warn, bin_ = W.load_declaration(FIXTURE_REPO)
-        site = list(declared)[0]
-        # every declared site is reported (the repo may declare more than one); only the first is broken in the second half
-        ok_row = lambda x: row(site=x, deployed=declared[x], actual=declared[x], cron_timer="active" if declared[x] == "live" else "inactive")
-        good = tsv(*[ok_row(x) for x in declared])
+        good = tsv(row(site="one"), row(site="two", deployed="hold", actual="hold", cron_timer="inactive"))
         out = io.StringIO()
         old = sys.stdout; sys.stdout = out
         try:
             self.assertEqual(W.main(["--file", "-"], repo=FIXTURE_REPO, stdin=io.StringIO(good)), 0)
             self.assertIn("Nothing needs attention.", out.getvalue())
             out.truncate(0); out.seek(0)
-            bad = tsv(row(site=site, deployed=declared[site], actual="none", unit="failed", containers="0/2", cron_timer="inactive", backup_timer="inactive"), *[ok_row(x) for x in list(declared)[1:]])
+            bad = tsv(row(site="one", actual="none", unit="failed", containers="0/2", cron_timer="inactive", backup_timer="inactive"), row(site="two", deployed="hold", actual="hold", cron_timer="inactive"))
             n = W.main(["--file", "-"], repo=FIXTURE_REPO, stdin=io.StringIO(bad))
         finally:
             sys.stdout = old
         self.assertGreaterEqual(n, 3)
         self.assertIn("Needs attention:", out.getvalue())
-        self.assertEqual(len([l for l in out.getvalue().splitlines() if l.startswith("  %s: " % site)]), n)
+        self.assertEqual(len([l for l in out.getvalue().splitlines() if l.startswith("  one: ")]), n)
 
     def test_it_asks_dellwp_over_ssh_with_the_tools_directory_from_the_repo_and_reports_failures(self):
-        declared, stale, warn, bin_ = W.load_declaration(FIXTURE_REPO)
+        stale, warn, bin_ = W.load_thresholds(FIXTURE_REPO)
         calls = []
 
         class R:
             def __init__(self, rc, out="", err=""): self.returncode, self.stdout, self.stderr = rc, out, err
 
         def ok(cmd, **kw):
-            calls.append(cmd); return R(0, tsv(row(site=list(declared)[0], deployed=declared[list(declared)[0]], actual=declared[list(declared)[0]])))
+            calls.append(cmd); return R(0, tsv(row()))
         old = sys.stdout; sys.stdout = io.StringIO()
         try:
             W.main([], repo=FIXTURE_REPO, runner=ok)
             self.assertEqual(calls[0], ["ssh", "dellwp", "sudo -n %s/wp-sites-status" % bin_])
             err = io.StringIO(); olde = sys.stderr; sys.stderr = err
             self.assertEqual(W.main([], repo=FIXTURE_REPO, runner=lambda c, **k: R(255, err="Connection refused")), 99)
+            self.assertEqual(W.main([], repo=FIXTURE_REPO, runner=lambda c, **k: R(2, err="wp-sites-status: cannot read the site registry (wp-site-provision rows failed)")), 99)
             self.assertEqual(W.main([], repo=FIXTURE_REPO, runner=lambda c, **k: R(0, "not a report\n")), 99)
             sys.stderr = olde
         finally:
             sys.stdout = old
-        self.assertIn("Connection refused", err.getvalue()); self.assertIn("expected header", err.getvalue())
+        self.assertIn("Connection refused", err.getvalue()); self.assertIn("expected header", err.getvalue()); self.assertIn("cannot read the site registry", err.getvalue())
 
     def test_the_tools_directory_is_whatever_it_is_told_not_a_constant(self):
         seen = []
@@ -303,7 +302,7 @@ class Wrapper(unittest.TestCase):
 
     def test_the_thresholds_come_from_the_repo_not_from_this_file(self):
         v = yaml.safe_load((ROOT / "host_vars/dellwp/vars.yml").read_text())
-        declared, stale, warn, bin_ = W.load_declaration(ROOT)
+        stale, warn, bin_ = W.load_thresholds(ROOT)
         self.assertEqual((stale, warn, bin_), (v["wp_backup_stale_hours"], v["wp_disk_warn_pct"], v["wp_tools_bin"]))
 
 

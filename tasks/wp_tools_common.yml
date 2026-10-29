@@ -132,9 +132,6 @@
   check_mode: false
   changed_when: false
   diff: false
-  vars:
-    wp_update_policies: >-
-      {% for s in wp_sites if (s.state | default(wp_site_defaults.state)) != 'closed' %}{{ s.name }}:{{ s.update_policy | default(wp_site_defaults.update_policy) }}{{ ' ' if not loop.last }}{% endfor %}
 
 # wp-site-provision renders a site's files on the VM, from these templates, with its own Jinja: they are staged with `copy`, not `template`, so they arrive as they are in the repo (the same files the sites
 # play renders with Ansible; tests/test_wp_site_renderer.py proves both give the same text). The names are listed in scripts/wp_site_renderer.py TEMPLATES.

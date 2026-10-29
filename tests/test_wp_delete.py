@@ -42,6 +42,8 @@ STAMP = "20261024T150001Z"
 PROVISION = '''#!/bin/bash
 echo "provision $* archive=$([ -f "$ARCHIVE_DIR/wptest-%s/MANIFEST" ] && echo complete || echo no) site=$([ -d "$SITE_DIR" ] && echo present || echo gone) vhost=$([ -e "$VHOST_DIR/wp_site_wptest.conf" ] && echo present || echo gone)" >> "$SHIM/calls"
 [ -f "$SHIM/provision_fail" ] && { echo "the registry is unreadable" >&2; exit 1; }
+# what the real close does: the tombstone first, then the record goes
+[ "$1" = close ] && { mkdir -p "$TOMB_DIR"; echo '{}' > "$TOMB_DIR/$2.json"; rm -f "$SITE_DIR/site.json"; }
 exit 0
 ''' % "20261024T150001Z"
 
@@ -53,7 +55,7 @@ class Delete(Base):
         self.archive = self.data / "archive"; self.archive.mkdir()
         self.units = self.tmp / "units"; self.units.mkdir()
         self.vhosts = self.tmp / "vhosts"; self.vhosts.mkdir()
-        self.env.update(ARCHIVE_DIR=str(self.archive), VHOST_DIR=str(self.vhosts), SITE_DIR=str(self.site))
+        self.env.update(ARCHIVE_DIR=str(self.archive), VHOST_DIR=str(self.vhosts), SITE_DIR=str(self.site), TOMB_DIR=str(self.data / "tombstones"))
         provision = self.tmp / "bin" / "wp-site-provision"
         provision.write_text(PROVISION); provision.chmod(0o755)
         for name, body in (("systemctl", SYSTEMCTL), ("docker", DOCKER), ("nginx", NGINX), ("setquota", SETQUOTA), ("lsattr", LSATTR), ("gzip", GZIP), ("tar", TAR),
@@ -164,7 +166,10 @@ class Delete(Base):
         self.assertIn("site=wptest", self.log("logger.log"))
 
     def registered(self):
-        (self.site / "site.json").write_text("{}")
+        (self.site / "site.json").write_text("{}")      # Base makes one already; kept for the tests that say it
+
+    def unregistered(self):
+        (self.site / "site.json").unlink()
 
     def test_a_site_with_a_registry_record_is_closed_there_after_the_archive_is_complete_and_before_anything_is_removed(self):
         self.registered()
@@ -176,19 +181,44 @@ class Delete(Base):
         self.assertLess(calls.index(closes[0]), min(i for i, c in enumerate(calls) if c.startswith(("systemctl", "docker rm", "nginx", "setquota"))), "before the first removal")
         self.assertFalse(self.site.exists())
 
-    def test_a_site_without_a_record_is_deleted_the_old_way_and_the_registry_is_not_asked(self):
+    def test_a_site_with_neither_a_record_nor_a_tombstone_is_refused_and_nothing_changes(self):
+        self.unregistered()
         r = self.delete()
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no registry record and no tombstone", r.stderr)
+        self.untouched()
 
     def test_a_record_that_is_a_link_is_not_a_record(self):
+        self.unregistered()
         elsewhere = self.tmp / "elsewhere.json"
         elsewhere.write_text("{}")
         (self.site / "site.json").symlink_to(elsewhere)
         r = self.delete()
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no registry record and no tombstone", r.stderr)
         self.assertTrue(elsewhere.exists(), "the link was not followed")
+        self.untouched()
+
+    def test_a_tombstone_that_is_a_link_is_not_a_tombstone(self):
+        self.unregistered()
+        tomb = self.data / "tombstones"
+        tomb.mkdir()
+        elsewhere = self.tmp / "elsewhere.json"
+        elsewhere.write_text("{}")
+        (tomb / "wptest.json").symlink_to(elsewhere)
+        r = self.delete()
+        self.assertEqual(r.returncode, 2)
+        self.untouched()
+
+    def test_a_delete_interrupted_after_the_registry_was_closed_is_finished_by_running_it_again(self):
+        """The registry is closed (tombstone written, record removed) and the files are still there: the state a crash between the two steps of the removal leaves."""
+        self.unregistered()
+        (self.data / "tombstones").mkdir()
+        (self.data / "tombstones" / "wptest.json").write_text("{}")
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.site.exists())
+        self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [], "nothing left to close")
 
     def test_a_registry_that_cannot_close_the_site_stops_the_delete_before_anything_is_removed_and_a_rerun_finishes_it(self):
         self.registered()
@@ -286,10 +316,10 @@ class Delete(Base):
 
     def test_links_in_place_of_the_directories_are_never_followed(self):
         import shutil
-        real = self.tmp / "elsewhere"; real.mkdir(); (real / "precious").write_text("do not delete")
+        real = self.tmp / "elsewhere"; real.mkdir(); (real / "precious").write_text("do not delete"); (real / "site.json").write_text("{}")   # a record seen THROUGH the link: the directory check must still refuse
         shutil.rmtree(self.site); self.site.symlink_to(real)
         r = self.delete(); self.assertEqual(r.returncode, 2); self.assertIn("not a real directory", r.stderr); self.assertTrue((real / "precious").exists())
-        self.site.unlink(); self.site.mkdir(); (self.site / "stopped.flag").write_text("")
+        self.site.unlink(); self.site.mkdir(); (self.site / "stopped.flag").write_text(""); (self.site / "site.json").write_text("{}")
         shutil.rmtree(self.bk); self.bk.symlink_to(real)
         r = self.delete(); self.assertEqual(r.returncode, 2); self.assertTrue((real / "precious").exists()); self.assertEqual(self.calls(), [])
 

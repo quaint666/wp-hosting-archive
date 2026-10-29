@@ -154,6 +154,23 @@ M = [
  ("a failed close does not stop the delete", "templates/wp/wp_site_delete.sh.j2", '|| die "the registry could not close', '|| echo "the registry could not close', "tests/test_wp_delete.py"),
  ("a linked record counts", "templates/wp/wp_site_delete.sh.j2", ' && [ ! -L "$dir/site.json" ]; then\n  "$PROVISION"', '; then\n  "$PROVISION"', "tests/test_wp_delete.py"),
  ("a site with no record is asked of the registry", "templates/wp/wp_site_delete.sh.j2", 'if [ -f "$dir/site.json" ] && [ ! -L', 'if [ ! -L', "tests/test_wp_delete.py"),
+ # step 4 (a and b): the registry is the one source of sites
+ ('the backup check treats an unreadable registry as no sites', 'templates/wp/wp_backup_check.sh.j2', 'rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed): no site\'s backups can be judged"', 'rows=$(site_rows) || rows=""', 'tests/test_wp_backup.py'),
+ ('the restore drill treats an unreadable registry as no sites', 'templates/wp/wp_restore_drill.sh.j2', 'rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed): a drill that cannot even start is a finding"', 'rows=$(site_rows) || rows=""', 'tests/test_wp_backup.py'),
+ ('the update tool takes the wrong column for the policy', 'templates/wp/wp_site_update.sh.j2', "'$1 == s {print $7}'", "'$1 == s {print $6}'", 'tests/test_wp_update.py'),
+ ('the update tool ignores an unreadable registry', 'templates/wp/wp_site_update.sh.j2', 'rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed): no update policy for $site"', 'rows=$(site_rows) || rows=""', 'tests/test_wp_update.py'),
+ ('the status tool treats an unreadable registry as no sites', 'templates/wp/wp_sites_status.sh.j2', 'rows=$(site_rows) || die "cannot read the site registry (wp-site-provision rows failed)"', 'rows=$(site_rows) || rows=""', 'tests/test_wp_status.py'),
+ ('the disk check does not alert on an unreadable registry', 'templates/wp/wp_disk_check.sh.j2', 'flag registry-unreadable 1 ', 'flag registry-unreadable 0 ', 'tests/test_monitoring_checks.py'),
+ ('the disk check forgets the backup projects', 'templates/wp/wp_disk_check.sh.j2', 'printf "%s:%s:%s backup-%s:%s:%s ", $1, $3, $4, $1, $5, $6', 'printf "%s:%s:%s ", $1, $3, $4', 'tests/test_monitoring_checks.py'),
+ ("a link counts as a site's record", 'templates/wp/wp_tools_common.sh.j2', '{ [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || die "\'$site\' is not a site (it has no registry record: create it with wp-ctl create)"', '[ -f "$WP_DATA/$site/site.json" ] || die "\'$site\' is not a site (it has no registry record: create it with wp-ctl create)"', 'tests/test_wp_tools.py'),
+ ('a directory counts as a site', 'templates/wp/wp_tools_common.sh.j2', '{ [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || die "\'$site\' is not a site (it has no', '[ -d "$WP_DATA/$site" ] || die "\'$site\' is not a site (it has no', 'tests/test_wp_tools.py'),
+ ('rows lists the closed sites', 'scripts/wp_site_provision.py', 'sites = [s for s in self.all_merged() if s["state"] != "closed"]', 'sites = list(self.all_merged())', 'tests/test_wp_site_provision.py'),
+ ('rows gives the backup project without the offset', 'scripts/wp_site_provision.py', 'int(s["quota_id"]) + offset, int(s["backup_quota_mb"])', 'int(s["quota_id"]), int(s["backup_quota_mb"])', 'tests/test_wp_site_provision.py'),
+ ('rows swallows a registry that cannot be read', 'scripts/wp_site_provision.py', 'except model.RegistryError as e:\n            raise Failed(str(e))\n        offset = int(', 'except model.RegistryError as e:\n            return []\n        offset = int(', 'tests/test_wp_site_provision.py'),
+ ('a delete needs neither a record nor a tombstone', 'templates/wp/wp_site_delete.sh.j2', '|| die "\'$site\' is not a site (it has no registry record and no tombstone)"', '|| true', 'tests/test_wp_delete.py'),
+ ('a tombstone that is a link counts', 'templates/wp/wp_site_delete.sh.j2', '&& [ ! -L "$TOMBSTONES/$site.json" ]', '', 'tests/test_wp_delete.py'),
+ ('the status tool no longer flags a vhost that differs from the record', 'scripts/wp_sites_status.py', 'if r["deployed"] != r["actual"]:\n            out.append', 'if False:\n            out.append', 'tests/test_wp_status.py'),
+ ('the status tool flags a registry-only site as a stray', 'scripts/wp_sites_status.py', 'out = []\n    for r in rows:\n        s = r["site"]\n', 'out = []\n    for r in rows:\n        s = r["site"]\n        out.append((s, "the host reports it but the repo does not declare it"))\n', 'tests/test_wp_status.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

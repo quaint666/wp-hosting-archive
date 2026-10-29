@@ -62,6 +62,7 @@ class Tools(unittest.TestCase):
         for d in ("bin", "lib", "shim", "log", "cache", "data/sites/wptest"):
             (self.tmp / d).mkdir(parents=True)
         (self.tmp / "data/sites/wptest/wp-config.php").write_text("<?php\n")
+        (self.tmp / "data/sites/wptest/site.json").write_text("{}")      # a site exists when it has a registry record
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
         for src, dest in (("wp_tools_common.sh.j2", "lib/common.sh"), ("wp_site_cli.sh.j2", "bin/wp-site-cli"), ("wp_site_install.sh.j2", "bin/wp-site-install"), ("wp_site_password.sh.j2", "bin/wp-site-password"),
                           ("wp_site_login_check.sh.j2", "bin/wp-site-login-check"), ("wp_site_ext.sh.j2", "bin/wp-site-ext"), ("wp_site_cron.sh.j2", "bin/wp-site-cron")):
@@ -421,17 +422,30 @@ class Tools(unittest.TestCase):
         r = self.run_tool("wp-site-password", "wptest", "adminuser", tty=self.pw_answers())
         self.assertEqual(r.returncode, 1); self.assertIn("right password FAILED", r.stderr)
 
-    def test_a_closed_site_is_not_in_the_tools_allowlist_and_has_no_update_policy(self):
-        import jinja2
-        sites = [{"name": "alive"}, {"name": "gone", "state": "closed"}, {"name": "held", "state": "hold"}, {"name": "tomb2", "state": "closed"}]
-        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates/wp")), undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
-        lib = env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=sites))
-        self.assertIn("readonly WP_SITES='alive held'", lib, "the tools act on sites that exist; a tombstone is 'not in wp_sites'")
-        self.assertEqual(env.get_template("wp_tools_common.sh.j2").render(**dict(self.ctx, wp_sites=[{"name": "only"}])).count("readonly WP_SITES='only'"), 1)
+    def test_a_site_exists_for_the_tools_when_it_has_a_registry_record_and_only_then(self):
+        sites = self.tmp / "data/sites"
+        (sites / "norecord").mkdir()
+        (sites / "linked").mkdir()
+        elsewhere = self.tmp / "elsewhere.json"
+        elsewhere.write_text("{}")
+        (sites / "linked" / "site.json").symlink_to(elsewhere)
+        for name in ("norecord", "linked", "nosuch", "../x", "A", "", "wptest/../norecord"):
+            with self.subTest(name):
+                r = self.run_tool("wp-site-cli", name, "core", "version")
+                self.assertEqual(r.returncode, 2, name)
+                self.assertTrue("not a site" in r.stderr, r.stderr)
+        self.assertEqual(self.argv(), [], "nothing reached docker")
+        self.assertEqual(self.run_tool("wp-site-cli", "wptest", "core", "version").returncode, 0)
+
+    def test_the_tools_no_longer_carry_a_list_of_sites_or_of_update_policies(self):
+        lib = (self.tmp / "lib/common.sh").read_text()
+        self.assertNotIn("WP_SITES", lib)
+        self.assertIn("site_rows()", lib)
+        self.assertIn('wp-site-provision" rows', lib)
         tools = yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text())
-        expr = [t for t in tools if t.get("name") == "Stage the tools"][0]["vars"]["wp_update_policies"]
-        got = jinja2.Environment().from_string(expr).render(wp_sites=sites, wp_site_defaults=self.v["wp_site_defaults"]).strip()
-        self.assertEqual(got, "alive:%s held:%s" % (self.v["wp_site_defaults"]["update_policy"], self.v["wp_site_defaults"]["update_policy"]))
+        stage = [t for t in tools if t.get("name") == "Stage the tools"][0]
+        self.assertNotIn("wp_update_policies", stage.get("vars", {}))
+        self.assertNotIn("wp_update_policies", (ROOT / "templates/wp/wp_site_update.sh.j2").read_text())
 
     def test_install_and_password_refuse_a_stopped_site_before_asking_for_anything(self):
         (self.tmp / "data/sites/wptest/stopped.flag").write_text("")
