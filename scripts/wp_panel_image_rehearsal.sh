@@ -1,11 +1,12 @@
 #!/bin/bash
 # Rehearses the control app's IMAGE on a host that has Docker, from the ThinkPad:   bash scripts/wp_panel_image_rehearsal.sh --host HOST [options]
 # It sends app/ to HOST as a build context over ssh (a tar stream: nothing is copied to a file on HOST), builds the image there as wp-panel:rehearsal, runs it the way the real container will run
-# (read-only root file system, uid 10001, all capabilities dropped, no new privileges, 256 MB of memory and swap, no network) and lets app/smoke_in_container.sh start the real gunicorn inside it and
+# (read-only root file system, uid 10001, all capabilities dropped, no new privileges, ONE CPU like aopenpanel has, 384 MB of memory and swap, no network) and lets app/smoke_in_container.sh start the real gunicorn inside it and
 # ask it two questions. Then the image is removed, whatever happened. Steps:
 #   0. preflight   ssh and sudo -n work, Docker answers, nothing called wp-panel:rehearsal is there already
 #   1. build       the recipe (app/Dockerfile) builds from the tar stream; the image runs as uid 10001 and has a health check
-#   2. smoke       inside the container: uid, ssh, the packages, a read-only root, a writable state directory, /login answers 200 with the policy, /sites without a login is sent to /login
+#   2. smoke       inside the container: uid, ssh, the packages, a read-only root, a writable state directory, /login answers 200 with the policy, all the workers (3 on one CPU) start, /sites without
+#                  a login is sent to /login, no process killed for memory, the memory peak is printed; on a failure the gunicorn log and the kill counter are printed
 #   3. cleanup     the image is removed
 # It uses no secret, no key and no vault, touches no site, and changes nothing in the repo. Needs only a host with Docker and sudo without a password; pick one that is not dellwp (the build uses its
 # CPU and some disk for a minute). Options:  --host NAME (required)  --yes (do not ask before starting)
@@ -60,7 +61,7 @@ S=$(remote "sudo -n docker image inspect -f '{{.Size}}' $TAG" </dev/null 2>/dev/
 echo "   image size: $((${S:-0} / 1048576)) MB"
 
 say "2. smoke test inside the container"
-remote "sudo -n docker run --rm -i --name wp-panel-rehearsal --read-only --tmpfs /tmp --tmpfs /dev/shm --tmpfs /run/panel:uid=10001,gid=10001,mode=700 --cap-drop ALL --security-opt no-new-privileges --memory 256m --memory-swap 256m --network none $TAG sh -s" < app/smoke_in_container.sh 2>&1 | sed 's/^/   | /'
+remote "sudo -n docker run --rm -i --name wp-panel-rehearsal --read-only --tmpfs /tmp --tmpfs /dev/shm --tmpfs /run/panel:uid=10001,gid=10001,mode=700 --cap-drop ALL --security-opt no-new-privileges --cpuset-cpus 0 --memory 384m --memory-swap 384m --network none $TAG sh -s" < app/smoke_in_container.sh 2>&1 | sed 's/^/   | /'
 RC=${PIPESTATUS[0]}
 bump "$RC" "the smoke script ended with status $RC"
 

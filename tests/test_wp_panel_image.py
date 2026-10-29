@@ -110,7 +110,7 @@ class Smoke(unittest.TestCase):
         path = APP / "smoke_in_container.sh"
         self.assertEqual(subprocess.run(["sh", "-n", str(path)], capture_output=True, text=True).returncode, 0)
         text = path.read_text()
-        for needle in ("id -u", "ssh -V", "import flask, pyotp, gunicorn, werkzeug", "/app/should-not-be-writable", "/run/panel", "PANEL_BIND=127.0.0.1:8000", "wp_panel.wsgi:app", "smoke ok", "default-src 'none'"):
+        for needle in ("trap diagnose EXIT", "memory.events", "Booting worker", "2 * threads + 1", "memory.peak", "id -u", "ssh -V", "import flask, pyotp, gunicorn, werkzeug", "/app/should-not-be-writable", "/run/panel", "PANEL_BIND=127.0.0.1:8000", "wp_panel.wsgi:app", "smoke ok", "default-src 'none'"):
             self.assertIn(needle, text)
 
     def test_it_uses_no_mounted_file_and_no_network_beyond_the_loopback(self):
@@ -212,7 +212,7 @@ class Flow(Harness):
     def test_the_container_runs_the_way_the_real_one_will_with_no_volume_port_network_or_privilege(self):
         self.go()
         run = [c for c in self.calls() if "docker run" in c][0]
-        for need in ("--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--memory 256m --memory-swap 256m", "--network none", "--tmpfs /run/panel:uid=10001,gid=10001,mode=700", "--tmpfs /tmp", "--tmpfs /dev/shm", "--rm"):
+        for need in ("--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--cpuset-cpus 0", "--memory 384m --memory-swap 384m", "--network none", "--tmpfs /run/panel:uid=10001,gid=10001,mode=700", "--tmpfs /tmp", "--tmpfs /dev/shm", "--rm"):
             self.assertIn(need, run)
         for bad in (" -v ", "--volume", "--mount", " -p ", "--publish", "--privileged", "--network host", "--pid", "--device", "docker.sock"):
             self.assertNotIn(bad, run)

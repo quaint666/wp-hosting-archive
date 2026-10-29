@@ -7,6 +7,7 @@ bind = os.environ.get("PANEL_BIND", "0.0.0.0:8000")
 workers = 2 * len(os.sched_getaffinity(0)) + 1
 threads = 4
 worker_class = "gthread"
+preload_app = True                         # the app is imported once, in the master, and the workers share its memory; a missing secret file stops the start instead of every worker
 timeout = 90                               # a job log or a list is quick; the longest ssh call the app makes is 30 seconds
 graceful_timeout = 30
 keepalive = 5

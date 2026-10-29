@@ -65,6 +65,9 @@ class Settings(unittest.TestCase):
             self.assertNotIn(field, fmt)
         self.assertEqual(conf_with(1)["accesslog"], "-")
 
+    def test_the_app_is_loaded_once_and_shared_by_the_workers(self):
+        self.assertIs(conf_with(1)["preload_app"], True, "17 workers of 50 MB each do not fit a small container; one import shared by fork does")
+
     def test_the_bind_address_comes_from_the_environment_with_a_default(self):
         self.assertEqual(conf_with(1)["bind"], "0.0.0.0:8000")
         self.assertEqual(conf_with(1, {"PANEL_BIND": "127.0.0.1:9000"})["bind"], "127.0.0.1:9000")
