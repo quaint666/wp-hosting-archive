@@ -86,20 +86,23 @@ class Fields(unittest.TestCase):
         self.assertTrue(hidden_and_fixed <= m.RECORD_KEYS)
 
 
+STAMP = "20261028T120000Z"
+
+
 class Names(unittest.TestCase):
     def test_the_pattern_is_the_other_copies_pattern(self):
         self.assertEqual(m.NAME_RE.pattern, wp_sites.NAME_RE.pattern)
         self.assertEqual(m.NAME_RE.pattern, wp_ctl.NAME_RE.pattern)
 
     def test_the_rules(self):
-        res, taken, closed = ["hub", "vps-hub", "www"], {"alpha"}, {"gone"}
-        ok = lambda n: m.check_name(n, res, taken, closed)  # noqa: E731
+        res, taken = ["hub", "vps-hub", "www"], {"alpha"}
+        ok = lambda n: m.check_name(n, res, taken)  # noqa: E731
         for good in ("ab", "a1", "my-shop", "a" + "b" * 22 + "c", "x9"):
             self.assertIsNone(ok(good), good)
         for bad in ("", "a", "1ab", "-ab", "ab-", "a--b", "Ab", "a_b", "a.b", "a b", "a" * 25, "ab\n", "日本"):
             self.assertIsNotNone(ok(bad), repr(bad))
         self.assertIn("reserved", ok("vps-hub"))
-        self.assertIn("never reused", ok("gone"))
+        self.assertIsNone(ok("gone"), "the name of a closed site may be used again: only existing sites hold a name")
         self.assertIn("already exists", ok("alpha"))
         self.assertIsNotNone(ok(None))
         self.assertIsNotNone(ok(5))
@@ -194,14 +197,15 @@ class RegistryTests(unittest.TestCase):
 
     def test_a_tombstone_outlives_the_site_directory(self):
         self.site("alpha")
-        self.reg.write_tombstone(record("alpha", state="hold", created="2026-10-28"))
+        self.reg.write_tombstone(record("alpha", state="hold", created="2026-10-28"), STAMP)
         import shutil
         shutil.rmtree(self.data / "alpha")
         self.assertEqual(self.reg.sites(), [])
         tomb = self.reg.tombstones()
         self.assertEqual([(t["name"], t["state"], t["port"], t["quota_id"]) for t in tomb], [("alpha", "closed", 9101, 1001)])
         self.assertEqual(os.stat(self.tomb).st_mode & 0o777, 0o755)
-        self.assertEqual(os.stat(self.reg.tombstone_file("alpha")).st_mode & 0o777, 0o644)
+        self.assertEqual(os.stat(self.reg.tombstone_file("alpha", STAMP)).st_mode & 0o777, 0o644)
+        self.assertEqual(self.reg.tombstone_file("alpha", STAMP).name, "alpha.%s.json" % STAMP)
 
     def test_a_tombstone_must_be_closed_and_named_like_its_file(self):
         self.tomb.mkdir()
@@ -211,6 +215,29 @@ class RegistryTests(unittest.TestCase):
         (self.tomb / "alpha.json").write_text(json.dumps(record("other", state="closed")))
         with self.assertRaises(m.RegistryError):
             self.reg.tombstones()
+        (self.tomb / "alpha.json").unlink()
+        for odd in ("Alpha.json", "alpha.2026.json", "alpha.%s.txt.json" % STAMP, "alpha.%s.json.bak.json" % STAMP):
+            (self.tomb / odd).write_text(json.dumps(record("alpha", state="closed")))
+            with self.assertRaises(m.RegistryError, msg=odd):
+                self.reg.tombstones()
+            (self.tomb / odd).unlink()
+
+    def test_a_name_may_have_several_tombstones_and_the_old_unstamped_file_still_counts(self):
+        self.tomb.mkdir()
+        (self.tomb / "alpha.json").write_text(json.dumps(record("alpha", state="closed")))
+        self.reg.write_tombstone(record("alpha", port=9105, quota_id=1005), "20261101T000000Z")
+        self.reg.write_tombstone(record("alpha", port=9106, quota_id=1006), "20261102T000000Z")
+        self.assertEqual([p.name for p in self.reg.tombstone_files("alpha")], ["alpha.json", "alpha.20261101T000000Z.json", "alpha.20261102T000000Z.json"])
+        self.assertEqual(self.reg.tombstone_files("alph"), [], "a name that is a prefix of another is not that name")
+        self.assertEqual(sorted(t["port"] for t in self.reg.tombstones()), [9101, 9105, 9106])
+        with self.assertRaises(m.RegistryError):
+            self.reg.write_tombstone(record("alpha", port=9105, quota_id=1005), "20261101T000000Z")
+
+    def test_a_linked_tombstone_is_not_a_tombstone(self):
+        self.tomb.mkdir()
+        (self.tomb / "real").write_text("{}")
+        os.symlink(self.tomb / "real", self.tomb / "alpha.json")
+        self.assertEqual(self.reg.tombstone_files("alpha"), [])
 
 
 class Allocation(unittest.TestCase):
@@ -226,19 +253,36 @@ class Allocation(unittest.TestCase):
             reg = m.Registry(Path(tmp, "sites"), Path(tmp, "tombstones"), defaults())
             (Path(tmp, "sites") / "alpha").mkdir(parents=True)
             reg.write_site(record("alpha", port=9111, quota_id=1011))
-            reg.write_tombstone(record("beta", port=9112, quota_id=1012))
+            reg.write_tombstone(record("beta", port=9112, quota_id=1012), STAMP)
             known = [{"name": "old", "port": 9109, "quota_id": 1009, "state": "closed"}]
             every = m.everything(reg, known)
             self.assertEqual([s["name"] for s in every], ["alpha", "beta", "old"])
             self.assertEqual(m.next_numbers(every), (9113, 1013))
 
-    def test_the_same_name_in_two_places_must_agree_and_closed_stays_closed(self):
+    def test_the_same_site_in_two_places_is_one_entry_and_closed_stays_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             reg = m.Registry(Path(tmp, "sites"), Path(tmp, "tombstones"), defaults())
-            reg.write_tombstone(record("beta", port=9112, quota_id=1012))
-            self.assertEqual(m.everything(reg, [{"name": "beta", "port": 9112, "quota_id": 1012, "state": "live"}])[0]["state"], "closed")
-            with self.assertRaises(m.RegistryError):
-                m.everything(reg, [{"name": "beta", "port": 9999, "quota_id": 1012, "state": "closed"}])
+            reg.write_tombstone(record("beta", port=9112, quota_id=1012), STAMP)
+            every = m.everything(reg, [{"name": "beta", "port": 9112, "quota_id": 1012, "state": "live"}])
+            self.assertEqual([(s["name"], s["state"]) for s in every], [("beta", "closed")])
+
+    def test_numbers_are_never_shared_by_two_sites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = m.Registry(Path(tmp, "sites"), Path(tmp, "tombstones"), defaults())
+            reg.write_tombstone(record("beta", port=9112, quota_id=1012), STAMP)
+            for other in ({"name": "gamma", "port": 9112, "quota_id": 1012}, {"name": "beta", "port": 9999, "quota_id": 1012}, {"name": "beta", "port": 9112, "quota_id": 1999}, {"name": "gamma", "port": 9112, "quota_id": 1999}):
+                with self.assertRaises(m.RegistryError, msg=str(other)):
+                    m.everything(reg, [dict(other, state="closed")])
+
+    def test_a_name_that_was_closed_may_have_a_new_site_with_new_numbers_and_both_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = m.Registry(Path(tmp, "sites"), Path(tmp, "tombstones"), defaults())
+            (Path(tmp, "sites") / "beta").mkdir(parents=True)
+            reg.write_tombstone(record("beta", port=9112, quota_id=1012), STAMP)
+            reg.write_site(record("beta", port=9113, quota_id=1013))
+            every = m.everything(reg)
+            self.assertEqual([(s["name"], s["port"], s["state"]) for s in every], [("beta", 9112, "closed"), ("beta", 9113, "hold")])
+            self.assertEqual(m.next_numbers(every), (9114, 1014))
 
 
 class Transitions(unittest.TestCase):
@@ -309,7 +353,18 @@ class Fit(unittest.TestCase):
         return m.broken_rules([m.merged(self.defaults, s) for s in sites], self.limits)
 
     def same(self, sites, msg=""):
-        self.assertEqual(self.mine(sites), self.ansible(sites), msg or str(sites))
+        expect = self.ansible(sites)
+        exist = [s["name"] for s in sites if s.get("state", "hold") != "closed"]
+        if 4 in expect and len(set(exist)) == len(exist):
+            expect.remove(4)             # the one deliberate difference: the play counts a closed site's name as taken, the model does not (a closed name may be used again). The play's copy goes with the play's per-site code
+        self.assertEqual(self.mine(sites), expect, msg or str(sites))
+
+    def test_a_closed_name_does_not_break_the_uniqueness_rule_but_two_that_exist_do(self):
+        a = self.site("alpha", 1)
+        self.assertEqual(self.mine([a, {**self.site("alpha", 2), "state": "closed"}]), [])
+        self.assertEqual(self.mine([a, self.site("alpha", 2)]), [4])
+        self.assertEqual(self.mine([a, {**self.site("alpha", 2), "state": "stopped"}]), [4], "a stopped site still exists")
+        self.assertEqual(self.mine([a, {**self.site("alpha", 2), "port": a["port"], "state": "closed"}]), [5], "ports are never shared, closed or not")
 
     def test_there_is_a_rule_for_each_expression_in_the_same_order(self):
         self.assertEqual(len(m.RULES), len(self.that))

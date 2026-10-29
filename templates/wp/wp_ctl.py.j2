@@ -13,7 +13,6 @@ CONFIG = {
     "run_dir": "{{ wp_ctl_run_dir }}",
     "audit_file": "{{ wp_ctl_audit_file }}",
     "data_dir": "{{ wp_data_mount }}/sites",
-    "tombstones_dir": "{{ wp_data_mount }}/tombstones",
     "tools_bin": "{{ wp_tools_bin }}",
     "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "logger": "/usr/bin/logger",
@@ -29,11 +28,6 @@ CONFIG = {
     "reserved_names": [
 {% for n in wp_reserved_names %}
         "{{ n }}",
-{% endfor %}
-    ],
-    "closed_sites": [
-{% for s in wp_sites if (s.state | default(wp_site_defaults.state)) == 'closed' %}
-        "{{ s.name }}",
 {% endfor %}
     ],
     "sites": [

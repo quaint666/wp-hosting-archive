@@ -118,16 +118,18 @@ class Provisioner:
 
     # ------------------------------------------------------------------------------------------------------------------------------- the registry
     def all_merged(self):
-        """Every site the registry or the repo knows, each over the defaults. The same name in two places must agree (model.everything checks); a name that has both a site record and a tombstone is broken."""
+        """Every site the registry or the repo knows, each over the defaults: one entry for every site and for every time a name was closed (a name may have a site and tombstones of earlier sites).
+        The same site seen in two places must agree (model.everything checks); a site record that has a tombstone with the same port and quota id is a close that was interrupted, and is broken."""
         model.everything(self.registry, self.known)
-        by = {k["name"]: k for k in self.known}
-        records = {r["name"]: r for r in self.registry.sites()}
+        by = {(k["port"], k["quota_id"]): model.merged(self.defaults, k) for k in self.known}
+        records = {(r["port"], r["quota_id"]): r for r in self.registry.sites()}
         for t in self.registry.tombstones():
-            if t["name"] in records:
-                raise model.RegistryError("%s has a site record and a tombstone" % t["name"])
-            by[t["name"]] = model.merged(self.defaults, t)
-        by.update({n: model.merged(self.defaults, r) for n, r in records.items()})
-        return sorted(by.values(), key=lambda s: s["name"])
+            key = (t["port"], t["quota_id"])
+            if key in records:
+                raise model.RegistryError("%s has a site record and a tombstone (a close that was interrupted: run wp-site-provision close %s)" % (t["name"], t["name"]))
+            by[key] = model.merged(self.defaults, t)
+        by.update({key: model.merged(self.defaults, r) for key, r in records.items()})
+        return sorted(by.values(), key=lambda s: (s["name"], s["port"]))
 
     def check_fit(self, sites):
         broken = model.fit_report(sites, self.cfg["fit"])
@@ -157,7 +159,7 @@ class Provisioner:
                 merged = self.all_merged()
             except model.RegistryError as e:
                 raise Failed(str(e))
-            why = model.check_name(name, self.cfg["fit"]["reserved_names"], {s["name"] for s in everything if s["state"] != "closed"}, {s["name"] for s in everything if s["state"] == "closed"})
+            why = model.check_name(name, self.cfg["fit"]["reserved_names"], {s["name"] for s in everything if s["state"] != "closed"})
             if why:
                 raise model.Refuse("'%s': %s" % (name, why))
             d = self.site_dir(name)
@@ -252,9 +254,9 @@ class Provisioner:
         return ["%s %s %d %d %d %d %s" % (s["name"], s["state"], int(s["quota_id"]), int(s["quota_mb"]), int(s["quota_id"]) + offset, int(s["backup_quota_mb"]), s["update_policy"]) for s in sites]
 
     def close(self, name):
-        """Leave the site's tombstone and remove its record, so its name, port and quota id are never given out again. wp-site-delete calls this after its archive is verified and before it removes
-        anything. The tombstone is written first (atomically) and the record removed second; if that is interrupted between the two, the registry reports the site as broken until this runs again, and
-        running it again finishes it. A site with no record and a tombstone is already closed."""
+        """Leave the site's tombstone, <name>.<UTC stamp>.json, and remove its record, so its port and quota id are never given out again (its name may be). wp-site-delete calls this after its archive
+        is verified and before it removes anything. The tombstone is written first (atomically) and the record removed second; if that is interrupted between the two, the registry reports the site
+        as broken until this runs again, and running it again finishes it without a second tombstone. A name with no record and a tombstone is already closed."""
         if not model.NAME_RE.fullmatch(name):
             raise model.Refuse("'%s' is not a site name" % name)
         with self.lock("registry"), self.lock("site-" + name):
@@ -263,14 +265,20 @@ class Provisioner:
             except model.RegistryError as e:
                 raise Failed(str(e))
             if rec is None:
-                tomb = self.registry.tombstone_file(name)
-                if tomb.is_file() and not tomb.is_symlink():
+                if self.registry.tombstone_files(name):
                     self.out("%s is already closed; nothing changed" % name)
                     return
                 raise model.Refuse("%s has no site record and no tombstone" % name)
-            self.registry.write_tombstone(rec)
+            try:
+                same = [p for p in self.registry.tombstone_files(name) if self.registry.load(p).get("port") == rec["port"] and self.registry.load(p).get("quota_id") == rec["quota_id"]]
+            except model.RegistryError as e:
+                raise Failed(str(e))
+            if same:
+                tomb = same[-1]                      # an earlier close of this site was interrupted after the tombstone: no second one
+            else:
+                tomb = self.registry.write_tombstone(rec, datetime.fromtimestamp(self.now(), timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
             self.registry.site_file(name).unlink()
-            self.out("closed %s: its tombstone is %s" % (name, self.registry.tombstone_file(name)))
+            self.out("closed %s: its tombstone is %s" % (name, tomb))
 
     # ---------------------------------------------------------------------------------------------------------------------------------- apply
     def apply(self, name):

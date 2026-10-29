@@ -194,22 +194,15 @@ class Wrapper(unittest.TestCase):
         lines = {l.split()[0]: l for l in out.splitlines()[1:]}
         self.assertIn("stopped", lines["a"].split()[2]); self.assertIn("NOT STOPPED", lines["b"])
 
-    def test_the_names_the_repo_keeps_as_closed_are_listed_and_nothing_is_expected_of_the_host_for_them(self):
-        import tempfile
-        d = Path(tempfile.mkdtemp(prefix="wpstatus-")); (d / "host_vars/dellwp").mkdir(parents=True)
-        text = fixture_vars_text().rstrip("\n") + "\n"
-        a = text.index("wp_sites:\n") + len("wp_sites:\n")
-        text = text[:a] + "  - name: gone\n    port: 9190\n    quota_id: 1090\n    state: closed\n" + text[a:]
-        (d / "host_vars/dellwp/vars.yml").write_text(text)
-        self.assertIn("gone", W.closed_sites(d))
+    def test_closed_sites_are_not_listed_and_a_healthy_registry_site_needs_nothing(self):
         out = io.StringIO()
         old = sys.stdout; sys.stdout = out
         try:
-            self.assertEqual(W.main(["--file", "-"], repo=d, stdin=io.StringIO(tsv(row()))), 0, "one healthy site and nothing declared by the repo: nothing needs attention")
+            self.assertEqual(W.main(["--file", "-"], repo=ROOT, stdin=io.StringIO(tsv(row()))), 0)
         finally:
             sys.stdout = old
-        self.assertIn("Closed in the repo (names never reused; the registry's own tombstones are on the VM): ", out.getvalue())
-        self.assertIn("gone", out.getvalue().split("Closed in the repo")[1].split("\n")[0])
+        self.assertNotIn("Closed in the repo", out.getvalue())
+        self.assertFalse(hasattr(W, "closed_sites"))
         self.assertIn("Nothing needs attention.", out.getvalue())
 
     def test_a_healthy_site_needs_no_attention(self):

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rehearses SET, ENSURE-STATE and DELETE (wp-ctl, over wp-site-provision, wp-site-backup and wp-site-delete) on dellwp against the real thing, from the ThinkPad:   bash scripts/wp_state_rehearsal_dellwp.sh [options]
 # It works on a site that exists only in the registry, is on hold and has WordPress installed: the one scripts/wp_provision_rehearsal_dellwp.sh leaves standing (provtest1). That site is DELETED at the end, so its name
-# is used up for good (a tombstone in the registry keeps it). Steps:
+# leaves a tombstone in the registry (its port and quota id are never given again; its name may be). Steps:
 #   0. preflight   the tools on the VM are the ones of this branch (close, plan_state, ensure-state, the tombstone directory in the wrapper); the site is whole, running, on hold, with a record and no tombstone
 #   1. set         a note (registry only: no container, unit or file changes); a memory limit (the stack restarts and the php container really has the new limit); it is set back; a value the tool refuses fails
 #                  the job with status 2 and changes nothing; a key that is not editable is refused by the dispatcher
@@ -9,7 +9,7 @@
 #   3. stopped     a marker is written into WordPress; hold to stopped takes the final backup first (a new snapshot tagged final), the stack goes down, visitors get the paused page; stopped to live is refused by
 #                  the tool and nothing changes; back to hold: the marker is intact; the same request again changes nothing
 #   4. delete      stopped again, then wp-ctl delete with the name typed twice: the archive is complete, the registry holds a tombstone with the same name, port and quota id and no record, the files, containers,
-#                  unit and vhost are gone; the name is refused as used (check-name, create); the audit shows the verbs
+#                  unit and vhost are gone; the name is free again (check-name); the audit shows the verbs
 # It makes no commit and edits nothing in the repo. Options:  --site NAME (default provtest1)  --with-live (also fetch the site through the tunnel from here while it is live: for about a minute anyone can)
 # --yes (do not ask before starting)
 # It stops at the first step that fails badly. What it does not prove: the control app, two requests at once (the offline tests prove the locks), a site with a real friend's content, or that the Proxmox backups still hold
@@ -62,6 +62,7 @@ wpc() { "$BIN/wp-site-cli" "$S" "$@" </dev/null; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null </dev/null)" = true ]; }
 finish() { [ "$FAIL" = 0 ] && echo "   (all ok)"; [ "$FAIL" -gt 100 ] && FAIL=100; exit "$FAIL"; }
 field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1" "$2" 2>&1; }
+tombs() { ls -1 "$TOMB" 2>/dev/null | grep -Ec "^$S(\.[0-9]{8}T[0-9]{6}Z)?\.json$"; }        # how many times this name has been closed
 newest_tag() { local d; d=$(ls -1 "$BDIR/$S" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z$' | sort | tail -n 1); echo "${d:-none} $(sed -n 's/^tag=//p' "$BDIR/$S/$d/MANIFEST" 2>/dev/null | head -n 1)"; }
 # what a request that changes nothing must leave alone: when the containers and the unit started, and the files' change times
 fingerprint() {
@@ -111,7 +112,7 @@ refused() {     # $1 = the wp-ctl request, $2 = the error code wp-ctl must answe
   [ "$(printf '%s' "$out" | jfield error)" = "$2" ] && [ "$rc" = 2 ]; bump $? "'$1' is refused as $2 with status 2"
 }
 
-echo "State and delete rehearsal on dellwp ($DOMAIN). Site: $SITE, which is DELETED at the end (its name is then used up for good). Public step: $([ "$LIVE" = yes ] && echo "also through the tunnel" || echo "from the VM only")."
+echo "State and delete rehearsal on dellwp ($DOMAIN). Site: $SITE, which is DELETED at the end (its tombstone keeps its port and quota id). Public step: $([ "$LIVE" = yes ] && echo "also through the tunnel" || echo "from the VM only")."
 [ "$YES" = yes ] || yn "Go on?" || { echo "Nothing was done."; exit 1; }
 
 say "0. preflight"
@@ -122,12 +123,12 @@ for x in wp-ctl wp-site-provision wp-site-delete wp-site-backup wp-site-cli; do 
 grep -q 'def close' "$LIB/wp_site_provision.py" && ok "the deployed provisioning tool has close" || bad "the deployed wp_site_provision.py has no close: run the tools play (dellwp/wp_sites_dellwp.yml --tags wp_tools,wp_ctl)"
 grep -q 'def plan_state' "$LIB/wp_site_model.py" && ok "the deployed model has plan_state" || bad "the deployed wp_site_model.py has no plan_state: run the tools play"
 grep -q '"ensure-state"' "$LIB/wp_ctl.py" && ok "the deployed dispatcher has ensure-state" || bad "the deployed wp_ctl.py has no ensure-state: run the tools play"
-grep -q 'tombstones_dir' "$BIN/wp-ctl" && ok "the dispatcher's wrapper names the tombstone directory" || bad "the wrapper $BIN/wp-ctl does not name tombstones_dir: run the tools play"
+grep -q 'closed_sites' "$BIN/wp-ctl" && bad "the wrapper $BIN/wp-ctl still carries a closed-name list: run the tools play (a closed name may be used again)" || ok "the dispatcher's wrapper has no closed-name list"
 grep -q 'wp-site-provision' "$BIN/wp-site-delete" && grep -q ' close ' "$BIN/wp-site-delete" && ok "the delete tool closes the registry" || bad "$BIN/wp-site-delete does not call close: run the tools play"
 grep -q 'backup_timeout_s' "$BIN/wp-site-provision" && ok "the provisioning wrapper has the backup tool and its limit" || bad "the wrapper $BIN/wp-site-provision has no backup_timeout_s: run the tools play"
 [ -f "$DIR/site.json" ] && [ ! -L "$DIR/site.json" ] && ok "$S has a registry record" || bad "$S has no registry record: run scripts/wp_provision_rehearsal_dellwp.sh first (it leaves provtest1 standing)"
 check "its state is hold" "$(field "$DIR/site.json" state)" hold
-[ -e "$TOMB/$S.json" ] && bad "a tombstone for $S exists already: the name is used up" || ok "no tombstone for $S yet"
+echo "   tombstones of earlier sites called $S: $(tombs) (a delete adds exactly one)"
 running "$UP" && running "$DB" && ok "both containers are running" || bad "the site is not running"
 check "WordPress is installed" "$(wpc core is-installed >/dev/null 2>&1 && echo yes || echo no)" yes
 check "not stopped" "$([ -e "$DIR/stopped.flag" ] && echo yes || echo no)" no
@@ -275,8 +276,11 @@ diff "$TMPD/fp2" "$TMPD/fp3" | head -n 12 | sed 's/^/   (diff) /'
 
 say "4. stop again, then delete (the name typed twice, as the tool needs)"
 job "ensure-state stopped (before the delete)" "ensure-state site=$SITE state=stopped" 3600 || fatal "the second stop failed"
+vmtest > "$TMPD/tomb0" <<'EOF'
+tombs
+EOF
 job "delete" "delete site=$SITE confirm_name=$SITE confirm_again=$SITE req=state-$SITE-delete" 3600 || fatal "the delete failed: read its log above; the archive and the tombstone are only written once it has verified"
-WANT=$SITE vmrun <<'EOF'
+WANT=$(cat "$TMPD/tomb0") vmrun <<'EOF'
 check "the site directory is gone" "$([ -e "$DIR" ] && echo yes || echo no)" no
 check "its containers are gone" "$(docker ps -aq --filter "name=^wp_${S//-/_}_" </dev/null | wc -l)" 0
 check "its unit is gone" "$([ -e "/etc/systemd/system/wp-$S.service" ] && echo yes || echo no)" no
@@ -286,20 +290,19 @@ check "its archive is on the VM (kept 14 days)" "$(ls -d "$ARCH/$S"-* 2>/dev/nul
 arch=$(ls -d "$ARCH/$S"-* 2>/dev/null | head -n 1)
 check "the archive holds the dump, the files and a manifest" "$(ls "$arch" 2>/dev/null | tr '\n' ' ')" "MANIFEST db.sql.gz wp-content.tar.gz "
 check "the archived dump passes gzip -t" "$(gzip -t "$arch/db.sql.gz" 2>/dev/null && echo yes || echo no)" yes
-[ -f "$TOMB/$S.json" ] && [ ! -L "$TOMB/$S.json" ] && ok "a tombstone exists" || bad "no tombstone in $TOMB"
-check "the tombstone says closed" "$(field "$TOMB/$S.json" state)" closed
-check "the tombstone keeps the name" "$(field "$TOMB/$S.json" name)" "$S"
+T=$(ls -1 "$TOMB/$S".*.json 2>/dev/null | tail -n 1)
+[ -n "$T" ] && [ -f "$T" ] && [ ! -L "$T" ] && ok "a dated tombstone exists ($T)" || bad "no dated tombstone in $TOMB"
+check "the tombstone says closed" "$(field "$T" state)" closed
+check "the tombstone keeps the name" "$(field "$T" name)" "$S"
 check "no site record is left" "$([ -e "$DIR/site.json" ] && echo yes || echo no)" no
-check "the tombstone is root's, 644" "$(stat -c '%U %a' "$TOMB/$S.json" 2>&1)" "root 644"
+check "the tombstone is root's, 644" "$(stat -c '%U %a' "$T" 2>&1)" "root 644"
+check "the tombstone count of $S grew by one" "$(tombs)" "$((WANT + 1))"
 nginx -t >/dev/null 2>&1 && ok "nginx still accepts its configuration" || bad "nginx -t fails"
 finish
 EOF
-TP=$(ssh dellwp "sudo -n cat $TOMB/$SITE.json" </dev/null 2>/dev/null | python3 -I -c 'import json,sys; r = json.load(sys.stdin); print(r["port"], r["quota_id"])' 2>&1)
+TP=$(ssh dellwp "sudo -n sh -c 'cat \$(ls -1 $TOMB/$SITE.*.json | tail -n 1)'" </dev/null 2>/dev/null | python3 -I -c 'import json,sys; r = json.load(sys.stdin); print(r["port"], r["quota_id"])' 2>&1)
 [ "$TP" = "$PORT $QID" ]; bump $? "the tombstone keeps the port and the quota id of the record ($PORT $QID; the tombstone says: $TP)"
-refused "check-name name=$SITE" name_was_used
-refused "create name=$SITE" name_was_used
-ssh dellwp "sudo -n $BIN/wp-site-provision create $SITE" </dev/null >"$TMPD/recreate" 2>&1; RC=$?
-[ "$RC" = 2 ]; bump $? "wp-site-provision create $SITE is refused too (status $RC: $(tail -n 1 "$TMPD/recreate" | cut -c1-120))"
+OUT=$(ctl check-name name=$SITE); [ "$(printf '%s' "$OUT" | jfield ok)" = True ]; bump $? "the name $SITE is free again (check-name answers ok; nothing was created)"
 ssh dellwp "sudo -n $BIN/wp-site-provision close $SITE" </dev/null >"$TMPD/reclose" 2>&1; RC=$?
 [ "$RC" = 0 ] && grep -q 'already closed' "$TMPD/reclose"; bump $? "closing it again says so and changes nothing (status $RC)"
 A=$(ctl audit-tail lines=200 | python3 -I -c 'import json,sys; [print(l.get("verb", "-"), l.get("phase", "-")) for l in json.loads(sys.stdin.read()).get("lines", [])]' 2>&1)
@@ -308,5 +311,5 @@ printf '%s\n' "$A" | grep -q "^ensure-state refused\$"; bump $? "the audit has t
 printf '%s\n' "$A" | grep -q "^delete result\$"; bump $? "the audit has the delete's result line"
 
 summary
-echo "   $SITE is deleted and its name is used up (the archive stays on dellwp for 14 days). Nothing was committed or edited in the repo."
+echo "   $SITE is deleted and its tombstone is in the registry (the archive stays on dellwp for 14 days). Nothing was committed or edited in the repo."
 exit "$FAIL"

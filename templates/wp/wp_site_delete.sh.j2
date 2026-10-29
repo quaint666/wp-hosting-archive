@@ -13,7 +13,7 @@
 # an archive that is already there and verifies is used, and every removal tolerates what is already gone. The Proxmox backups of the whole VM keep older copies for months and cannot be purged per site.
 # After this the repo must say the site is closed (state: closed; scripts/wp_sites.py delete does it): the play then keeps the tombstone clean. A site that has a registry record
 # (<dir>/site.json, made by wp-site-provision) leaves its tombstone in the registry instead: `wp-site-provision close` runs after the archive is verified and before anything is removed,
-# so the name, the port and the quota id are never given out again. Nothing in the repo needs to change for such a site.
+# so the port and the quota id are never given out again (the name may be, to a new site with new numbers). Nothing in the repo needs to change for such a site.
 set -eu -o pipefail
 . {{ wp_tools_lib }}/common.sh
 readonly BACKUPS='{{ wp_backup_dir }}'
@@ -30,10 +30,19 @@ readonly HOST_NAME='{{ inventory_hostname }}'
 {% raw %}
 usage() { echo "usage: wp-site-delete <site>   (run with ssh -t: it asks you to type the site's name)" >&2; exit 2; }
 [ "$#" -eq 1 ] || usage
-# Not require_site: a delete interrupted after the registry was closed has no record any more, and has to be finishable. The registry knows the site if it has a record or a tombstone (not a link).
+# Not require_site: a delete interrupted after the registry was closed has no record any more, and has to be finishable. The registry knows the site if it has a record or a tombstone, <name>.<stamp>.json
+# or the older <name>.json (not a link).
+has_tombstone() {
+  local f b
+  for f in "$TOMBSTONES/$site.json" "$TOMBSTONES/$site".*.json; do
+    b=${f##*/}
+    if [[ $b == "$site.json" || $b =~ ^$site\.[0-9]{8}T[0-9]{6}Z\.json$ ]] && [ -f "$f" ] && [ ! -L "$f" ]; then return 0; fi
+  done
+  return 1
+}
 site=${1:-}
 [[ $site =~ ^[a-z][a-z0-9-]{1,23}$ ]] || die "'$site' is not a site name"
-{ [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || { [ -f "$TOMBSTONES/$site.json" ] && [ ! -L "$TOMBSTONES/$site.json" ]; } || die "'$site' is not a site (it has no registry record and no tombstone)"
+{ [ -f "$WP_DATA/$site/site.json" ] && [ ! -L "$WP_DATA/$site/site.json" ]; } || has_tombstone || die "'$site' is not a site (it has no registry record and no tombstone)"
 dir=$WP_DATA/$site
 host=$site.$WP_DOMAIN
 bk=$BACKUPS/$site

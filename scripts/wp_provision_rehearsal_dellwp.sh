@@ -180,7 +180,6 @@ vmrun <<'EOF'
 rec=$(cat "$DIR/site.json" 2>&1)
 check "the record is valid JSON with this name, state hold and numbers" "$(python3 -I -c 'import json,sys; r = json.loads(sys.argv[1]); print(r["name"] == sys.argv[2] and r["state"] == "hold" and r["port"] > 9100 and r["quota_id"] > 1000 and r["label"] == "Provtest")' "$rec" "$S" 2>&1)" True
 check "the record is root's and private to writers" "$(stat -c '%U %a' "$DIR/site.json")" "root 644"
-check "no tombstone for it" "$([ -e "$TOMB/$S.json" ] && echo yes || echo no)" no
 running "$UP" && ok "the php container is running" || bad "$UP is not running"
 running "$DB" && ok "the database container is running" || bad "$DB is not running"
 check "the database is empty" "$(db 'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()')" 0

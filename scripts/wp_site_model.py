@@ -3,9 +3,10 @@
 and whether the whole list of sites still fits the VM. Standard library only: the provisioning tool (wp-site-provision, a later batch) runs it on dellwp and tests/test_wp_site_model.py runs it offline.
 Design: docs/handoff_wp_control_temp.md (sections 3, 4 and 6.1).
 
-A site's record is {data_dir}/<name>/site.json (JSON, written atomically, only by the provisioning tool). A closed site leaves a tombstone, {tombstones_dir}/<name>.json, outside the site's directory
-so that deleting the directory never touches it: the name, port and quota id of a closed site are never given to another. Until the sites move out of host_vars/dellwp/vars.yml the allocator
-and the fit check also see that list (`known`): a record in the registry and an entry in the repo are one set of names, ports and ids.
+A site's record is {data_dir}/<name>/site.json (JSON, written atomically, only by the provisioning tool). A closed site leaves a tombstone, {tombstones_dir}/<name>.<UTC stamp>.json (a file from before
+the stamps, <name>.json, still counts), outside the site's directory so that deleting the directory never touches it. A NAME may be given again once its site is closed, and may then have several
+tombstones; the port and quota id of a closed site never are: every number ever recorded stays reserved, so a new site always gets numbers above all of them. Until the sites move out of
+host_vars/dellwp/vars.yml the allocator and the fit check also see that list (`known`): a record in the registry and an entry in the repo are one set of ports and ids.
 
 The checks of the fit rules are a port of the assert in tasks/wp_sites_common.yml, rule for rule and in the same order; tests/test_wp_site_model.py runs both on the same site lists and demands
 the same verdict, so a change to one that is not made to the other fails there. scripts/wp_sites.py keeps its own copies of the field rules until it retires; the same test ties those too."""
@@ -84,14 +85,12 @@ def validate_value(key, raw):
     return (n, None) if spec[1] <= n <= spec[2] else (None, "%s must be between %d and %d" % (key, spec[1], spec[2]))
 
 
-def check_name(name, reserved, taken, closed):
-    """None when `name` may be given to a new site, else the reason. `taken` = names of existing sites, `closed` = names of tombstones (a closed site's name is never reused)."""
+def check_name(name, reserved, taken):
+    """None when `name` may be given to a new site, else the reason. `taken` = names of existing (not closed) sites. A closed site's name may be used again: its numbers are not."""
     if not isinstance(name, str) or not NAME_RE.fullmatch(name) or "--" in name:
         return "letters, digits and single hyphens inside, 2 to 24 characters, starting with a letter"
     if name in reserved:
         return "'%s' is reserved" % name
-    if name in closed:
-        return "'%s' is the name of a closed site; a name is never reused" % name
     if name in taken:
         return "'%s' already exists" % name
     return None
@@ -147,8 +146,12 @@ def check_record(rec, defaults, where="record"):
     return rec
 
 
+STAMP_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z")
+TOMB_RE = re.compile(r"(?P<name>[a-z][a-z0-9-]{1,23})(?:\.(?P<stamp>[0-9]{8}T[0-9]{6}Z))?\.json")      # <name>.<stamp>.json; <name>.json is a tombstone from before the stamps
+
+
 class Registry:
-    """The records on disk. `data_dir` holds <name>/site.json, `tombstones_dir` holds <name>.json."""
+    """The records on disk. `data_dir` holds <name>/site.json, `tombstones_dir` holds <name>.<stamp>.json (one for every time a name was closed)."""
 
     def __init__(self, data_dir, tombstones_dir, defaults):
         self.data_dir, self.tombstones_dir, self.defaults = Path(data_dir), Path(tombstones_dir), defaults
@@ -156,8 +159,21 @@ class Registry:
     def site_file(self, name):
         return self.data_dir / name / "site.json"
 
-    def tombstone_file(self, name):
-        return self.tombstones_dir / (name + ".json")
+    def tombstone_file(self, name, stamp):
+        if not STAMP_RE.fullmatch(stamp):
+            raise ValueError("not a tombstone stamp: %r" % stamp)
+        return self.tombstones_dir / ("%s.%s.json" % (name, stamp))
+
+    def tombstone_files(self, name):
+        """The real tombstone files of `name` (a link does not count), oldest first; the file from before the stamps, <name>.json, sorts first."""
+        if not self.tombstones_dir.is_dir():
+            return []
+        out = []
+        for path in self.tombstones_dir.iterdir():
+            m = TOMB_RE.fullmatch(path.name)
+            if m and m["name"] == name and path.is_file() and not path.is_symlink():
+                out.append(path)
+        return sorted(out, key=lambda p: p.name.replace(".json", ".0"))
 
     @staticmethod
     def load(path):
@@ -187,8 +203,11 @@ class Registry:
             return []
         out = []
         for path in sorted(self.tombstones_dir.glob("*.json")):
+            m = TOMB_RE.fullmatch(path.name)
+            if not m:
+                raise RegistryError("%s: a tombstone is called <name>.<UTC stamp>.json" % path)
             rec = check_record(self.load(path), self.defaults, str(path))
-            if rec["state"] != "closed" or rec["name"] != path.stem:
+            if rec["state"] != "closed" or rec["name"] != m["name"]:
                 raise RegistryError("%s: a tombstone is a closed site named like its file" % path)
             out.append(rec)
         return out
@@ -200,12 +219,16 @@ class Registry:
             raise Refuse("a closed site has a tombstone, not a site record")
         self.atomic_write(self.site_file(rec["name"]), rec)
 
-    def write_tombstone(self, rec):
+    def write_tombstone(self, rec, stamp):
         rec = {**rec, "state": "closed"}
         check_record(rec, self.defaults, "tombstone for %s" % rec.get("name"))
+        path = self.tombstone_file(rec["name"], stamp)
+        if path.exists() or path.is_symlink():
+            raise RegistryError("%s exists already" % path)
         self.tombstones_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.tombstones_dir, 0o755)
-        self.atomic_write(self.tombstone_file(rec["name"]), rec)
+        self.atomic_write(path, rec)
+        return path
 
     @staticmethod
     def atomic_write(path, rec):
@@ -232,17 +255,22 @@ def merged(defaults, rec):
 
 
 def everything(registry, known=()):
-    """Every site the registry or the repo knows, as plain dicts of name, port, quota_id, state: records, tombstones and `known` (the repo's wp_sites until it moves). A name in two places must agree."""
+    """Every site the registry or the repo knows, one per port and quota id (a site, or one time a name was closed), as plain dicts of name, port, quota_id, state: records, tombstones and `known`
+    (the repo's wp_sites until it moves). The same site seen in two places is one entry. A port or a quota id used by two different sites is an error: numbers are never shared."""
     seen = {}
     for rec in list(registry.sites()) + list(registry.tombstones()) + [dict(k) for k in known]:
         rec = {k: rec[k] for k in ("name", "port", "quota_id", "state") if k in rec}
-        old = seen.get(rec["name"])
-        if old and (old["port"], old["quota_id"]) != (rec["port"], rec["quota_id"]):
-            raise RegistryError("%s is recorded with two different ports or quota ids (%s and %s)" % (rec["name"], old, rec))
+        key = (rec["port"], rec["quota_id"])
+        for (port, qid), other in seen.items():
+            if (port, qid) == key and other["name"] != rec["name"]:
+                raise RegistryError("%s and %s have the same port and quota id (%s, %s): numbers are never shared" % (other["name"], rec["name"], port, qid))
+            if (port, qid) != key and (port == key[0] or qid == key[1]):
+                raise RegistryError("%s and %s share a port or a quota id (%s, %s and %s, %s): numbers are never shared" % (other["name"], rec["name"], port, qid, key[0], key[1]))
+        old = seen.get(key)
         if old and old.get("state") == "closed":
-            rec["state"] = "closed"                                           # once closed, closed: a stale copy elsewhere cannot reopen the name
-        seen[rec["name"]] = {**(old or {}), **rec}
-    return sorted(seen.values(), key=lambda s: s["name"])
+            rec["state"] = "closed"                                           # once closed, closed: a stale copy elsewhere cannot reopen the site
+        seen[key] = {**(old or {}), **rec}
+    return sorted(seen.values(), key=lambda s: (s["name"], s["port"]))
 
 
 def next_numbers(sites):
@@ -265,7 +293,7 @@ RULES = (
     "every site has a name, a port and a quota id",
     "names are 2 to 24 characters of a-z, 0-9 and -",
     "no name is reserved",
-    "names are unique",
+    "the names of the sites that exist are unique (a closed site's name may be used again)",
     "ports are unique",
     "quota ids are unique",
     "ports are above 1024",
@@ -303,7 +331,7 @@ def broken_rules(sites, limits):
         True,
         sum(1 for x in names if isinstance(x, str) and FIT_NAME_RE.fullmatch(x)) == n,
         not set(names) & set(limits["reserved_names"]),
-        len(set(names)) == n,
+        len({s["name"] for s in exist}) == len(exist),
         len(set(ports)) == n,
         len(set(ids)) == n,
         all(p > 1024 for p in ports),

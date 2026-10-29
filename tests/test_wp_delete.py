@@ -43,7 +43,7 @@ PROVISION = '''#!/bin/bash
 echo "provision $* archive=$([ -f "$ARCHIVE_DIR/wptest-%s/MANIFEST" ] && echo complete || echo no) site=$([ -d "$SITE_DIR" ] && echo present || echo gone) vhost=$([ -e "$VHOST_DIR/wp_site_wptest.conf" ] && echo present || echo gone)" >> "$SHIM/calls"
 [ -f "$SHIM/provision_fail" ] && { echo "the registry is unreadable" >&2; exit 1; }
 # what the real close does: the tombstone first, then the record goes
-[ "$1" = close ] && { mkdir -p "$TOMB_DIR"; echo '{}' > "$TOMB_DIR/$2.json"; rm -f "$SITE_DIR/site.json"; }
+[ "$1" = close ] && { mkdir -p "$TOMB_DIR"; echo '{}' > "$TOMB_DIR/$2.20261029T120000Z.json"; rm -f "$SITE_DIR/site.json"; }
 exit 0
 ''' % "20261024T150001Z"
 
@@ -219,6 +219,31 @@ class Delete(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(self.site.exists())
         self.assertEqual([c for c in self.calls() if c.startswith("provision ")], [], "nothing left to close")
+
+    def test_a_dated_tombstone_lets_an_interrupted_delete_finish(self):
+        self.unregistered()
+        (self.data / "tombstones").mkdir()
+        (self.data / "tombstones" / "wptest.20261029T120000Z.json").write_text("{}")
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.site.exists())
+
+    def test_an_unstamped_tombstone_from_before_the_stamps_lets_an_interrupted_delete_finish(self):
+        self.unregistered()
+        (self.data / "tombstones").mkdir()
+        (self.data / "tombstones" / "wptest.json").write_text("{}")
+        r = self.delete()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.site.exists())
+
+    def test_the_tombstone_of_another_site_or_a_stamp_that_is_not_one_does_not_count(self):
+        self.unregistered()
+        (self.data / "tombstones").mkdir()
+        for name in ("wptestx.20261029T120000Z.json", "wptes.20261029T120000Z.json", "other.json", "wptest.bak.json"):
+            (self.data / "tombstones" / name).write_text("{}")
+        r = self.delete()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no registry record and no tombstone", r.stderr)
 
     def test_a_registry_that_cannot_close_the_site_stops_the_delete_before_anything_is_removed_and_a_rerun_finishes_it(self):
         self.registered()

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -255,17 +256,26 @@ class Create(Base):
         rec = self.make().create("bravo")
         self.assertEqual((rec["port"], rec["quota_id"]), (9103, 1003))
 
+    def test_a_name_the_repo_or_the_registry_closed_is_free_and_gets_numbers_above_every_one_ever_recorded(self):
+        self.make().create("alpha")
+        reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
+        reg.write_tombstone({"schema": 1, "name": "gone", "port": 9150, "quota_id": 1050, "state": "closed"}, "20261001T000000Z")
+        for name in ("gone", "old"):
+            rec = self.make().create(name)
+            self.assertGreater(rec["port"], 9150, name)
+            self.assertGreater(rec["quota_id"], 1050, name)
+
     def test_refusals_leave_nothing_behind(self):
         self.make().create("alpha")
         before, tree = len(self.calls()), self.tree()
         reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
-        reg.write_tombstone({"schema": 1, "name": "gone", "port": 9150, "quota_id": 1050, "state": "closed"})
+        reg.write_tombstone({"schema": 1, "name": "gone", "port": 9150, "quota_id": 1050, "state": "closed"}, "20261001T000000Z")
         tree = self.tree()
         stray = self.site_dir("stray")
         stray.mkdir()
         (stray / "file").write_text("x")
         tree = self.tree()
-        cases = [("hub", []), ("vps-hub", []), ("Bad", []), ("a", []), ("alpha", []), ("old", []), ("gone", []), ("stray", []), ("bravo", ["state=live"]), ("bravo", ["port=9200"]),
+        cases = [("hub", []), ("vps-hub", []), ("Bad", []), ("a", []), ("alpha", []), ("stray", []), ("bravo", ["state=live"]), ("bravo", ["port=9200"]),
                  ("bravo", ["name=x"]), ("bravo", ["php_mem_mb=10"]), ("bravo", ["php_mem_mb=640", "php_mem_mb=700"]), ("bravo", ["nokey"]), ("bravo", ["quota_mb=100000", "backup_quota_mb=100000"]),
                  ("bravo", ["php_mem_mb=4096", "db_mem_mb=4096"]), ("bravo", ["label=" + "x" * 101])]
         for name, sets in cases:
@@ -714,44 +724,73 @@ class Close(Base):
         self.lines.clear()
         self.reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
 
+    def tombs(self):
+        d = Path(self.cfg["tombstones_dir"])
+        return sorted(d.iterdir()) if d.is_dir() else []
+
+    def stamp(self):
+        return datetime.fromtimestamp(self.clock, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
     def test_close_leaves_a_tombstone_with_the_numbers_and_removes_the_record(self):
         before = self.record()
         self.make().close("alpha")
-        tomb = json.loads((Path(self.cfg["tombstones_dir"]) / "alpha.json").read_text())
+        path = Path(self.cfg["tombstones_dir"]) / ("alpha.%s.json" % self.stamp())
+        self.assertEqual(self.tombs(), [path], "one tombstone, named with the time of the close")
+        tomb = json.loads(path.read_text())
         self.assertEqual({k: tomb[k] for k in ("name", "port", "quota_id", "created")}, {k: before[k] for k in ("name", "port", "quota_id", "created")})
         self.assertEqual(tomb["state"], "closed")
         self.assertFalse((self.site_dir() / "site.json").exists())
         self.assertTrue(self.site_dir().is_dir(), "files are the delete tool's business, not the registry's")
         self.assertEqual(self.calls()[self.mark:], [], "close touches no container, unit or nginx")
-        self.assertEqual(self.lines, ["closed alpha: its tombstone is %s" % (Path(self.cfg["tombstones_dir"]) / "alpha.json")])
+        self.assertEqual(self.lines, ["closed alpha: its tombstone is %s" % path])
 
-    def test_a_closed_name_port_and_quota_id_are_never_given_out_again(self):
+    def test_a_closed_name_may_be_used_again_but_its_port_and_quota_id_never_are(self):
         before = self.record()
         self.make().close("alpha")
         with self.assertRaises(model.Refuse) as e:
             self.make().create("alpha")
-        self.assertIn("never reused", str(e.exception))
-        rec = self.make().create("bravo")
-        self.assertGreater(rec["port"], before["port"])
-        self.assertGreater(rec["quota_id"], before["quota_id"])
+        self.assertIn("is not an empty directory", str(e.exception), "the old files are still there until the delete tool has removed them: that is what stops the name, not a rule")
         with self.assertRaises(model.Refuse):
             self.make().apply("alpha")
+        shutil.rmtree(self.site_dir())                              # what wp-site-delete does after close
+        rec = self.make().create("alpha")
+        self.assertEqual(rec["name"], "alpha")
+        self.assertGreater(rec["port"], before["port"])
+        self.assertGreater(rec["quota_id"], before["quota_id"])
+        self.assertEqual(len(self.tombs()), 1, "the old tombstone is kept as history")
+        self.assertEqual(self.record()["port"], rec["port"], "the record is the new site's")
+        other = self.make().create("bravo")
+        self.assertGreater(other["port"], rec["port"])
+        names = [r.split()[0] for r in self.make().rows()]
+        self.assertEqual(sorted(names), ["alpha", "bravo"], "rows lists the new site once and not the closed one")
+
+    def test_a_second_close_of_the_same_name_leaves_a_second_tombstone(self):
+        self.make().close("alpha")
+        shutil.rmtree(self.site_dir())
+        self.make().create("alpha")
+        self.clock += 60
+        self.make().close("alpha")
+        self.assertEqual(len(self.tombs()), 2)
+        ports = sorted(json.loads(p.read_text())["port"] for p in self.tombs())
+        self.assertEqual(len(set(ports)), 2, "the two tombstones are two different sites")
 
     def test_closing_twice_changes_nothing(self):
         self.make().close("alpha")
-        tomb = Path(self.cfg["tombstones_dir"]) / "alpha.json"
-        text = tomb.read_text()
+        before = {p: p.read_text() for p in self.tombs()}
         self.lines.clear()
+        self.clock += 60
         self.make().close("alpha")
-        self.assertEqual((tomb.read_text(), self.lines), (text, ["alpha is already closed; nothing changed"]))
+        self.assertEqual(({p: p.read_text() for p in self.tombs()}, self.lines), (before, ["alpha is already closed; nothing changed"]))
 
     def test_a_close_interrupted_between_the_tombstone_and_the_removal_is_finished_by_running_it_again(self):
-        self.reg.write_tombstone(self.reg.read_site("alpha"))       # the first half only
+        self.reg.write_tombstone(self.reg.read_site("alpha"), "20261001T000000Z")       # the first half only
         with self.assertRaises(prov.Failed) as e:
             self.make().apply("alpha")
         self.assertIn("a site record and a tombstone", str(e.exception), "the registry says it is broken rather than guessing")
+        self.assertIn("wp-site-provision close alpha", str(e.exception))
         self.make().close("alpha")
         self.assertIsNone(self.reg.read_site("alpha"))
+        self.assertEqual(len(self.tombs()), 1, "finishing it writes no second tombstone for the same site")
         self.assertEqual(self.make().close("alpha"), None)
 
     def test_a_site_with_no_record_and_no_tombstone_or_a_bad_name_is_refused(self):
@@ -764,7 +803,7 @@ class Close(Base):
         (self.site_dir() / "site.json").write_text("{not json")
         with self.assertRaises(prov.Failed):
             self.make().close("alpha")
-        self.assertFalse((Path(self.cfg["tombstones_dir"]) / "alpha.json").exists())
+        self.assertEqual(self.tombs(), [])
 
     def test_a_record_that_is_a_link_is_not_a_record(self):
         real = self.site_dir() / "site.json"
@@ -773,7 +812,7 @@ class Close(Base):
         real.symlink_to(moved)
         with self.assertRaises(model.Refuse):
             self.make().close("alpha")
-        self.assertTrue(moved.exists() and not (Path(self.cfg["tombstones_dir"]) / "alpha.json").exists())
+        self.assertTrue(moved.exists() and self.tombs() == [])
 
     def test_the_lock_refuses_a_second_close(self):
         fh = open(Path(self.cfg["lock_dir"]) / "site-alpha.lock", "w")
@@ -825,7 +864,7 @@ class Rows(Base):
     def test_a_registry_that_cannot_be_read_is_an_error_and_not_an_empty_list(self):
         self.make().create("alpha")
         reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
-        reg.write_tombstone(reg.read_site("alpha"))                 # a record AND a tombstone
+        reg.write_tombstone(reg.read_site("alpha"), "20261001T000000Z")                 # a record AND a tombstone (a close that was interrupted)
         with self.assertRaises(prov.Failed):
             self.make().rows()
         reg.site_file("alpha").unlink()

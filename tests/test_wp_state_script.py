@@ -66,7 +66,7 @@ class Syntax(unittest.TestCase):
         used = set()
         for label, body in snippets():
             used |= set(re.findall(r"\$\{?([A-Z][A-Z0-9_]*)\}?", body))
-        provided_inside = {"FAIL", "HOST", "UP", "DB", "DIR", "PATH", "PIPESTATUS", "WANT"}      # set by the library or by bash itself (WANT is also passed)
+        provided_inside = {"FAIL", "HOST", "UP", "DB", "DIR", "PATH", "PIPESTATUS", "WANT", "T"}      # set by the library or by bash itself (WANT is also passed)
         self.assertEqual(sorted(used - passed - provided_inside), [])
 
     def test_every_snippet_that_reports_by_count_ends_in_finish(self):
@@ -120,7 +120,6 @@ case "$*" in
   *"sudo -n true"*) exit ${SSH_SUDO_RC:-0} ;;
   *"cat "*"/tombstones/"*) echo '{"name": "provtest1", "port": '"${SSH_TOMB_PORT:-9102}"', "quota_id": 1002, "state": "closed"}'; exit 0 ;;
   *"cat "*"site.json"*) echo '{"name": "provtest1", "port": 9102, "quota_id": 1002, "state": "hold", "schema": 1}'; exit 0 ;;
-  *"wp-site-provision create"*) echo "wp-site-provision: refused: 'provtest1' is the name of a closed site; a name is never reused"; exit 2 ;;
   *"wp-site-provision close"*) echo "provtest1 is already closed; nothing changed"; exit 0 ;;
   *"wp-ctl set site=provtest1 key=port"*|*"wp-ctl set site=provtest1 key=state"*) echo '{"error": "bad_value", "ok": false}'; exit 2 ;;
   *"wp-ctl set site=provtest1"|*"wp-ctl set site=provtest1 ") echo '{"error": "missing_argument", "ok": false}'; exit 2 ;;
@@ -130,7 +129,7 @@ case "$*" in
   *"wp-ctl ensure-state site=provtest1 state=live confirm_name=wrongname"*) echo '{"error": "confirm_mismatch", "ok": false}'; exit 2 ;;
   *"wp-ctl ensure-state site=provtest1 state=live"*) echo '{"error": "missing_argument", "ok": false}'; exit 2 ;;
   *"wp-ctl ensure-state site=provtest1 state=closed"*) echo '{"error": "bad_value", "ok": false}'; exit 2 ;;
-  *"wp-ctl check-name"*|*"wp-ctl create name=provtest1"*) echo '{"error": "name_was_used", "ok": false}'; exit 2 ;;
+  *"wp-ctl check-name"*) echo '{"ok": true}'; exit 0 ;;
   *"wp-ctl set "*|*"wp-ctl ensure-state "*|*"wp-ctl delete "*) echo '{"job": "%(job)s", "ok": true}'; exit 0 ;;
   *"job-status job=%(job2)s"*) echo '{"ok": true, "state": "done", "rc": 2}'; exit 0 ;;
   *"job-status"*) echo '{"ok": true, "state": "done", "rc": '"${SSH_JOB_RC:-0}"'}'; exit 0 ;;
@@ -223,7 +222,7 @@ class Flow(Harness):
             "ensure-state site=%s state=hold" % s,
             "ensure-state site=%s state=stopped" % s,
             "delete site=%s confirm_name=%s confirm_again=%s req=state-%s-delete" % (s, s, s, s),
-            "check-name name=%s" % s, "create name=%s" % s])
+            "check-name name=%s" % s])
         self.untouched()
 
     def test_the_memory_value_comes_from_the_repos_default_and_nothing_is_typed_twice(self):
