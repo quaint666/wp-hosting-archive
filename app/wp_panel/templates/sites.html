@@ -20,15 +20,21 @@
 {% if rows %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th>Site</th><th>Recorded state</th><th>What nginx does</th><th>Unit</th></tr></thead>
+  <thead><tr><th>Site</th><th>Address</th><th>State</th><th>Last backup</th><th>Disk used</th><th>WordPress</th></tr></thead>
   <tbody>
   {% for r in rows %}
+  {% set n = r.get('site', '') %}
   <tr>
-    <td><a href="{{ url_for('site', name=r.get('site', '')) }}">{{ r.get('site', '') | clip(40) }}</a></td>
+    <td><a href="{{ url_for('site', name=n) }}">{{ n | clip(40) }}</a></td>
+    <td>{% if n %}{% set u = site_url(n) %}<a href="{{ u }}" target="_blank" rel="noopener noreferrer" class="url">{{ u }}</a>{% endif %}</td>
     {% set d = r.get('deployed', '') %}
-    <td><span class="badge {{ 'state-' ~ d if d in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ d | clip(20) }}</span></td>
-    <td>{{ r.get('actual', '') | clip(20) }}</td>
-    <td>{{ r.get('unit', '') | clip(20) }}</td>
+    <td><span class="badge {{ 'state-' ~ d if d in ('hold', 'live', 'stopped') else 'state-unknown' }}">{{ d | clip(20) }}</span>
+      {% if r.get('actual', '') != d %}<div class="small">nginx does: {{ r.get('actual', '') | clip(20) }}</div>{% endif %}
+      {% if r.get('unit', '') != 'active' and d != 'stopped' %}<div class="small">unit: {{ r.get('unit', '') | clip(20) }}</div>{% endif %}</td>
+    {% set age = r.get('backup_age_h', '-') %}
+    <td>{% if age == '-' %}<span class="muted">none yet</span>{% elif age == '0' %}under an hour ago{% else %}{{ age | clip(6) }} h ago{% endif %}{% if r.get('frozen') == 'yes' %} <span class="badge warn">frozen</span>{% endif %}</td>
+    <td>{{ r.get('quota_pct', '?') | clip(6) }}% site<div class="small">{{ r.get('backup_quota_pct', '?') | clip(6) }}% backups</div></td>
+    <td>{{ r.get('core', '') | clip(20) }}</td>
   </tr>
   {% endfor %}
   </tbody>

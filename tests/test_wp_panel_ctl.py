@@ -76,7 +76,7 @@ class Allowlist(unittest.TestCase):
         self.assertEqual(set(ctl.STREAM_VERBS), {"import-receive"})
         self.assertEqual(wp_ctl.VERBS["import-receive"].kind, "stream")
         self.assertEqual(set(ctl.STREAM_VERBS["import-receive"]), set(wp_ctl.VERBS["import-receive"].args))
-        for verb in ("import-report", "import-list", "vuln-check"):
+        for verb in ("import-report", "import-list", "vuln-check", "users"):
             self.assertEqual(ctl.READ_VERBS[verb].keys(), wp_ctl.VERBS[verb].args.keys(), verb)
             self.assertEqual(wp_ctl.VERBS[verb].kind, "read", verb)
 
@@ -704,6 +704,11 @@ class Imports(unittest.TestCase):
     def test_the_follow_up_verbs_are_sent_as_wp_ctl_wants_them(self):
         self.assertEqual(self.line("import-list"), {"verb": "import-list"})
         self.assertEqual(self.line("vuln-check", site="alpha"), {"verb": "vuln-check", "site": "alpha"})
+        self.assertEqual(self.line("users", site="alpha"), {"verb": "users", "site": "alpha"})
+        self.refused("users", site="alpha", req="p1")
+        self.refused("users")
+        for site in ("", "A", "a--b", "../x", None, 5):
+            self.refused("users", site=site)
         self.assertEqual(self.line("update-check", site="alpha", req="p1"), {"verb": "update-check", "site": "alpha", "req": "p1"})
         self.assertEqual(self.line("update-apply", site="alpha"), {"verb": "update-apply", "site": "alpha"})
         self.assertEqual(self.line("import-new", name="newshop", file="a1.wpress", label="Shop", req="p1"), {"verb": "import-new", "name": "newshop", "file": "a1.wpress", "label": "Shop", "req": "p1"})

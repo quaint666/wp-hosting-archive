@@ -40,10 +40,11 @@ CTX = {"hostvars": HOSTS}
 for f in ("network", "ports", "wireguard", "domain", "proxmox", "services"):
     CTX.update(load("group_vars/all/%s.yml" % f))
 CTX.update(load("group_vars/proxmox_guests/vars.yml"))
-for host in ("aopen", "delloptiplex3040"):
+for host in ("aopen", "delloptiplex3040", "dellwp"):
     CTX.setdefault("hostvars_vars", {})[host] = load("host_vars/%s/vars.yml" % host)
 HOSTS["aopen"].update(CTX["hostvars_vars"]["aopen"])
 HOSTS["delloptiplex3040"].update(CTX["hostvars_vars"]["delloptiplex3040"])
+HOSTS["dellwp"].update(CTX["hostvars_vars"]["dellwp"])
 ENV = jinja2.Environment(undefined=jinja2.StrictUndefined)
 
 

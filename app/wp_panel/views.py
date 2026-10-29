@@ -153,6 +153,8 @@ def register(app):
         args = {"site": name, "state": field("state", 20), "req": field("req", 80)}
         if args["state"] == "live":
             args["confirm_name"] = field("confirm_name", 60)
+        if args["state"] == "stopped" and field("confirm_name", 60) != name:      # wp-ctl does not ask for this one; the page does, because stopping takes a final backup and shows visitors a 503
+            return render_template("error.html", status=400, title="The form was not accepted", message="The name typed is not the site's name. The site was not stopped."), 400
         return started(ask("ensure-state", **args))
 
     @app.post("/sites/<name>/delete")
@@ -180,7 +182,13 @@ def register(app):
     @app.get("/sites/<name>/password")
     @page
     def password_form(name):
-        return secret_form("password.html", name)
+        reply = ask("show", site=name)                         # an unknown site is a 404 here, before a form is drawn
+        try:                                                    # the list is a convenience: when it cannot be had, the form takes a typed name as before
+            users = [u for u in ask("users", site=name).get("users", []) if isinstance(u, dict) and isinstance(u.get("user"), str)]
+            why = ""
+        except CtlError as e:
+            users, why = [], str(e)
+        return render_template("password.html", name=name, registry=reply.get("registry") or {}, users=users, users_problem=why, wanted=request.args.get("user", ""))
 
     @app.post("/sites/<name>/password")
     @action

@@ -561,7 +561,12 @@ def h_jobs(call):
 
 
 def h_job_status(call):
-    return {"ok": True, "job": call.args["job"], **job_state(call.ctl, job_dir(call.ctl, call.args["job"]))}
+    jd = job_dir(call.ctl, call.args["job"])
+    try:
+        spec = json.loads((jd / "spec.json").read_text())
+    except (OSError, ValueError):
+        spec = {}
+    return {"ok": True, "job": call.args["job"], "verb": spec.get("verb"), "site": spec.get("site"), **job_state(call.ctl, jd)}
 
 
 def h_job_log(call):
@@ -605,6 +610,21 @@ def h_import_list(call):
     except (ValueError, KeyError, IndexError, TypeError):
         raise Refuse("tool_output", "wp-site-import list did not answer with its one JSON line (status %d)" % rc)
     return {"ok": True, "files": files, "imports": imports}
+
+
+def h_users(call):
+    """The WordPress users of a running site: login and roles, no addresses. It feeds the password form's list, so the operator picks a user instead of typing one. WP-CLI's own JSON is read, checked row by row
+    and passed on; a stopped site has no containers, so the tool's refusal is the answer and the page falls back to typing."""
+    rc, text = call.run([call.ctl.tool("wp-site-cli"), call.args["site"], "user", "list", "--fields=user_login,roles", "--format=json"])
+    try:
+        data = json.loads(text.strip().splitlines()[-1])
+        if rc != 0 or not isinstance(data, list):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise Refuse("tool_output", "the users of %s could not be listed (status %d): %s" % (call.args["site"], rc, text.strip()[-200:]))
+    users = [{"user": r["user_login"], "roles": r.get("roles", "") if isinstance(r.get("roles", ""), str) else ""} for r in data
+             if isinstance(r, dict) and isinstance(r.get("user_login"), str) and USER_NAME_RE.fullmatch(r["user_login"])]
+    return {"ok": True, "site": call.args["site"], "users": users[:200]}
 
 
 def h_vuln_check(call):
@@ -733,6 +753,7 @@ VERBS = {
     "import-report": Verb("read", {"site": SITE}, h_import_report),
     "import-list": Verb("read", {}, h_import_list),
     "vuln-check": Verb("read", {"site": SITE}, h_vuln_check),
+    "users": Verb("read", {"site": SITE}, h_users),
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
     "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),

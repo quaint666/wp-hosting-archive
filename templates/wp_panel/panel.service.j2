@@ -19,7 +19,7 @@ ExecStart=/usr/bin/docker run --name {{ panel_container }} \
   --cap-drop=ALL --security-opt=no-new-privileges \
   --memory={{ panel_memory }} --memory-swap={{ panel_memory }} \
   -v {{ panel_secret_dir }}:/run/secrets:ro \
-  -e PANEL_CTL_HOST={{ panel_ctl_host }} -e PANEL_CTL_USER={{ panel_ctl_user }} \
+  -e PANEL_CTL_HOST={{ panel_ctl_host }} -e PANEL_CTL_USER={{ panel_ctl_user }} -e PANEL_SITE_DOMAIN={{ panel_site_domain }} \
   -e PANEL_SECRET_DIR=/run/secrets -e PANEL_STATE_DIR=/run/panel \
   -e PANEL_BIND={{ panel_bind }} -e PANEL_SESSION_HOURS={{ panel_session_hours }} \
   {{ panel_image }}

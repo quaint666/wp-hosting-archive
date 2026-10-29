@@ -51,11 +51,12 @@ class FakeCtl:
             "list": {"ok": True, "sites": [{"site": "alpha", "deployed": "live", "actual": "live", "unit": "active"}, {"site": "bravo", "deployed": "hold", "actual": "hold", "unit": "active"}]},
             "show": {"ok": True, "site": "alpha", "status": {"deployed": "live", "quota_pct": "9"}, "registry": {"name": "alpha", "note": "a note", "port": 9101}},
             "jobs": {"ok": True, "jobs": [{"job": JOB, "verb": "create", "site": "alpha", "state": "done", "rc": 0}]},
-            "job-status": {"ok": True, "state": "done", "rc": 0},
+            "job-status": {"ok": True, "verb": "set", "site": "alpha", "state": "done", "rc": 0},
             "job-log": {"ok": True, "job": JOB, "data": "line one\nline two\n", "offset": 18, "state": "done", "rc": 0},
             "import-report": {"ok": True, "rc": 0, "ran": True, "out": "Import report for alpha\n  plugins: 3 reinstalled\n"},
             "import-list": {"ok": True, "files": [{"name": "friend.wpress", "bytes": 5242880, "mtime": T0 - 7200, "site": None}, {"name": "used.wpress", "bytes": 1048576, "mtime": T0 - 86400 * 2, "site": "bravo"}],
                             "imports": [{"site": "bravo", "file": "used.wpress", "stage": "reported", "problems": ["known vulnerabilities: FOUND: 7 finding(s): core wordpress 7.1.3"]}]},
+            "users": {"ok": True, "site": "alpha", "users": [{"user": "admin", "roles": "administrator"}, {"user": "ed", "roles": "editor"}]},
             "vuln-check": {"ok": True, "rc": 1, "ran": True, "out": "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3 (7 findings)\n"},
             "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB}, "import-rescan": {"ok": True, "job": JOB},
             "import-run": {"ok": True, "job": JOB},
@@ -112,7 +113,7 @@ class Base(unittest.TestCase):
         self.state = Path(self.d.name) / "state"
         self.clock = Clock()
         self.ctl = FakeCtl()
-        self.settings = config.Settings("dellwp", "wpctl", "/k", "/kh", str(self.state), 3 * 3600, b"k" * 40, generate_password_hash(PASSWORD, method="pbkdf2:sha256:1000"), TOTP_SECRET)
+        self.settings = config.Settings("dellwp", "wpctl", "/k", "/kh", str(self.state), 3 * 3600, b"k" * 40, generate_password_hash(PASSWORD, method="pbkdf2:sha256:1000"), TOTP_SECRET, "example.test")
         self.app = self.make_app()
         self.c = self.app.test_client()
 
@@ -140,7 +141,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/password"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -164,7 +165,7 @@ class Settings(unittest.TestCase):
         return d.name
 
     def env(self, d, **more):
-        return dict({"PANEL_CTL_HOST": "dellwp", "PANEL_SECRET_DIR": d}, **more)
+        return dict({"PANEL_CTL_HOST": "dellwp", "PANEL_SITE_DOMAIN": "example.test", "PANEL_SECRET_DIR": d}, **more)
 
     def test_good_files_load_and_the_defaults_are_the_documented_ones(self):
         s = config.load(self.env(self.files()))
@@ -307,6 +308,7 @@ class Access(Base):
         c = self.logged_in()
         for path in PAGES + ["/login"]:
             html = self.get(path, c, follow_redirects=True).get_data(as_text=True)
+            html = re.sub(r"https://[a-z0-9-]+\.example\.test/[A-Za-z0-9/._-]*", "", html)       # the addresses of the sites themselves (the sites' zone is the app's setting); every other outside link still fails
             pattern = r"(?i)\sstyle=|\son[a-z]+=|https?://" if path == "/import" else r"(?i)<script|\sstyle=|\son[a-z]+=|https?://"       # the one page with a script: tested on its own (Imports)
             self.assertNotRegex(html, pattern, path)
 
@@ -671,11 +673,72 @@ class Actions(Base):
             html = self.text("/sites/alpha")
             self.assertEqual(set(re.findall(r'name="state" value="([a-z]+)"', html)), offered, state)
             state_forms = re.findall(r'<form method="post" action="/sites/alpha/state".*?</form>', html, re.S)
-            self.assertEqual(any('name="confirm_name"' in f for f in state_forms), "live" in offered, state)
+            self.assertEqual(sorted(re.search(r'name="state" value="([a-z]+)"', f).group(1) for f in state_forms if 'name="confirm_name"' in f), sorted(offered & {"live", "stopped"}), state)
         for state in ("", "weird", "closed"):
             self.ctl.replies["show"]["status"]["deployed"] = state
             self.ctl.replies["show"]["registry"].pop("state", None)
             self.assertEqual(re.findall(r'name="state" value', self.text("/sites/alpha")), [], state)
+
+    def test_stopping_a_site_needs_its_name_typed_and_a_wrong_name_asks_nothing(self):
+        before = len(self.ctl.calls)
+        r = self.post("/sites/alpha/state", {"state": "stopped", "req": "r1", "confirm_name": "alph"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("The site was not stopped", r.get_data(as_text=True))
+        r = self.post("/sites/alpha/state", {"state": "stopped", "req": "r1"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.acted(), [], "nothing was asked of wp-ctl")
+        r = self.post("/sites/alpha/state", {"state": "stopped", "req": "r1", "confirm_name": "alpha"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.acted(), [("ensure-state", {"site": "alpha", "state": "stopped", "req": "r1"})], "wp-ctl is not sent the name: it does not ask for it for this move")
+
+    def test_the_site_page_shows_the_full_addresses_and_says_when_they_will_not_open(self):
+        html = self.text("/sites/alpha")
+        self.assertIn("<code class=\"pick\">https://alpha.example.test/</code>", html)
+        self.assertIn("<code class=\"pick\">https://alpha.example.test/wp-admin/</code>", html)
+        self.assertIn('href="https://alpha.example.test/wp-admin/" target="_blank" rel="noopener noreferrer"', html)
+        self.assertNotIn("closed to visitors, so these may not open", html)
+        for state, said in (("hold", "closed to visitors, so these may not open"), ("stopped", "visitors get a 503")):
+            self.ctl.replies["show"]["status"]["deployed"] = state
+            self.assertIn(said, self.text("/sites/alpha"), state)
+
+    def test_the_sites_table_has_each_sites_address_its_last_backup_and_its_disk_use(self):
+        self.ctl.replies["list"]["sites"][0].update(backup_age_h="5", quota_pct="12", backup_quota_pct="30", core="7.1.3", frozen="no")
+        self.ctl.replies["list"]["sites"][1].update(backup_age_h="-", quota_pct="?", backup_quota_pct="?", core="7.1.3", frozen="yes", actual="live")
+        html = self.text("/sites")
+        self.assertIn('href="https://alpha.example.test/" target="_blank" rel="noopener noreferrer" class="url">https://alpha.example.test/</a>', html)
+        self.assertIn("5 h ago", html)
+        self.assertIn("12% site", html)
+        self.assertIn("none yet", html)
+        self.assertIn("nginx does: live", html, "a site whose vhost differs from its record is said so in the row")
+        self.assertIn("frozen", html)
+
+    def test_a_finished_job_says_so_and_names_the_site_to_go_back_to(self):
+        html = self.text("/jobs/" + JOB)
+        self.assertIn("Finished: set on alpha.", html)
+        self.assertIn('href="/sites/alpha">Back to alpha</a>', html)
+        self.ctl.replies["job-status"] = {"ok": True, "verb": "set", "site": "alpha", "state": "done", "rc": 3}
+        html = self.text("/jobs/" + JOB)
+        self.assertIn("Failed: set on alpha.", html)
+        self.assertIn("result-bad", html)
+        self.ctl.replies["job-status"] = {"ok": True, "state": "done", "rc": 0}
+        self.assertIn('href="/sites">Back to the sites</a>', self.text("/jobs/" + JOB), "a job that names no site goes back to the list")
+        self.ctl.replies["job-status"] = {"ok": True, "verb": "<b>x</b>", "site": "alpha", "state": "done", "rc": 0}
+        self.assertNotIn("<b>x</b>", self.text("/jobs/" + JOB))
+
+    def test_the_password_form_lists_the_sites_users_and_falls_back_to_typing_when_it_cannot(self):
+        html = self.text("/sites/alpha/password")
+        self.assertRegex(html, r'<select name="user" required>')
+        self.assertIn('<option value="admin">admin (administrator)</option>', html)
+        self.assertIn(("users", {"site": "alpha"}), self.ctl.calls)
+        self.assertIn('<option value="ed" selected>', self.text("/sites/alpha/password?user=ed"))
+        self.ctl.fail["users"] = CtlError("failed", "alpha is stopped", None)
+        html = self.text("/sites/alpha/password")
+        self.assertNotIn("<select", html)
+        self.assertRegex(html, r'<input name="user" required maxlength="60"')
+        self.assertIn("alpha is stopped", html)
+        self.ctl.fail.pop("users")
+        self.ctl.replies["users"]["users"] = [{"user": '"><b>x</b>', "roles": "<i>"}, "junk", {"roles": "x"}]
+        self.assertNotIn("<b>x</b>", self.text("/sites/alpha/password"))
 
     def test_the_site_page_has_one_setting_form_per_editable_key_each_with_the_token_and_its_own_request_id(self):
         self.ctl.replies["show"]["registry"].update(php_mem_mb=640, update_policy="freeze", allow_xmlrpc=False, note="n")

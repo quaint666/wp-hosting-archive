@@ -6,6 +6,13 @@
 {% set st = status.get('state', '') %}
 <div class="page-head"><div><h1>Job {{ job | clip(40) }}</h1></div>
   <span class="badge {{ 'job-running' if st == 'running' else 'job-lost' if st == 'lost' else 'job-done-ok' if (st == 'done' and status.get('rc') == 0) else 'job-failed' if st == 'done' else '' }}">{{ st | clip(20) }}{% if st == 'done' %}, exit {{ status.get('rc', '') | clip(10) }}{% endif %}</span></div>
+{% if status.get('state') == 'done' %}
+<p class="notice {{ 'result-ok' if status.get('rc') == 0 else 'result-bad' }}" role="status"><strong>{{ 'Finished' if status.get('rc') == 0 else 'Failed' }}{% if status.get('verb') %}: {{ status.get('verb') | clip(30) }}{% endif %}{% if status.get('site') %} on {{ status.get('site') | clip(40) }}{% endif %}.</strong>
+  {% if status.get('rc') != 0 %}The log below says why.{% endif %}
+  {% if status.get('site') %}<a href="{{ url_for('site', name=status.get('site')) }}">Back to {{ status.get('site') | clip(40) }}</a>{% else %}<a href="{{ url_for('sites') }}">Back to the sites</a>{% endif %}</p>
+{% elif status.get('state') == 'lost' %}
+<p class="notice result-bad" role="status"><strong>Lost.</strong> The job has no exit code and is past its time limit; check the log and the site before running it again.</p>
+{% endif %}
 <div class="card"><table class="kv">
   <tr><th>State</th><td>{{ st | clip(20) }}</td></tr>
   <tr><th>Exit status</th><td>{{ status.get('rc', '') | clip(10) }}</td></tr>
