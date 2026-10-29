@@ -168,7 +168,7 @@ echo
 echo "   The tool's list of the repo's sites is baked into its wrapper, so it must be refreshed now (the closed $PARITY must be in it, or a new site could be given its port):"
 echo "     ansible-playbook -i inventory.yml dellwp/wp_sites_dellwp.yml --tags wp_tools,wp_ctl"
 yn "Did that run finish without errors?" || fatal "re-run the tools play, then run this again with --skip-parity"
-ssh dellwp "sudo -n grep -c '\"name\": \"$PARITY\"' $BIN/wp-site-provision" </dev/null | grep -q '^[1-9]'; bump $? "the wrapper names $PARITY (so its port and quota id are never reused)" || fatal "the wrapper does not name $PARITY: the play did not refresh it"
+ssh dellwp "sudo -n grep -c '$PARITY' $BIN/wp-site-provision" </dev/null | grep -q '^[1-9]'; bump $? "the wrapper names $PARITY (so its port and quota id are never reused)" || fatal "the wrapper does not name $PARITY: the play did not refresh it"
 fi
 
 VMSITE=$SITE

@@ -923,6 +923,19 @@ class Provisioning(Base):
         rc, reply = self.call({"verb": "create", "name": "fresh", "req": "r1", "label": "different"})
         self.assertEqual((rc, reply["error"]), (2, "req_reused"))
 
+    def test_a_repeat_of_a_create_after_the_site_exists_is_still_the_same_job_but_a_new_request_is_refused(self):
+        req = {"verb": "create", "name": "fresh", "req": "r1"}
+        first = self.call(req)[1]
+        self.registered("fresh")                       # the build has made the site by now
+        rc, again = self.call(req)
+        self.assertEqual((rc, again["job"], again.get("duplicate")), (0, first["job"], True), again)
+        rc, other = self.call({"verb": "create", "name": "fresh", "req": "r2"})
+        self.assertEqual((rc, other["error"]), (2, "name_taken"), "another request for the same name is still refused")
+        rc, other = self.call({"verb": "create", "name": "fresh"})
+        self.assertEqual((rc, other["error"]), (2, "name_taken"), "and so is one without a request id")
+        rc, other = self.call({"verb": "create", "name": "hub", "req": "r1"})
+        self.assertEqual((rc, other["error"]), (2, "req_reused"), "the id of a job cannot be reused for another name, whether or not the name would pass")
+
     def test_a_create_job_runs_the_tool_and_records_its_exit_code(self):
         rc, reply = self.call({"verb": "create", "name": "fresh"})
         self.assertEqual(self.run_job(reply["job"]), 0)

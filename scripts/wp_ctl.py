@@ -602,7 +602,8 @@ def registered(call):
 def h_create(call):
     """A new, empty site on hold (no WordPress in it yet: `install` does that). The name is checked here as `check-name` does, and again by the tool, which also allocates the ports and ids."""
     a = call.args
-    check_new_name(call.ctl.cfg, a["name"])
+    if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):         # a repeat of a request that already started a job is answered with that job (start_job), though the site exists by now
+        check_new_name(call.ctl.cfg, a["name"])
     return call.job([call.ctl.tool("wp-site-provision"), "create", a["name"]] + (["--set", "label=" + a["label"]] if "label" in a else []))
 
 

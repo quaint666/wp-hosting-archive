@@ -112,6 +112,8 @@ M = [
  ("any label accepted", W, r'LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")', 'LABEL_RE = re.compile(r".*")'),
  ("any email accepted", W, r'EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")', 'EMAIL_RE = re.compile(r".*")'),
  ("any administrator name accepted", W, r'ADMIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,30}$")', 'ADMIN_NAME_RE = re.compile(r".*")'),
+ ("a create repeat is refused once the site exists", W, 'if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):', 'if True:'),
+ ("a create with a known request id skips every check", W, 'if not (call.rec.get("req") and find_job(call.ctl, call.rec["req"])[0]):', 'if not call.rec.get("req"):'),
  ("install passes the title without its option name", W, '"--title=" + a["title"]', 'a["title"]'),
 ]
 only = sys.argv[1:]

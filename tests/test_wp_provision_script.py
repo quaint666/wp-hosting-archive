@@ -87,6 +87,21 @@ class Syntax(unittest.TestCase):
             self.assertIn(what, TEXT)
 
 
+class Wrapper(unittest.TestCase):
+    def test_the_check_that_the_wrapper_names_a_site_matches_the_real_rendered_wrapper(self):
+        """The wrapper keeps its site list as JSON inside a Python string, so a name is written name\\": \\"x. The check must find a closed site there and not find a stranger."""
+        import test_wp_site_provision_wrapper as w
+        v, text = w.render()
+        line = next(l for l in TEXT.splitlines() if "grep -c" in l and "wp-site-provision" in l and not l.lstrip().startswith("#"))
+        cmd = re.search(r'ssh dellwp "sudo -n (.*?)" </dev/null', line).group(1)
+        closed = next(s["name"] for s in v["real_wp_sites"] if s.get("state") == "closed")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "wp-site-provision").write_text(text)
+            for name, want in ((closed, True), ("nosuchsite", False)):
+                out = subprocess.run(["bash", "-c", cmd.replace("$PARITY", name).replace("$BIN", d)], capture_output=True, text=True).stdout.strip()
+                self.assertEqual(int(out) > 0, want, "%s: grep said %s" % (name, out))
+
+
 class Harness(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.TemporaryDirectory()
