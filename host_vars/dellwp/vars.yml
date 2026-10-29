@@ -100,7 +100,7 @@ wp_sites:
   - name: parity1
     port: 9110
     quota_id: 1010
-    state: stopped
+    state: closed
     update_policy: notify
 
 # The operator's tools on the VM (tasks/wp_tools_common.yml, templates/wp/): wp-site-cli, wp-site-install, wp-site-login-check and their shared library. The WP-CLI one-shot
