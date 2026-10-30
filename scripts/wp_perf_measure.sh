@@ -78,9 +78,11 @@ for n in "${names[@]}"; do
   if [ "$state" = stopped ]; then echo "stopped: skipped"; continue; fi
 
   if [ "$HTTP" = 1 ]; then
-    for path in / /wp-login.php /wp-json/; do
+    # wp-login.php gets two requests: the login limiter (10 a minute per address, burst 5) answers 429 after a few, and a 429 says nothing about speed.
+    for spec in "/:5" "/wp-login.php:2" "/wp-json/:5"; do
+      path=${spec%:*}; reps=${spec##*:}
       echo "speed $path (first = after whatever idle time there was, then warm)"
-      for i in 1 2 3 4 5; do req "$host" "$port" "$path"; done
+      for i in $(seq 1 "$reps"); do req "$host" "$port" "$path"; done
     done
     echo "headers for / (gzip asked for)";                 hdrs "$host" "$port" /
     echo "headers for a static file (jquery.min.js)";      hdrs "$host" "$port" /wp-includes/js/jquery/jquery.min.js
@@ -118,15 +120,19 @@ for n in "${names[@]}"; do
     awk '{ p=$7; sub(/\?.*/, "", p); c[p]++ } END { for (k in c) printf "%d %s\n", c[k], k }' "$log" </dev/null | sort -rn | head -10 | sed 's/^/    /'
     python3 - "$log" <<'PY'
 import re, sys
-rx = re.compile(r'"[A-Z]+ (\S+) [^"]*" (\d{3}) \d+ .*rt=([\d.]+) urt=(.*?) cache=(\S+)$')
+rx = re.compile(r'"(?P<method>[A-Z]+) (?P<uri>\S+) [^"]*" (?P<status>\d{3}) \d+ .*rt=(?P<rt>[\d.]+) urt=(?P<urt>.*?) cache=(?P<cache>\S+)$')
+keep = re.compile(r"(?:^|&)(wc-ajax|rest_route|action|s)=([^&]*)")
 static = re.compile(r"\.(js|css|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot|map)$", re.I)
-groups, slow, untimed = {}, [], 0
+groups, slow, php_time, untimed = {}, [], {}, 0
 for line in open(sys.argv[1], errors="replace"):
     m = rx.search(line)
     if not m:
         untimed += 1
         continue
-    path, status, ms, cache = m.group(1).split("?")[0], int(m.group(2)), float(m.group(3)) * 1000, m.group(5)
+    uri, cache = m.group("uri"), m.group("cache")
+    path, _, query = uri.partition("?")
+    status, ms = int(m.group("status")), float(m.group("rt")) * 1000
+    what = m.group("method") + " " + path + "".join(" ?%s=%s" % (k, v[:30]) for k, v in keep.findall(query))
     if static.search(path):
         klass = "static files (nginx)"
     elif cache == "HIT":
@@ -139,6 +145,8 @@ for line in open(sys.argv[1], errors="replace"):
         klass = "other, no cache in play"
     groups.setdefault(klass, []).append(ms)
     slow.append((ms, status, cache, path))
+    if cache in ("BYPASS", "-") and not static.search(path):
+        php_time.setdefault(what, []).append(ms)
 print("  request times, requests logged with the timed format (%d older lines have none):" % untimed)
 if not groups:
     print("    none yet")
@@ -147,6 +155,10 @@ else:
     for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         v.sort()
         print("    %-58s %6d %7.1f ms %6.1f ms %6.1f ms" % (k, len(v), v[len(v) // 2], v[int(0.95 * (len(v) - 1))], v[-1]))
+    print("  where the uncached php time goes (requests php built, by total time; a page the cache keeps costs php once per refresh, these cost it every time):")
+    print("    %-62s %6s %8s %9s" % ("request", "n", "each", "total"))
+    for what, v in sorted(php_time.items(), key=lambda kv: -sum(kv[1]))[:8]:
+        print("    %-62s %6d %5.0f ms %7.1f s" % (what[:62], len(v), sum(v) / len(v), sum(v) / 1000))
     print("  the five slowest:")
     for ms, status, cache, path in sorted(slow, reverse=True)[:5]:
         print("    %7.1f ms  %d  cache %-8s %s" % (ms, status, cache, path[:80]))

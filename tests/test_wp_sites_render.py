@@ -337,7 +337,7 @@ class PageCacheRules(unittest.TestCase):
                 line = line.replace(name, value)
             m = rx.search(line)
             self.assertTrue(m, line)
-            self.assertEqual((m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)), ("/shop/?x=1", "200", "0.391", urt, cache))
+            self.assertEqual((m.group("method"), m.group("uri"), m.group("status"), m.group("rt"), m.group("urt"), m.group("cache")), ("GET", "/shop/?x=1", "200", "0.391", urt, cache))
         self.assertIsNone(rx.search('1.2.3.4 - - [30/Oct/2026:13:00:00 +0000] "GET / HTTP/2.0" 200 5120 "-" "ua"'), "an older line has no timing and is counted as untimed")
 
     def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
