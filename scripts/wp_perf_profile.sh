@@ -1,12 +1,14 @@
 #!/bin/bash
 # Find out WHERE the time goes when WordPress builds a page, for ONE site on dellwp, before anything is tuned. It runs WordPress's own start-up (and the front page) a few times inside the site's php
 # container, in a command-line PHP, and varies one thing at a time:
-#   bash scripts/wp_perf_profile.sh <site> [--runs N] [--out FILE] [--host NAME]
+#   bash scripts/wp_perf_profile.sh <site> [--per-plugin] [--runs N] [--out FILE] [--host NAME]
 # Variants (each run N times, the first one reported apart because it is the cold one):
 #   boot            load WordPress and the active plugins, no page
 #   boot, cached    the same with PHP's compiled scripts kept in files (opcache's file cache), so the second run does no compiling
 #   boot, no plugins the same with the plugins directory pointed at nothing, so what the plugins add is the difference
 #   home            the front page's whole build (what the page cache keeps), and home, cached
+# --per-plugin adds one more variant per plugin directory: boot, cached, with that one plugin left out (the others are linked into a throwaway directory in the container's /tmp), so each plugin's
+# own cost is a number: time saved and files not loaded. It takes about a minute more per four plugins. A plugin that others depend on takes its dependents' work with it when left out.
 # From the numbers: the gap between "boot" and "boot, cached" is what compiling PHP costs a request with no opcache; the gap between "boot" and "boot, no plugins" is the plugins; "db ms" is time inside
 # MariaDB for that run (SAVEQUERIES), "files" how many PHP files the page loads, and the last section names which plugin or theme those files and bytes belong to, and the slowest queries (string
 # values masked). Facts first: PHP version, the opcache settings, the php container's CPU limit, the filesystem under the site.
@@ -16,10 +18,11 @@
 # milliseconds scripts/wp_perf_measure.sh gets from nginx; the gaps are what to read. Run it when the VM is quiet.
 set -euo pipefail
 
-HOST=dellwp; RUNS=6; OUT=""; SITE=""
+HOST=dellwp; RUNS=6; OUT=""; SITE=""; PERPLUGIN=0
 usage() { sed -n '2,3p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit "${1:-2}"; }
 while [ $# -gt 0 ]; do
   case $1 in
+    --per-plugin) PERPLUGIN=1 ;;
     --runs) RUNS=${2:?--runs needs a number}; shift ;;
     --out) OUT=${2:?--out needs a file}; shift ;;
     --host) HOST=${2:?--host needs a name}; shift ;;
@@ -44,7 +47,7 @@ read -r -d '' REMOTE <<'REMOTE_END' || true
 set -u
 export LC_ALL=C
 readonly SITES=/srv/wp/sites VHOSTS=/etc/nginx/conf.d
-n=$1; RUNS=$2
+n=$1; RUNS=$2; PERPLUGIN=$3
 php="wp_${n//-/_}_php"; OC=/tmp/wph_oc
 tmp=$(mktemp -d)
 cleanup() { docker exec "$php" rm -rf "$OC" >/dev/null 2>&1 </dev/null || true; rm -rf "$tmp"; }
@@ -75,6 +78,8 @@ define('DISABLE_WP_CRON', true);
 define('SAVEQUERIES', true);
 if (getenv('WPH_NOPLUGINS') === '1') {
     define('WP_PLUGIN_DIR', '/tmp/wph-no-plugins');
+} elseif (getenv('WPH_PLUGIN_DIR')) {
+    define('WP_PLUGIN_DIR', getenv('WPH_PLUGIN_DIR'));
 }
 ob_start();
 register_shutdown_function(function () use ($t0) {
@@ -118,6 +123,16 @@ register_shutdown_function(function () use ($t0) {
         usort($q, function ($a, $b) {
             return $b[1] <=> $a[1];
         });
+        $w = [];
+        foreach ($q as $row) {
+            if (preg_match('/^\s*(UPDATE|INSERT|DELETE|REPLACE)/i', $row[0]) && preg_match("/option_name`?\s*=\s*'([^']+)'|VALUES\s*\('([^']+)'/i", $row[0], $mm)) {
+                $parts = explode(', ', (string) $row[2]);
+                $key = (isset($mm[2]) && $mm[2] !== '' ? $mm[2] : $mm[1]) . '  <-  ' . end($parts);
+                $w[$key] = ($w[$key] ?? 0) + 1;
+            }
+        }
+        arsort($w);
+        $out['writes'] = array_slice($w, 0, 12, true);
         $out['slowest'] = [];
         foreach (array_slice($q, 0, 6) as $row) {
             $parts = explode(', ', (string) $row[2]);
@@ -138,13 +153,13 @@ docker exec "$php" mkdir -p "$OC" </dev/null 2>&1 || true
 
 # variant: label, mode (boot|home), no plugins (0|1), compiled scripts cached in files (0|1)
 variant() {
-  local label=$1 mode=$2 nop=$3 cached=$4 flags="-d opcache.enable_cli=0" f="$tmp/$(echo "$1" | tr -c 'a-z0-9' _)" i
+  local label=$1 mode=$2 nop=$3 cached=$4 pdir=${5:-} flags="-d opcache.enable_cli=0" f="$tmp/$(echo "$1" | tr -c 'a-z0-9' _)" i
   [ "$cached" = 1 ] && flags="-d opcache.enable_cli=1 -d opcache.file_cache=$OC -d opcache.file_cache_only=1"
   [ "$cached" = 1 ] && docker exec "$php" sh -c "rm -rf $OC/* 2>/dev/null; true" </dev/null >/dev/null 2>&1
   : > "$f"; : > "$f.err"
   for i in $(seq 1 "$RUNS"); do
     # shellcheck disable=SC2086
-    printf '%s' "$HARNESS" | docker exec -i -e WPH_HOST="$host" -e WPH_MODE="$mode" -e WPH_NOPLUGINS="$nop" "$php" php $flags 2>>"$f.err" | tail -n1 >> "$f" || true
+    printf '%s' "$HARNESS" | docker exec -i -e WPH_HOST="$host" -e WPH_MODE="$mode" -e WPH_NOPLUGINS="$nop" -e WPH_PLUGIN_DIR="$pdir" "$php" php $flags 2>>"$f.err" | tail -n1 >> "$f" || true
   done
   printf '%s\t%s\t%s\n' "$label" "$f" "$(head -c 300 "$f.err" | tr '\n' ' ')" >> "$tmp/index"
 }
@@ -156,6 +171,13 @@ variant "boot, no plugins" boot 1 0
 variant "boot, no plugins, cached" boot 1 1
 variant "home" home 0 0
 variant "home, cached" home 0 1
+
+if [ "$PERPLUGIN" = 1 ]; then
+  for p in $(docker exec "$php" ls -1 /var/www/html/wp-content/plugins </dev/null 2>/dev/null | grep -E '^[A-Za-z0-9._-]+$' | grep -v '^index\.php$'); do
+    docker exec "$php" sh -c 'd=/tmp/wph-minus-$1; rm -rf "$d"; mkdir -p "$d"; for x in /var/www/html/wp-content/plugins/*; do [ "$(basename "$x")" = "$1" ] || ln -s "$x" "$d/$(basename "$x")"; done' sh "$p" </dev/null >/dev/null 2>&1
+    variant "without $p" boot 0 1 "/tmp/wph-minus-$p"
+  done
+fi
 
 hr "results (ms; cold = the first run, warm = the median of the rest)"
 python3 - "$tmp/index" <<'PY'
@@ -182,6 +204,20 @@ w = {label: statistics.median(r["ms"] for r in (runs[1:] or runs)) for label, ru
 def gap(a, b, what):
     if a in w and b in w:
         print("  %-52s %6.0f ms" % (what, w[a] - w[b]))
+base = next((runs for label, runs, _ in rows if label == "boot, cached" and runs), None)
+if base:
+    brow = [r for r in base[1:] or base]
+    bms, bfiles = statistics.median(r["ms"] for r in brow), statistics.median(r["files"] for r in brow)
+    each = []
+    for label, runs, _ in rows:
+        if label.startswith("without ") and runs:
+            warm = runs[1:] or runs
+            each.append((bms - statistics.median(r["ms"] for r in warm), bfiles - statistics.median(r["files"] for r in warm), label[8:]))
+    if each:
+        print("")
+        print("  what each plugin costs (boot, cached = %.0f ms, %d files; the time and files saved when that one is left out; noise is a few percent):" % (bms, bfiles))
+        for saved, files, name in sorted(each, reverse=True):
+            print("    %-44s %6.0f ms  %5d files" % (name, saved, files))
 print("")
 gap("boot", "boot, cached", "compiling PHP (boot, opcache off minus cached)")
 gap("boot", "boot, no plugins", "the active plugins (boot minus boot without them)")
@@ -201,6 +237,11 @@ print("  total %.0f ms, db %.0f ms in %d queries, %d files, peak %.1f MB" % (d["
 print("  files and code size by owner (largest first):")
 for k, (c, b) in d.get("groups", {}).items():
     print("    %-34s %5d files %8.0f KB" % (k, c, b / 1024))
+print("  options written during one boot, and who writes them (every page that is not cached does this):")
+for k, c in d.get("writes", {}).items():
+    print("    %3dx  %s" % (c, k[:100]))
+if not d.get("writes"):
+    print("    none")
 print("  slowest queries (ms, where from, the statement with its strings masked):")
 for ms, who, sql in d.get("slowest", []):
     print("    %7.2f  %-34s %s" % (ms, who[:34], sql))
@@ -209,5 +250,5 @@ hr "done"
 REMOTE_END
 
 echo "writing to $OUT" >&2
-printf '%s\n' "$REMOTE" | ssh -o BatchMode=yes "$HOST" "sudo bash -s -- $SITE $RUNS" 2>&1 | tee -a "$OUT"
+printf '%s\n' "$REMOTE" | ssh -o BatchMode=yes "$HOST" "sudo bash -s -- $SITE $RUNS $PERPLUGIN" 2>&1 | tee -a "$OUT"
 echo "saved: $OUT" >&2
