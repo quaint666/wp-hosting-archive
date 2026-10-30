@@ -306,6 +306,14 @@ class PageCacheRules(unittest.TestCase):
         self.assertIn("MU=%s" % self.v["wp_mu_dir"], check)
         self.assertIn("SECRETS=%s" % self.v["wp_provision_secret_dir"], check)
 
+    def test_the_checklists_vhost_patterns_match_the_vhost_the_template_renders(self):
+        import re
+        check = (ROOT / "scripts/wp_checklist_dellwp.sh").read_text()
+        conf = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")), undefined=jinja2.StrictUndefined).get_template("wp/site_nginx.conf.j2").render(
+            **{**self.v, "wp_s": {**self.v["wp_site_defaults"], "name": "alpha", "port": 9101, "state": "live"}, "wp_host": "alpha.x.test", "wp_site_dir": "/srv/wp/sites/alpha"})
+        for pattern in re.findall(r"""count "\$conf" '([^']+)'""", check):
+            self.assertTrue(re.search(pattern, conf) or "deny all" in pattern, "the checklist greps for %r, which the vhost does not contain" % pattern)
+
     def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
         import re
         content = self.base.split("content: |\n", 1)[1].split("register: wp_nginx_base", 1)[0]

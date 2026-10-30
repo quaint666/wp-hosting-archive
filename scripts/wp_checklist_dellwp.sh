@@ -88,7 +88,7 @@ manual "create the site" "Panel > New site > name: $NAME > Create the site. Wait
 J=$(show)
 expect "registry state is hold" "$(jget "$J" registry.state)" hold
 expect "the vhost exists" "$(remote "test -f $conf && echo yes")" yes
-expect "the vhost serves /wp-mu/" "$(count "$conf" 'location /wp-mu/')" 1
+expect "the vhost serves /wp-mu/" "$(count "$conf" 'location .~ /wp-mu/ {')" 1
 expect "the vhost blocks ?author=N (the default)" "$(count "$conf" 'author=\[0-9\]')" 1
 expect "both containers are up" "$(jget "$J" status.containers)" 2/2
 
