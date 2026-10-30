@@ -28,6 +28,15 @@
 
 - name: Deploy and validate the nginx base for the WordPress sites
   block:
+    # nginx makes the cache directory itself (and gives it to its worker user) but only one level deep: with no /var/cache/nginx, `nginx -t` fails on mkdir (seen on dellwp 2026-10-30).
+    - name: Make the parent of the page cache directory
+      ansible.builtin.file:
+        path: "{{ wp_page_cache_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
     - name: Deploy the nginx base (settings and catch-all)
       ansible.builtin.copy:
         dest: /etc/nginx/conf.d/wp_base.conf

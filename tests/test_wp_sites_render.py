@@ -291,7 +291,10 @@ class PageCacheRules(unittest.TestCase):
         self.assertIn(str(self.v["wp_page_cache_keys_mb"]) + "m", zone)
         self.assertIn("keys_zone={{ wp_page_cache_zone }}:{{ wp_page_cache_keys_mb }}m", self.base)
         self.assertIn("fastcgi_cache_path {{ wp_page_cache_path }} ", self.base)
-        self.assertEqual(self.v["wp_page_cache_path"].rsplit("/", 1)[0], "/var/cache/nginx", "nginx creates the last directory only; its parent is the package's")
+        self.assertEqual(self.v["wp_page_cache_path"].rsplit("/", 1)[0], "/var/cache/nginx")
+        # nginx creates only the last directory, and /var/cache/nginx is not there on dellwp (nginx -t failed on mkdir, 2026-10-30): the play makes the parent, before the file that names the path
+        self.assertIn('path: "{{ wp_page_cache_path | dirname }}"', self.base)
+        self.assertLess(self.base.index("Make the parent of the page cache directory"), self.base.index("dest: /etc/nginx/conf.d/wp_base.conf"))
         self.assertIn("wp_page_cache_zone", self.v["wp_provision_platform_vars"]); self.assertIn("wp_page_cache_s", self.v["wp_provision_platform_vars"])
 
     def test_the_checklist_and_measurement_scripts_use_the_repos_paths(self):
