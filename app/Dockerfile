@@ -1,7 +1,7 @@
 # The control app's image (step 5). Build context is this directory (app/). It is built on the control VM by the play, and by scripts/wp_panel_image_rehearsal.sh to prove the recipe on a host
 # with Docker. The container runs as uid 10001 on a read-only root file system with its secrets mounted read-only (the play delivers them, owned by 10001); nothing is baked in but code.
 # renovate: depName=python
-FROM python:3.14.9-slim-trixie
+FROM python:3.15.2-slim-trixie
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONPATH=/app
 
