@@ -1,5 +1,5 @@
 ---
-# The WordPress control app on its VM: nginx with TLS in front of one container (Flask under gunicorn) that reaches dellwp's wp-ctl dispatcher over ssh. Design: docs/handoff_wp_control_temp.md; the app is app/,
+# The WordPress control app on its VM: nginx with TLS in front of one container (Flask under gunicorn) that reaches dellwp's wp-ctl dispatcher over ssh. Design: docs/wordpress_hosting_explained.md section 11; the app is app/,
 # its image recipe app/Dockerfile (proved on a host with Docker by scripts/wp_panel_image_rehearsal.sh), the values host_vars/aopenpanel/vars.yml, the secrets host_vars/aopenpanel/vault.yml (scripts/wp_panel_credentials.py).
 # Run order: the VM and its base plays, the network rules, the name, hp705g4/cert_orchestration_key_setup_hp705g4.yml, aopenvms/deploy_le_cert_aopenpanel.yml, then this play, then the ssh key's public half in
 # wp_ctl_panel_keys on dellwp (dellwp/wp_sites_dellwp.yml --tags wp_ctl). This play stops early, naming the missing piece, if a secret or the certificate is not there.

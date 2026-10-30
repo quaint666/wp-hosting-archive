@@ -2,7 +2,7 @@
 # tasks/wp_ctl_common.yml
 # The access side of the control dispatcher: the account the control app's ssh key logs in as, its one sudoers entry, the forced-command key list, and the audit file and state directory. The program
 # itself (wp-ctl, scripts/wp_ctl.py through templates/wp/wp_ctl.py.j2) is installed with the other tools by tasks/wp_tools_common.yml (tag wp_tools). No hosts:/become: and no handlers; imported via
-# import_tasks into dellwp/wp_sites_dellwp.yml. Design: docs/handoff_wp_control_temp.md. Check mode cannot show: whether sshd takes the forced command and the empty key list, whether sudo allows the
+# import_tasks into dellwp/wp_sites_dellwp.yml. Design: docs/wordpress_hosting_explained.md section 11. Check mode cannot show: whether sshd takes the forced command and the empty key list, whether sudo allows the
 # entry, or whether the filesystem accepts the append-only attribute; scripts/wp_ctl_rehearsal_dellwp.sh proves those on the VM.
 #
 # The account has no password ('*' in /etc/shadow, which still lets a key in) and a shell only because sshd runs a forced command through it. Its home, .ssh and authorized_keys belong to root, so the
