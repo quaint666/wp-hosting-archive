@@ -315,6 +315,7 @@ M = [
  ('the control node cannot reach the page at the host', 'host_vars/aopen/vars.yml', 'ports: [22, 443, "{{ ports.pbs }}"]', 'ports: [22, "{{ ports.pbs }}"]', 'tests/test_wp_panel_network.py'),
  ("the HP may reach 443 on the AOpen's VMs", 'host_vars/aopen/vars.yml', 'ports: [22, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'ports: [22, 443, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'tests/test_wp_panel_network.py'),
  ('the whole overlay may open the page', 'host_vars/aopenpanel/vars.yml', 'src: "{{ wg_control_node_overlay_ip }}", ports: [443]', 'src: "{{ overlay_cidr }}", ports: [443]', 'tests/test_wp_panel_network.py'),
+ ('the phone may reach more than the page on the AOpen VMs', 'host_vars/aopen/vars.yml', '{ src: "{{ wg_phone_overlay_ip }}", proto: tcp, ports: [443]', '{ src: "{{ wg_phone_overlay_ip }}", proto: tcp, ports: [22, 443]', 'tests/test_wp_panel_network.py'),
  ("the page's name is another service's", 'group_vars/all/services.yml', 'lab_domain: "wp-panel.lab.example.com"', 'lab_domain: "grafana.lab.example.com"', 'tests/test_wp_panel_network.py'),
  ('the renewal hook skips the panel', 'hp705g4/certbot_timer_setup_hp705g4.yml', '      - "{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"\n', '', 'tests/test_wp_panel_network.py'),
  ('the private key is world readable', 'aopenvms/deploy_le_cert_aopenpanel.yml', 'mode: "0640"', 'mode: "0644"', 'tests/test_wp_panel_network.py'),
