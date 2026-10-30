@@ -89,6 +89,15 @@ class Parity(unittest.TestCase):
         self.assertNotEqual(files("secret rev")[".env"], base[".env"])
         self.assertEqual(files("info only"), base, "label and note are registry-only: no file changes")
 
+    def test_the_vhost_serves_the_must_use_directory_and_gates_the_author_rule_on_the_setting(self):
+        def vhost(label):
+            return next(f["content"] for f in self.renderer.files({**self.v["wp_site_defaults"], **SHAPES[label]}) if f["path"].endswith("wp_site_alpha.conf"))
+        for label in ("defaults", "live", "switches"):
+            self.assertIn("location /wp-mu/ {\n        alias %s/;" % self.v["wp_mu_dir"], vhost(label), label)
+        self.assertIn('author=[0-9]', vhost("live"))
+        self.assertNotIn('author=[0-9]', vhost("switches"), "allow_user_enum true must open ?author=N")
+        self.assertNotIn("/wp-mu/", vhost("stopped"), "a stopped site serves nothing")
+
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}
         first = self.renderer.files(site)
@@ -123,6 +132,7 @@ class Platform(unittest.TestCase):
         with self.assertRaises(r.RenderError) as cm:
             r.Renderer(TEMPLATES, platform(), MASTER).files(site)
         self.assertIn("dellwp_wp_resend_key", str(cm.exception))
+        self.assertIn("wp_provider_key.sh resend", str(cm.exception), "the refusal says what to run")
         r.Renderer(TEMPLATES, platform(), MASTER).files({**v["wp_site_defaults"], **SHAPES["defaults"]})      # hold and log: no key needed
 
     def test_a_site_missing_a_field_a_template_reads_fails_by_name(self):

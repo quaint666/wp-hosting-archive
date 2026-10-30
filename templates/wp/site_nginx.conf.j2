@@ -47,9 +47,11 @@ server {
     if ($wp_maintenance) {
         return 503;
     }
+{% if not wp_s.allow_user_enum %}
     if ($args ~* "(^|&)author=[0-9]") {
         return 403;
     }
+{% endif %}
 
     # PHP never runs from places a visitor or an upload can write to.
     location ~* ^/wp-content/(uploads|upgrade)/.*\.(php|phar|phtml|php[0-9])$ {
@@ -75,6 +77,12 @@ server {
         return 403;
     }
 {% endif %}
+
+    # The hosting service's must-use plugins load scripts and styles from WPMU_PLUGIN_URL (/wp-mu); the directory is on this host, root-owned. A plain prefix on purpose: the \.php$ location below
+    # still wins for a .php name and finds nothing under the site root, so plugin PHP is never served as text.
+    location /wp-mu/ {
+        alias {{ wp_mu_dir }}/;
+    }
 
     location / {
         try_files $uri $uri/ /index.php?$args;
