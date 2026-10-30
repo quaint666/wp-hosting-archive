@@ -193,7 +193,7 @@ wp_approvals_max_per_minute: 20
 wp_approvals_read_timeout_s: 120
 wp_approvals_resolve_timeout_s: 7200
 wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
-# The control dispatcher (scripts/wp_ctl.py, templates/wp/wp_ctl.py.j2, tasks/wp_ctl_common.yml; design in docs/handoff_wp_control_temp.md): the one program the control app's ssh key may run, and the
+# The control dispatcher (scripts/wp_ctl.py, templates/wp/wp_ctl.py.j2, tasks/wp_ctl_common.yml; design in docs/wordpress_hosting_explained.md section 11): the one program the control app's ssh key may run, and the
 # operator's own `sudo wp-ctl`. wp_ctl_user is the account that key logs in as (its only sudoers entry is wp-ctl). wp_ctl_panel_keys are the public keys allowed to log in as it, each forced to wp-ctl;
 # the list is empty until the control app's key exists, and an empty list means nobody can log in as that account. wp_ctl_panel_from is the one address those keys may log in from: the control app's VM. wp_ctl_state_dir holds the jobs (one directory each: its request, its log, its exit code) and
 # the per-site locks, and a job directory is removed after wp_ctl_job_keep_days days. wp_ctl_run_dir (a tmpfs) holds the files a tool reads its typed answers from, so a password is never written to

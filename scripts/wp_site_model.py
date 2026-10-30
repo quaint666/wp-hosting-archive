@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The rules and the registry of the WordPress sites on dellwp: what a site may be called, which fields may be set and to what, where a site's record lives, which port and quota id a new site gets,
 and whether the whole list of sites still fits the VM. Standard library only: the provisioning tool (wp-site-provision, a later batch) runs it on dellwp and tests/test_wp_site_model.py runs it offline.
-Design: docs/handoff_wp_control_temp.md (sections 3, 4 and 6.1).
+Design: docs/wordpress_hosting_explained.md section 11.
 
 A site's record is {data_dir}/<name>/site.json (JSON, written atomically, only by the provisioning tool). A closed site leaves a tombstone, {tombstones_dir}/<name>.<UTC stamp>.json (a file from before
 the stamps, <name>.json, still counts), outside the site's directory so that deleting the directory never touches it. A NAME may be given again once its site is closed, and may then have several

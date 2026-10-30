@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """wp-ctl, the control dispatcher of dellwp: the one program the control app's ssh key may run, and the operator's own   ssh dellwp sudo wp-ctl <verb> [key=value ...]
 
-The logic is here (tests/test_wp_ctl.py runs it); templates/wp/wp_ctl.py.j2 only carries the repo's values and is installed as /usr/local/sbin/wp-ctl. Design: docs/handoff_wp_control_temp.md.
+The logic is here (tests/test_wp_ctl.py runs it); templates/wp/wp_ctl.py.j2 only carries the repo's values and is installed as /usr/local/sbin/wp-ctl. Design: docs/wordpress_hosting_explained.md section 11.
 
 A request is ONE JSON line on standard input, {"verb": "...", "req": "optional id", <the verb's arguments>}, and the reply is ONE JSON line on standard output. A verb that carries bytes
 reads them raw after that line: `password` one line (the new password), `import-receive` the whole archive. The first line is read a byte at a time so nothing after it is consumed

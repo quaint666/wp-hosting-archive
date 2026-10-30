@@ -12,7 +12,7 @@
 The steps of the Ansible tasks this replaced (tasks/wp_site_one_common.yml, gone; git has it), in their order, as argument lists (no shell): directory, quota project, backup directory and project, database directory, the core seeded from
 the image once, the configuration files, the images, the systemd unit, start / restart / php reload as the play decides, the nginx vhost (validated; the previous one is put back on a failure), the
 probe through nginx and php, and the three timers. The rules and the record are scripts/wp_site_model.py, the files come from scripts/wp_site_renderer.py. The record holds only what differs from
-wp_site_defaults (only what differs is kept), plus the name, the port, the quota id, the state and when it was made. Design: docs/handoff_wp_control_temp.md.
+wp_site_defaults (only what differs is kept), plus the name, the port, the quota id, the state and when it was made. Design: docs/wordpress_hosting_explained.md section 11.
 
 templates/wp/wp_site_provision.py.j2 carries the repo's values and installs this as /usr/local/sbin/wp-site-provision (root only). Exit status: 0 done, 1 it ran and failed, 2 refused (nothing was
 changed). Nothing it prints is a secret. Tests: tests/test_wp_site_provision.py runs it against stand-ins for docker, nginx, systemctl and the quota tools."""
