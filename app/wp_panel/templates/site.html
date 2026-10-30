@@ -80,21 +80,34 @@
 </div>
 </section>
 
-<div class="grid">
-<section class="card">
-<h2>What dellwp reports</h2>
-{% if status %}
-<table class="kv">{% for k, v in status.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(300) }}</td></tr>{% endfor %}</table>
-{% else %}<p>Nothing reported for this site.</p>{% endif %}
-</section>
-<section class="card">
-<h2>Its registry record</h2>
+{# What dellwp reports and what the registry holds, as small groups side by side. A key no group names lands in "Other": nothing the tools report is hidden, only `site` and `name` (the page head says them). #}
+{% set shown_groups = [
+  ('State', status, ['deployed', 'actual', 'unit', 'containers', 'frozen']),
+  ('Backup', status, ['backup_timer', 'backup_stamp', 'backup_age_h', 'backup_quota_pct']),
+  ('Site', status, ['core', 'plugins', 'cron_timer', 'quota_pct']),
+  ('Registry record', registry, ['state', 'created', 'update_policy', 'mail_mode', 'port', 'quota_id', 'schema']),
+] %}
+{% set units = {'backup_age_h': ' h ago', 'quota_pct': ' % used', 'backup_quota_pct': ' % used'} %}
+{% macro kvgroup(title, source, keys) %}
+{% set present = keys | select('in', source) | list %}
+{% if present %}
+<div class="kvg"><h3>{{ title }}</h3>
+<dl>{% for k in present %}<dt>{{ k | clip(40) }}</dt><dd>{{ source[k] | clip(500) }}{{ units.get(k, '') }}</dd>{% endfor %}</dl></div>
+{% endif %}
+{% endmacro %}
+<section class="card details">
+<h2>Details</h2>
 {% if registry_error %}<p class="error" role="alert">{{ registry_error | clip(300) }}</p>{% endif %}
-{% if registry %}
-<table class="kv">{% for k, v in registry.items() | sort %}<tr><th>{{ k | clip(40) }}</th><td>{{ v | clip(500) }}</td></tr>{% endfor %}</table>
-{% elif not registry_error %}<p>No record.</p>{% endif %}
-</section>
+{% if status or registry %}
+<div class="kvgrid">
+{% for title, source, keys in shown_groups %}{{ kvgroup(title, source or {}, keys) }}{% endfor %}
+{% set named = ['site', 'name'] + (shown_groups | map(attribute=2) | sum(start=[])) %}
+{{ kvgroup('Other reported', status or {}, (status or {}).keys() | reject('in', named) | sort | list) }}
+{{ kvgroup('Other in the record', registry or {}, (registry or {}).keys() | reject('in', named) | sort | list) }}
 </div>
+{% if not status %}<p class="small">Nothing reported for this site.</p>{% endif %}
+{% else %}<p>Nothing reported for this site, and no record.</p>{% endif %}
+</section>
 
 <section class="card danger">
 <h2>Delete</h2>

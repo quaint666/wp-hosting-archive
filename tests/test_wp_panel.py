@@ -437,6 +437,16 @@ class Pages(Base):
             self.assertIn(needle, html)
         self.assertEqual(self.ctl.calls[-1], ("show", {"site": "alpha"}))
 
+    def test_the_site_page_groups_the_details_and_leaves_nothing_out(self):
+        self.ctl.replies["show"]["status"] = {"site": "alpha", "deployed": "live", "actual": "live", "backup_age_h": "15", "quota_pct": "9", "brand_new_key": "kept"}
+        self.ctl.replies["show"]["registry"] = {"name": "alpha", "state": "live", "port": 9101, "extra_record_key": "kept too"}
+        html = self.text("/sites/alpha")
+        for needle in ("<h3>State</h3>", "<h3>Backup</h3>", "<h3>Registry record</h3>", "<h3>Other reported</h3>", "<h3>Other in the record</h3>",
+                       "<dt>brand_new_key</dt><dd>kept</dd>", "<dt>extra_record_key</dt><dd>kept too</dd>", "<dd>15 h ago</dd>", "<dd>9 % used</dd>"):
+            self.assertIn(needle, html)
+        for hidden in ("<dt>site</dt>", "<dt>name</dt>"):
+            self.assertNotIn(hidden, html, "the page head already says the name")
+
     def test_a_record_dellwp_could_not_read_is_said_so(self):
         self.ctl.replies["show"] = {"ok": True, "site": "alpha", "status": None, "registry": None, "registry_error": "the registry record of alpha cannot be read; nothing was guessed"}
         html = self.text("/sites/alpha")
