@@ -46,7 +46,7 @@ wp_php_realpath_ttl_s: 120
 # 0 off, 1 on: every request that reaches PHP writes one "wph-timing {json}" line to the container's log (templates/wp/mu/40-wp-hosting-timing.php): when each stage of start-up was reached,
 # each plugin's include time, queries, memory and opcache's own gauges (is its file limit too low? it says). 2 also times every callback hooked to those stages and charges it to the plugin it was
 # written in; that wraps callbacks and costs a few percent. scripts/wp_perf_measure.sh summarises the lines. Set it back to 0 when done: it is a diagnostic, and the lines fill the log.
-wp_php_timing: 0
+wp_php_timing: 2
 # 1 keeps PHP's open_basedir (the site's directory, the must-use directory and /tmp); 0 takes it off. Measured on dellwp 2026-10-30: with it off a cached CLI boot took 247 ms instead of 581 ms
 # (scripts/wp_perf_profile.sh --ini). WHY it costs that is not established here: a package description says PHP skips its path cache while open_basedir is set, but no php-src page was found that
 # says so. What it protects: a hacked plugin reading files outside the site. Each site's container already sees only its own html, the must-use directory and a RAM-disk /tmp, so the container
