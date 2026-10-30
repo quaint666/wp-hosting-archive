@@ -28,6 +28,15 @@ server {
     add_header Referrer-Policy strict-origin-when-cross-origin always;
 
     limit_req zone=wp_login_attempts burst=5 nodelay;
+
+    # Text assets are compressed (nginx compresses text/html on its own). Set here, not in the base: the distribution's nginx.conf already sets gzip in http{}, and the same directive twice in one
+    # block fails nginx -t, while a server block may override it.
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_types text/css text/plain text/xml text/javascript application/javascript application/json application/xml application/rss+xml application/atom+xml image/svg+xml font/ttf font/otf application/vnd.ms-fontobject;
 {% if wp_s.state == 'hold' %}
 
     # On hold: only a local curl gets in (a visitor's address is replaced by CF-Connecting-IP, a local request keeps 127.0.0.1).
@@ -80,8 +89,23 @@ server {
 
     # The hosting service's must-use plugins load scripts and styles from WPMU_PLUGIN_URL (/wp-mu); the directory is on this host, root-owned. A plain prefix on purpose: the \.php$ location below
     # still wins for a .php name and finds nothing under the site root, so plugin PHP is never served as text.
-    location /wp-mu/ {
+    location ^~ /wp-mu/ {
         alias {{ wp_mu_dir }}/;
+        expires 7d;
+        location ~ \.php$ {
+            return 403;
+        }
+    }
+
+    # Static files: nginx answers and PHP never starts. A file that is not there is a plain 404 instead of a WordPress boot (about 0.4 s each); one that is there carries a month's cache lifetime
+    # (WordPress puts ?ver= on its own files, so a new version is a new address). .ico is left out on purpose: WordPress answers /favicon.ico itself when the site has no icon file.
+    # The headers are repeated because a location with its own add_header drops the server's. A plugin that makes an image or style sheet up on request (no file behind it) would 404 here.
+    location ~* \.(?:css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot)$ {
+        try_files $uri =404;
+        expires 30d;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
     }
 
     location / {
@@ -91,6 +115,23 @@ server {
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;
+{% if wp_page_cache_s | int > 0 %}
+        # Anonymous pages are kept {{ wp_page_cache_s | int }} s (the zone and the skip rules: tasks/wp_nginx_base_common.yml). A stale page is served while PHP refreshes it or if PHP errors; only one request
+        # per page goes to PHP at a time. A response that sets a cookie or says no-cache (WooCommerce's cart and checkout do) is never stored: nginx obeys the headers WordPress sends.
+        fastcgi_cache {{ wp_page_cache_zone }};
+        fastcgi_cache_key "$wp_https$request_method$host$request_uri";
+        fastcgi_cache_valid 200 301 302 {{ wp_page_cache_s | int }}s;
+        fastcgi_cache_valid 404 1m;
+        fastcgi_cache_bypass $wp_skip_cache;
+        fastcgi_no_cache $wp_skip_cache;
+        fastcgi_cache_lock on;
+        fastcgi_cache_use_stale error timeout updating http_500 http_503;
+        fastcgi_cache_background_update on;
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+{% endif %}
         # The php container sees the site at /var/www/html, not at {{ wp_site_dir }}/html.
         fastcgi_param SCRIPT_FILENAME /var/www/html$fastcgi_script_name;
         fastcgi_param DOCUMENT_ROOT /var/www/html;

@@ -93,10 +93,39 @@ class Parity(unittest.TestCase):
         def vhost(label):
             return next(f["content"] for f in self.renderer.files({**self.v["wp_site_defaults"], **SHAPES[label]}) if f["path"].endswith("wp_site_alpha.conf"))
         for label in ("defaults", "live", "switches"):
-            self.assertIn("location /wp-mu/ {\n        alias %s/;" % self.v["wp_mu_dir"], vhost(label), label)
+            self.assertIn("location ^~ /wp-mu/ {\n        alias %s/;" % self.v["wp_mu_dir"], vhost(label), label)
+            self.assertRegex(vhost(label), r"location \^~ /wp-mu/ \{[^}]*\n        location ~ \\\.php\$ \{\n            return 403;", label)       # plugin PHP is never served as text
         self.assertIn('author=[0-9]', vhost("live"))
         self.assertNotIn('author=[0-9]', vhost("switches"), "allow_user_enum true must open ?author=N")
         self.assertNotIn("/wp-mu/", vhost("stopped"), "a stopped site serves nothing")
+
+    def test_static_files_compression_and_the_page_cache_in_the_vhost(self):
+        def vhost(label, **extra):
+            site = {**self.v["wp_site_defaults"], **SHAPES[label]}
+            r_ = r.Renderer(TEMPLATES, {**platform(), **extra}, MASTER, RESEND)
+            return next(f["content"] for f in r_.files(site) if f["path"].endswith("wp_site_alpha.conf"))
+        live = vhost("live")
+        # static files never reach PHP: a missing one is a 404, a found one has a long lifetime, and .ico (WordPress's own /favicon.ico) is not in the list
+        self.assertRegex(live, r"location ~\* \\\.\(\?:css\|js[^)]*\)\$ \{\n        try_files \$uri =404;\n        expires 30d;")
+        self.assertNotIn("ico|", live.split("location ~* \\.(?:css")[1].split("{")[0])
+        # the static location comes after the deny rules (an upload named x.php.js must not slip past them) and before the catch-all
+        self.assertLess(live.index("wp-content/(uploads|upgrade)"), live.index("location ~* \\.(?:css"))
+        self.assertLess(live.index("location ~* \\.(?:css"), live.index("location / {"))
+        for needle in ("gzip on;", "gzip_vary on;", "gzip_proxied any;", "application/javascript", "image/svg+xml"):
+            self.assertIn(needle, live)
+        self.assertNotIn("text/html", live.split("gzip_types")[1].split(";")[0], "text/html is always compressed; listing it only warns")
+        # the cache: in the PHP location only, named by the platform's zone, skipping on the base's map, and the headers the location's own add_header would drop are repeated
+        before, _, php = live.rpartition("location ~ \\.php$ {")        # the last one: /wp-mu/ has a nested one that refuses PHP
+        zone = self.v["wp_page_cache_zone"]
+        for needle in ("fastcgi_cache %s;" % zone, "fastcgi_cache_bypass $wp_skip_cache;", "fastcgi_no_cache $wp_skip_cache;", "fastcgi_cache_lock on;", "X-Cache-Status $upstream_cache_status",
+                       "X-Content-Type-Options nosniff", "fastcgi_cache_valid 200 301 302 %ds;" % int(self.v["wp_page_cache_s"])):
+            self.assertIn(needle, php)
+        self.assertNotIn("fastcgi_cache", before, "only the PHP location caches")
+        # off means off, and the PHP location then has no add_header of its own (the server's headers are inherited)
+        off = vhost("live", wp_page_cache_s=0)
+        self.assertNotIn("fastcgi_cache", off)
+        self.assertNotIn("add_header", off.rpartition("location ~ \\.php$ {")[2])
+        self.assertNotIn("fastcgi_cache", vhost("stopped"), "a stopped site serves a 503 and nothing else")
 
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}

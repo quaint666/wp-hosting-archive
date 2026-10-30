@@ -235,6 +235,81 @@ class Render(unittest.TestCase):
         self.assertIn("zone=%s:" % zone, base)
 
 
+class PageCacheRules(unittest.TestCase):
+    """The base's bypass maps, evaluated here the way nginx evaluates them (a regex entry matches in order, no match gives the default; PCRE and Python's re agree on every pattern used)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = (ROOT / "tasks/wp_nginx_base_common.yml").read_text()
+        cls.v = base_vars()
+
+    def entries(self, source, target):
+        import re
+        block = re.search(r"map %s %s \{\n(.*?)\n\s*\}" % (re.escape(source), re.escape(target)), self.base, re.S).group(1)
+        default, rules = None, []
+        for line in block.splitlines():
+            m = re.match(r'\s*default (\S+);', line)
+            if m:
+                default = m.group(1); continue
+            m = re.match(r'\s*"~\*?(.*)" (\S+);', line)
+            if m:
+                rules.append((re.compile(m.group(1), re.I), m.group(2)))
+        return default, rules
+
+    def mapped(self, source, target, value):
+        default, rules = self.entries(source, target)
+        return next((out for rx, out in rules if rx.search(value)), default)
+
+    def skip(self, uri, cookie="", auth="", probe="0"):
+        c = self.mapped("$http_cookie", "$wp_cache_cookie", cookie)
+        u = self.mapped("$request_uri", "$wp_cache_uri", uri)
+        key = "%s%s%s%s" % (c, u, auth, probe)
+        return "0" if key == "000" else "1"                                             # the third map: default 1, only "000" is 0
+
+    def test_the_third_map_is_what_this_evaluator_assumes(self):
+        self.assertIn('map "$wp_cache_cookie$wp_cache_uri$http_authorization$wp_probe" $wp_skip_cache {\n              default 1;\n              "000" 0;\n          }', self.base)
+
+    def test_anonymous_pages_are_cached(self):
+        for uri in ("/", "/shop/", "/product/blue-shirt/", "/2026/10/a-post/", "/?p=12", "/category/news/page/2/", "/favicon.ico", "/sitemap.xml"):
+            self.assertEqual(self.skip(uri), "0", uri)
+
+    def test_everything_personal_or_dynamic_skips_the_cache(self):
+        for uri in ("/wp-admin/", "/wp-admin/admin-ajax.php", "/wp-login.php", "/wp-login.php?action=lostpassword", "/wp-json/wp/v2/posts", "/wp-cron.php", "/xmlrpc.php",
+                    "/wp-comments-post.php", "/?s=shoes", "/blog/?s=shoes&x=1", "/?preview=true&p=3", "/?add-to-cart=7", "/?wc-ajax=get_refreshed_fragments", "/?wc-api=wc_gateway",
+                    "/cart/", "/cart", "/checkout/", "/checkout/order-received/5/", "/my-account/orders/", "/basket/", "/wp-content/plugins/x/track.php", "/index.php?p=1", "/anything.php"):
+            self.assertEqual(self.skip(uri), "1", uri)
+        for cookie in ("wordpress_logged_in_abc=1", "a=b; wordpress_sec_abc=1", "wp-postpass_x=1", "comment_author_h=1", "woocommerce_items_in_cart=1", "x=1; woocommerce_cart_hash=2",
+                       "wp_woocommerce_session_9=1"):
+            self.assertEqual(self.skip("/", cookie=cookie), "1", cookie)
+        self.assertEqual(self.skip("/", cookie="_ga=GA1.2.3; theme=dark"), "0", "an analytics or preference cookie does not stop the cache")
+        self.assertEqual(self.skip("/", auth="Basic abc"), "1", "an Authorization header")
+        self.assertEqual(self.skip("/", probe="1"), "1", "the probe port sees the site as it is now")
+        self.assertEqual(self.skip("/shop/?orderby=price"), "0", "a query string alone does not skip")
+
+    def test_the_zone_the_vhost_names_is_the_one_the_base_defines_and_the_name_carries_the_size(self):
+        zone = self.v["wp_page_cache_zone"]
+        self.assertIn(str(self.v["wp_page_cache_keys_mb"]) + "m", zone)
+        self.assertIn("keys_zone={{ wp_page_cache_zone }}:{{ wp_page_cache_keys_mb }}m", self.base)
+        self.assertIn("fastcgi_cache_path {{ wp_page_cache_path }} ", self.base)
+        self.assertEqual(self.v["wp_page_cache_path"].rsplit("/", 1)[0], "/var/cache/nginx", "nginx creates the last directory only; its parent is the package's")
+        self.assertIn("wp_page_cache_zone", self.v["wp_provision_platform_vars"]); self.assertIn("wp_page_cache_s", self.v["wp_provision_platform_vars"])
+
+    def test_the_checklist_and_measurement_scripts_use_the_repos_paths(self):
+        check = (ROOT / "scripts/wp_checklist_dellwp.sh").read_text(); perf = (ROOT / "scripts/wp_perf_measure.sh").read_text()
+        self.assertIn(self.v["wp_page_cache_path"], check)
+        for script in (check, perf):
+            self.assertIn("SITES=%s/sites" % self.v["wp_data_mount"], script)
+            self.assertIn("%s=%s" % ("VHOSTS", self.v["wp_vhost_dir"]), script)
+        self.assertIn("MU=%s" % self.v["wp_mu_dir"], check)
+        self.assertIn("SECRETS=%s" % self.v["wp_provision_secret_dir"], check)
+
+    def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
+        import re
+        content = self.base.split("content: |\n", 1)[1].split("register: wp_nginx_base", 1)[0]
+        content = re.sub(r"\{\{.*?\}\}", "X", content)
+        self.assertEqual(content.count("{"), content.count("}"))
+
+
 class Wiring(unittest.TestCase):
     def test_every_template_the_renderer_names_exists_and_the_play_reads_the_same_directory(self):
         renderer = (ROOT / "scripts/wp_site_renderer.py").read_text()

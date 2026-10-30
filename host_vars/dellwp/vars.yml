@@ -9,6 +9,15 @@ wp_nginx_listen_port: 8080
 # A second loopback port on every vhost, for the update job's health probe: the same server block, so the probe exercises the same rules a visitor meets, but the maintenance flag
 # does not turn it into a 503 (the job probes the site BEFORE it reopens it). Nothing dials it from outside: cloudflared is pointed at wp_nginx_listen_port only.
 wp_nginx_probe_port: 8081
+# The page cache for anonymous visitors (the zone, its path and the bypass maps are in tasks/wp_nginx_base_common.yml, the per-site rules in templates/wp/site_nginx.conf.j2). A page is kept this
+# many seconds; 0 turns the cache off in every vhost. There is no purge: an edit shows within this time, and `find <wp_page_cache_path> -type f -delete` empties it at once. Logged-in users, carts,
+# the REST API, search, previews and anything with an Authorization header never touch it. The zone's name carries its size because nginx refuses a reload that redefines a zone with another
+# size (tasks/wp_nginx_base_common.yml, 2026-10-24): change wp_page_cache_keys_mb and the name changes with it.
+wp_page_cache_s: 300
+wp_page_cache_keys_mb: 10
+wp_page_cache_zone: "wp_pages_{{ wp_page_cache_keys_mb }}m"
+wp_page_cache_path: /var/cache/nginx/wp_pages
+wp_page_cache_max_mb: 256
 # A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
 # tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
 wp_health_host: wp-healthz.internal
@@ -103,6 +112,8 @@ wp_provision_platform_vars:
   - wp_mu_mount
   - wp_nginx_listen_port
   - wp_nginx_probe_port
+  - wp_page_cache_s
+  - wp_page_cache_zone
   - wp_php_disable_functions
   - wp_php_uid
   - wp_stack_start_timeout_s
