@@ -72,6 +72,9 @@ table.kv th { width: 13rem; color: hsl(var(--muted)); font-weight: 600; font-siz
 .table-wrap { -webkit-overflow-scrolling: touch; }
 .table-wrap > table:not(.kv) { min-width: 38rem; }
 .table-wrap > table:not(.kv) th, .table-wrap > table:not(.kv) td { white-space: nowrap; overflow-wrap: normal; }
+/* A table whose first column names the row (the Sites table) keeps it in view while the rest scrolls under it. */
+.table-wrap.sticky-first > table th:first-child, .table-wrap.sticky-first > table td:first-child { position: sticky; left: 0; z-index: 1; background: hsl(var(--card)); box-shadow: 1px 0 0 hsl(var(--line)); }
+.table-wrap.sticky-first > table thead th:first-child { background: hsl(var(--bg)); }
 .empty { text-align: center; color: hsl(var(--muted)); padding: 2.5rem 1rem; }
 
 /* ---- badges ---- */
@@ -135,6 +138,18 @@ pre.log { background: hsl(30 10% 8%); color: hsl(30 15% 88%); border-radius: .8r
 .auth-card button { width: 100%; }
 
 @media (max-width: 40rem) {
+  /* The bar on a phone: the name and Log out on the first row, the four pages as equal pills on the second. */
+  .bar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .55rem 1rem; padding: .7rem .8rem; }
+  .bar nav { grid-column: 1 / -1; grid-row: 2; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: .25rem; }
+  .bar nav a { text-align: center; padding: .5rem .25rem; }
+  /* A short table with buttons in it (the import lists) becomes one block per row: the buttons must not wait off-screen to the right. */
+  .table-wrap.stack > table:not(.kv) { min-width: 0; }
+  .table-wrap.stack thead { display: none; }
+  .table-wrap.stack tr { display: block; padding: .6rem 0; border-bottom: 1px solid hsl(var(--line)); }
+  .table-wrap.stack tbody tr:last-child { border-bottom: 0; }
+  .table-wrap.stack td { display: block; border: 0; padding: .15rem 0; white-space: normal; overflow-wrap: anywhere; }
+  .table-wrap.stack td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 4.5rem; font-size: .72rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: hsl(var(--muted)); }
+  .table-wrap.stack td .actions { margin-top: .4rem; }
   main { padding: 1.25rem .8rem 3rem; }
   .card { padding: 1rem 1.1rem; }
   .settings { grid-template-columns: minmax(0, 1fr); }

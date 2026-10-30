@@ -447,6 +447,23 @@ class Pages(Base):
         for hidden in ("<dt>site</dt>", "<dt>name</dt>"):
             self.assertNotIn(hidden, html, "the page head already says the name")
 
+    def test_the_tables_are_laid_out_for_a_phone(self):
+        sites = self.text("/sites")
+        self.assertIn('class="table-wrap sticky-first"', sites, "the site name stays in view while the rest scrolls")
+        jobs = self.text("/jobs")
+        head = jobs.split("<thead>")[1].split("</thead>")[0]
+        order = [h for h in ("What", "Site", "State", "Exit", "Job") if "<th>%s</th>" % h in head]
+        self.assertEqual(order, ["What", "Site", "State", "Exit", "Job"])
+        self.assertEqual([m for m in ("<th>What</th>", "<th>State</th>", "<th>Job</th>") if m in head], ["<th>What</th>", "<th>State</th>", "<th>Job</th>"])
+        self.assertLess(head.index("<th>State</th>"), head.index("<th>Job</th>"), "the long job id comes last, behind the scroll")
+        imp = self.text("/import")
+        self.assertIn("table-wrap flat stack", imp)
+        for label in ('data-label="File"', 'data-label="Size"', 'data-label="Used by"'):
+            self.assertIn(label, imp)
+        css = self.get("/static/panel.css").get_data(as_text=True)
+        for rule in (".table-wrap.stack td[data-label]::before", ".bar nav { grid-column: 1 / -1;", ".table-wrap.sticky-first > table th:first-child"):
+            self.assertIn(rule, css)
+
     def test_a_record_dellwp_could_not_read_is_said_so(self):
         self.ctl.replies["show"] = {"ok": True, "site": "alpha", "status": None, "registry": None, "registry_error": "the registry record of alpha cannot be read; nothing was guessed"}
         html = self.text("/sites/alpha")
