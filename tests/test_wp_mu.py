@@ -21,7 +21,7 @@ from test_wp_backup import Base  # noqa: E402
 from test_wp_sites_render import ROOT, base_vars, env, load, site_vars  # noqa: E402
 
 MU = ROOT / "templates/wp/mu"
-FILES = ("10-wp-hosting-login.php", "20-wp-hosting-two-factor.php.j2", "30-wp-hosting-mail.php")
+FILES = ("10-wp-hosting-login.php", "20-wp-hosting-two-factor.php.j2", "30-wp-hosting-mail.php", "40-wp-hosting-timing.php")
 BANNED = ("eval", "exec", "system", "shell_exec", "passthru", "proc_open", "popen", "assert", "create_function", "unserialize", "file_put_contents", "fopen", "curl_exec", "extract",
           "call_user_func", "preg_replace_callback", "base64_decode", "move_uploaded_file", "chmod", "unlink")
 

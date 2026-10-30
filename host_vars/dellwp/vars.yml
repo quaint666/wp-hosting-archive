@@ -43,6 +43,15 @@ wp_php_opcache_strings_mb: 8
 wp_php_opcache_validate: 1
 wp_php_opcache_revalidate_s: 2
 wp_php_realpath_ttl_s: 120
+# 0 off, 1 on: every request that reaches PHP writes one "wph-timing {json}" line to the container's log (templates/wp/mu/40-wp-hosting-timing.php): when each stage of start-up was reached,
+# each plugin's include time, queries, memory and opcache's own gauges (is its file limit too low? it says). 2 also times every callback hooked to those stages and charges it to the plugin it was
+# written in; that wraps callbacks and costs a few percent. scripts/wp_perf_measure.sh summarises the lines. Set it back to 0 when done: it is a diagnostic, and the lines fill the log.
+wp_php_timing: 0
+# 1 keeps PHP's open_basedir (the site's directory, the must-use directory and /tmp); 0 takes it off. Measured on dellwp 2026-10-30: with it off a cached CLI boot took 247 ms instead of 581 ms
+# (scripts/wp_perf_profile.sh --ini). WHY it costs that is not established here: a package description says PHP skips its path cache while open_basedir is set, but no php-src page was found that
+# says so. What it protects: a hacked plugin reading files outside the site. Each site's container already sees only its own html, the must-use directory and a RAM-disk /tmp, so the container
+# is the first wall and this is the second; with it off, PHP can still read the rest of the image (/etc, /proc, the PHP files). Turn it off only on a site you decide can afford that.
+wp_php_open_basedir: 1
 # A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
 # tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
 wp_health_host: wp-healthz.internal
@@ -152,7 +161,9 @@ wp_provision_platform_vars:
   - wp_php_opcache_revalidate_s
   - wp_php_opcache_strings_mb
   - wp_php_opcache_validate
+  - wp_php_open_basedir
   - wp_php_realpath_ttl_s
+  - wp_php_timing
   - wp_php_uid
   - wp_stack_start_timeout_s
   - wp_stack_stop_timeout_s

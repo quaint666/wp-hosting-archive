@@ -168,6 +168,61 @@ if entries:
         print("      %4d  %s" % (c, k[:110]))
 PYSLOW
   rm -f "$slow"
+  tim=$(mktemp)
+  docker logs --since 168h "$php" 2>&1 </dev/null | grep -F 'wph-timing {' > "$tim" || true
+  if [ -s "$tim" ]; then
+    python3 - "$tim" <<'PYTIMING'
+import collections, json, re, statistics, sys
+ORDER = ["muplugins_loaded", "plugins_loaded", "after_setup_theme", "init", "woocommerce_init", "elementor/init", "wp_loaded", "parse_request", "admin_init", "rest_api_init", "wp",
+         "template_redirect", "wp_enqueue_scripts", "wp_head", "wp_footer", "shutdown"]
+rows = []
+for line in open(sys.argv[1], errors="replace"):
+    m = re.search(r"wph-timing (\{.*\})\s*$", line)
+    if m:
+        try:
+            rows.append(json.loads(m.group(1)))
+        except ValueError:
+            pass
+print("  timing measured inside php-fpm (templates/wp/mu/40-wp-hosting-timing.php): %d requests that reached PHP" % len(rows))
+groups = collections.defaultdict(list)
+for r in rows:
+    q = r.get("q") or {}
+    groups[" ".join([r.get("m", "?"), r.get("p", "?")] + ["?%s=%s" % kv for kv in sorted(q.items())])].append(r)
+med = statistics.median
+for name, rs in sorted(groups.items(), key=lambda kv: -sum(r["ms"] for r in kv[1]))[:5]:
+    ms = sorted(r["ms"] for r in rs)
+    print("    %-60s n=%d  median %.0f ms  p95 %.0f ms  queries %s  peak %.0f MB" % (name[:60], len(rs), med(ms), ms[int(0.95 * (len(ms) - 1))], med([r.get("queries") or 0 for r in rs]), max(r.get("mem_mb", 0) for r in rs)))
+    seen = [k for k in ORDER if sum(1 for r in rs if k in (r.get("marks") or {})) * 2 >= len(rs)]
+    prev, parts = None, []
+    for k in seen:
+        at = med([r["marks"][k] for r in rs if k in r["marks"]])
+        parts.append("%s %.0f" % (("start to " if prev is None else "") + k, at - (prev or 0)))
+        prev = at
+    if prev is not None:
+        parts.append("after the last stage %.0f" % max(0, med(ms) - prev))
+    print("      where the time goes (ms, the median of each stretch): " + "; ".join(parts))
+    inc = collections.defaultdict(list)
+    own = collections.defaultdict(list)
+    for r in rs:
+        for k, v in (r.get("inc") or {}).items():
+            inc[k].append(v)
+        for k, v in (r.get("own") or {}).items():
+            own[k].append(v)
+    if inc:
+        print("      time to include each plugin's file: " + "; ".join("%s %.0f" % (k, med(v)) for k, v in sorted(inc.items(), key=lambda kv: -med(kv[1]))[:5]))
+    if own:
+        print("      time in each owner's callbacks (inclusive, level 2): " + "; ".join("%s %.0f" % (k, med(v)) for k, v in sorted(own.items(), key=lambda kv: -med(kv[1]))[:6]))
+oc = [r["oc"] for r in rows if isinstance(r.get("oc"), dict) and r["oc"].get("on")]
+if oc:
+    last = oc[-1]
+    print("    opcache now: %.0f MB used, %.0f MB free, %.1f %% wasted; %d scripts cached, %d keys of %d allowed; hit rate %.1f %%; strings %.0f MB used, %.0f MB free" %
+          (last["used_mb"], last["free_mb"], last["wasted_pct"], last["scripts"], last["keys"], last["max_keys"], last["hit_pct"], last["str_used_mb"], last["str_free_mb"]))
+    print("    restarts forced by a full cache: %d (memory), %d (keys); cache full: %s" % (max(o["oom_restarts"] for o in oc), max(o["hash_restarts"] for o in oc), "YES" if any(o["full"] for o in oc) else "no"))
+PYTIMING
+  else
+    echo "  timing measured inside php-fpm: no lines (set wp_php_timing to 1 or 2 in host_vars/dellwp/vars.yml, run the sites play and apply the site)"
+  fi
+  rm -f "$tim"
 
   echo "traffic (current nginx access log)"
   log="$LOGS/wp_$n.access.log"

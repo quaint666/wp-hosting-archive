@@ -158,6 +158,19 @@ class Parity(unittest.TestCase):
         for line in ("zend.assertions = -1", "opcache.max_accelerated_files = 20000", "opcache.interned_strings_buffer = 16", "opcache.validate_timestamps = 0"):
             self.assertIn(line + "\n", ini)
 
+    def test_the_timing_level_and_open_basedir_follow_their_variables(self):
+        def files(extra=None):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            out = {f["path"].rsplit("/", 1)[1]: f["content"] for f in rr.files({**self.v["wp_site_defaults"], **SHAPES["live"]})}
+            return out["wp-config.php"], out["php.ini"]
+        cfg, ini = files()
+        self.assertIn("define( 'WP_HOSTING_TIMING', 0 );", cfg, "off by default: the diagnostic is opt-in")
+        self.assertRegex(ini, r"(?m)^open_basedir = /var/www/html:/var/www/wp-mu:/tmp$")
+        cfg, ini = files({"wp_php_timing": 2, "wp_php_open_basedir": 0})
+        self.assertIn("define( 'WP_HOSTING_TIMING', 2 );", cfg)
+        self.assertNotIn("open_basedir", ini, "off means the line is not there, not an empty value")
+        self.assertIn("opcache.memory_consumption", ini, "the lines after it are still there")
+
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}
         first = self.renderer.files(site)

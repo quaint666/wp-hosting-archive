@@ -73,6 +73,7 @@
   loop:
     - 10-wp-hosting-login.php
     - 30-wp-hosting-mail.php
+    - 40-wp-hosting-timing.php
 
 - name: Deploy the Two Factor loader
   ansible.builtin.template:

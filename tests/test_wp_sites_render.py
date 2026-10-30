@@ -358,6 +358,31 @@ class PageCacheRules(unittest.TestCase):
         for needle in ("slow-log entries in the last 7 days: 4", "4 /index.php", "3 plugin woocommerce", "1 theme envo", "3 mysqli_query() wp-includes/class-wpdb.php:2345"):
             self.assertIn(needle, flat)
 
+    def test_the_timing_summary_in_the_measurement_script_reads_the_plugins_lines(self):
+        import json
+        import re
+        import subprocess
+        import tempfile
+        script = (ROOT / "scripts/wp_perf_measure.sh").read_text()
+        code = re.search(r"python3 - \"\$tim\" <<'PYTIMING'\n(.*?)\nPYTIMING\n", script, re.S).group(1)
+        def line(ms, init, inc, own=None, oom=0):
+            row = {"m": "POST", "p": "/", "q": {"wc-ajax": "get_refreshed_fragments"}, "st": 200, "ms": ms, "level": 2 if own else 1,
+                   "marks": {"muplugins_loaded": 20.0, "plugins_loaded": 70.0, "init": init, "wp_loaded": init + 40.0}, "inc": inc, "queries": 30, "mem_mb": 40.0,
+                   "oc": {"on": 1, "full": 0, "used_mb": 60.0, "free_mb": 60.0, "wasted_pct": 0.5, "scripts": 3100, "keys": 3200, "max_keys": 7963, "hit_pct": 99.9, "oom_restarts": oom,
+                          "hash_restarts": 0, "str_used_mb": 5.0, "str_free_mb": 3.0}}
+            if own:
+                row["own"] = own
+            return "[30-Oct-2026 14:00:00 UTC] wph-timing " + json.dumps(row) + "\n"
+        log = line(240.0, 120.0, {"plugin woocommerce": 31.0, "plugin elementor": 18.0}, {"plugin woocommerce": 55.0}) + line(260.0, 130.0, {"plugin woocommerce": 33.0, "plugin elementor": 20.0}, {"plugin woocommerce": 61.0}, oom=1) + "noise\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".log") as f:
+            f.write(log)
+            f.flush()
+            out = subprocess.run([sys.executable, "-I", "-c", code, f.name], capture_output=True, text=True, timeout=30).stdout
+        flat = re.sub(r" +", " ", out)
+        for needle in ("2 requests that reached PHP", "POST / ?wc-ajax=get_refreshed_fragments n=2 median 250 ms", "start to muplugins_loaded 20", "plugins_loaded 50", "init 55", "wp_loaded 40", "after the last stage 85",
+                       "plugin woocommerce 32", "plugin elementor 19", "plugin woocommerce 58", "3100 scripts cached", "7963 allowed", "restarts forced by a full cache: 1 (memory)"):
+            self.assertIn(needle, flat)
+
     def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
         import re
         content = self.base.split("content: |\n", 1)[1].split("register: wp_nginx_base", 1)[0]
