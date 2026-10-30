@@ -314,6 +314,32 @@ class PageCacheRules(unittest.TestCase):
         for pattern in re.findall(r"""count "\$conf" '([^']+)'""", check):
             self.assertTrue(re.search(pattern, conf) or "deny all" in pattern, "the checklist greps for %r, which the vhost does not contain" % pattern)
 
+    def test_the_timed_log_format_is_the_combined_one_with_three_fields_the_vhost_uses_and_the_script_parses(self):
+        import re
+        fmt = re.search(r"log_format wp_timed '([^']+)';", self.base).group(1)
+        combined = '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"'
+        self.assertTrue(fmt.startswith(combined + " "), "the first nine fields must stay the combined format's, so older readers keep working")
+        self.assertEqual(fmt[len(combined):].split(), ["rt=$request_time", "urt=$upstream_response_time", "cache=$upstream_cache_status"])
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")), undefined=jinja2.StrictUndefined)
+        def vhost(state):
+            return env.get_template("wp/site_nginx.conf.j2").render(**{**self.v, "wp_s": {**self.v["wp_site_defaults"], "name": "alpha", "port": 9101, "state": state}, "wp_host": "alpha.x.test", "wp_site_dir": "/srv/wp/sites/alpha"})
+        for state in ("hold", "live"):
+            self.assertIn("access_log /var/log/nginx/wp_alpha.access.log wp_timed;", vhost(state), state)
+        self.assertNotIn("wp_timed", vhost("stopped"), "a stopped site serves a fixed 503: nothing to time")
+        # the line nginx would write, with the variables filled in, is read by the regex the measurement script carries (a redirect makes urt a list)
+        script = (ROOT / "scripts/wp_perf_measure.sh").read_text()
+        rx = re.compile(re.search(r"rx = re\.compile\(r'(.*)'\)", script).group(1))
+        for urt, cache in (("0.384", "BYPASS"), ("0.002, 0.384", "MISS"), ("-", "-"), ("-", "HIT")):
+            line = fmt                                        # longest names first: $request_time must go before $request
+            for name, value in (("$request_time", "0.391"), ("$upstream_response_time", urt), ("$upstream_cache_status", cache), ("$remote_addr", "1.2.3.4"), ("$remote_user", "-"),
+                                ("$time_local", "30/Oct/2026:13:00:00 +0000"), ("$request", "GET /shop/?x=1 HTTP/2.0"), ("$status", "200"), ("$body_bytes_sent", "5120"), ("$http_referer", "-"),
+                                ("$http_user_agent", "Mozilla/5.0 (X11; quoted)")):
+                line = line.replace(name, value)
+            m = rx.search(line)
+            self.assertTrue(m, line)
+            self.assertEqual((m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)), ("/shop/?x=1", "200", "0.391", urt, cache))
+        self.assertIsNone(rx.search('1.2.3.4 - - [30/Oct/2026:13:00:00 +0000] "GET / HTTP/2.0" 200 5120 "-" "ua"'), "an older line has no timing and is counted as untimed")
+
     def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
         import re
         content = self.base.split("content: |\n", 1)[1].split("register: wp_nginx_base", 1)[0]

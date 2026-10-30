@@ -11,10 +11,10 @@
 #   database  the InnoDB buffer pool: size, how many reads missed it (the number that says whether 64 MB is too small), slow queries, temp tables spilled to disk, connections, database size, and
 #             how much autoloaded data wp_options carries (loaded on every page).
 #   php       the number of .php files against opcache's file limit, container memory against its limit, restarts, whether the kernel's OOM killer ever fired, and the last seven days of php-fpm slow-log entries and "reached max_children" warnings.
-#   traffic   the current nginx access log: status codes, the ten most requested paths (query strings cut off) and the share of requests that are static files.
+#   traffic   the current nginx access log: status codes, the ten most requested paths (query strings cut off), the share of requests that are static files and, for the lines the timed
+#             format wrote (templates/wp/site_nginx.conf.j2, tasks/wp_nginx_base_common.yml), how long requests took by kind, with the page cache's verdict, and the five slowest.
 # And once: the VM's load, memory, swap and pressure-stall numbers.
-# What this does not show: the page weight a visitor downloads, Cloudflare's cache hit rate, or anything from outside the apartment; time to first byte here is the origin alone. The request log has no
-# request time (the access log format is the default), so "slow pages" in the traffic section are not known: only the php-fpm slow log (10 s and over) names those.
+# What this does not show: the page weight a visitor downloads, Cloudflare's cache hit rate, or anything from outside the apartment; time to first byte here is the origin alone. Request times exist only for lines written after the timed log format was deployed; older lines have none.
 # Needs: ssh to dellwp as a user with passwordless sudo (it is what the other tools use), nothing else. Lesson 2026-10-24: every command that could read stdin has </dev/null, or the rest of this script is swallowed.
 set -euo pipefail
 
@@ -116,6 +116,41 @@ for n in "${names[@]}"; do
          END { printf "  %d requests, %d static (%.0f %%)\n  status:", n, s, (n ? 100*s/n : 0); for (k in st) printf " %s x%d", k, st[k]; printf "\n" }' "$log" </dev/null
     echo "  top paths:"
     awk '{ p=$7; sub(/\?.*/, "", p); c[p]++ } END { for (k in c) printf "%d %s\n", c[k], k }' "$log" </dev/null | sort -rn | head -10 | sed 's/^/    /'
+    python3 - "$log" <<'PY'
+import re, sys
+rx = re.compile(r'"[A-Z]+ (\S+) [^"]*" (\d{3}) \d+ .*rt=([\d.]+) urt=(.*?) cache=(\S+)$')
+static = re.compile(r"\.(js|css|png|jpe?g|gif|webp|avif|svg|woff2?|ttf|otf|eot|map)$", re.I)
+groups, slow, untimed = {}, [], 0
+for line in open(sys.argv[1], errors="replace"):
+    m = rx.search(line)
+    if not m:
+        untimed += 1
+        continue
+    path, status, ms, cache = m.group(1).split("?")[0], int(m.group(2)), float(m.group(3)) * 1000, m.group(5)
+    if static.search(path):
+        klass = "static files (nginx)"
+    elif cache == "HIT":
+        klass = "page cache HIT"
+    elif cache == "BYPASS":
+        klass = "php, cache skipped (login, admin, cart, search, json...)"
+    elif cache != "-":
+        klass = "page cache " + cache
+    else:
+        klass = "other, no cache in play"
+    groups.setdefault(klass, []).append(ms)
+    slow.append((ms, status, cache, path))
+print("  request times, requests logged with the timed format (%d older lines have none):" % untimed)
+if not groups:
+    print("    none yet")
+else:
+    print("    %-58s %6s %8s %8s %8s" % ("what", "n", "median", "p95", "max"))
+    for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        v.sort()
+        print("    %-58s %6d %7.1f ms %6.1f ms %6.1f ms" % (k, len(v), v[len(v) // 2], v[int(0.95 * (len(v) - 1))], v[-1]))
+    print("  the five slowest:")
+    for ms, status, cache, path in sorted(slow, reverse=True)[:5]:
+        print("    %7.1f ms  %d  cache %-8s %s" % (ms, status, cache, path[:80]))
+PY
   else echo "  no access log or it is empty"; fi
 done
 hr "done"

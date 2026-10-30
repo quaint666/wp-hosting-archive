@@ -20,7 +20,7 @@ server {
     root {{ wp_site_dir }}/html;
     index index.php;
     client_max_body_size {{ wp_s.upload_mb }}m;
-    access_log /var/log/nginx/wp_{{ wp_s.name }}.access.log;
+    access_log /var/log/nginx/wp_{{ wp_s.name }}.access.log wp_timed;
     error_log /var/log/nginx/wp_{{ wp_s.name }}.error.log;
 
     add_header X-Content-Type-Options nosniff always;

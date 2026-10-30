@@ -70,6 +70,11 @@
               {{ wp_nginx_probe_port }} 1;
           }
 
+          # The combined access log format with three fields appended: how long the request took in all (rt, seconds), how long the php upstream took (urt; "-" when php was not asked, a list after
+          # an internal redirect) and what the page cache did (HIT, MISS, BYPASS, EXPIRED, STALE, UPDATING; "-" where the cache is not in play). The combined part is unchanged, so anything that
+          # reads the first nine fields keeps working; scripts/wp_perf_measure.sh reads the rest. A vhost opts in with `access_log <file> wp_timed;`.
+          log_format wp_timed '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time urt=$upstream_response_time cache=$upstream_cache_status';
+
           # The page cache for anonymous visitors (host_vars/dellwp/vars.yml wp_page_cache_*; a vhost opts in with fastcgi_cache). Keyed on the host, so one site never sees another's pages.
           fastcgi_cache_path {{ wp_page_cache_path }} levels=1:2 keys_zone={{ wp_page_cache_zone }}:{{ wp_page_cache_keys_mb }}m max_size={{ wp_page_cache_max_mb }}m inactive=60m use_temp_path=off;
 
