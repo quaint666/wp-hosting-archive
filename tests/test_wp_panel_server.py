@@ -89,7 +89,7 @@ class RealServer(unittest.TestCase):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             cls.port = s.getsockname()[1]
-        env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(ROOT / "app"), "PANEL_CTL_HOST": "dellwp", "PANEL_SECRET_DIR": str(secrets), "PANEL_STATE_DIR": str(Path(cls.d.name) / "state"),
+        env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(ROOT / "app"), "PANEL_CTL_HOST": "dellwp", "PANEL_SITE_DOMAIN": "example.test", "PANEL_SECRET_DIR": str(secrets), "PANEL_STATE_DIR": str(Path(cls.d.name) / "state"),
                "PANEL_BIND": "127.0.0.1:%d" % cls.port, "PANEL_CTL_KEY": "/nonexistent", "PANEL_KNOWN_HOSTS": "/nonexistent"}
         cls.proc = subprocess.Popen([sys.executable, "-I", "-m", "gunicorn", "-c", str(CONF), "--worker-tmp-dir", "/tmp", "wp_panel.wsgi:app"], env=env, cwd=str(ROOT / "app"),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

@@ -75,7 +75,7 @@ class Base(unittest.TestCase):
             (self.data / site).mkdir()
             (self.data / site / "site.json").write_text("{}")          # what makes a directory a site: a registry record
         self.shim = self.tmp / "seen"
-        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-ctl"):
+        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-site-cli", "wp-ctl"):
             self.script(name, TOOL)
         self.script("wp-sites-status", STATUS)
         self.script("systemd-run", SYSTEMD_RUN)
@@ -511,7 +511,7 @@ class Jobs(Base):
         self.assertFalse((jd / "tty").exists(), "the typed answer is removed once the tool has run")
         self.assertEqual(self.tty_seen(), ["wptest\n"])
         self.assertEqual(self.calls()[-1], "wp-site-delete [wptest]")
-        self.assertEqual(self.call({"verb": "job-status", "job": job})[1], {"ok": True, "job": job, "state": "done", "rc": 0})
+        self.assertEqual(self.call({"verb": "job-status", "job": job})[1], {"ok": True, "job": job, "verb": "delete", "site": "wptest", "state": "done", "rc": 0}, "the status names what the job is for, so the page can say what finished")
         result = [l for l in self.audit() if l["phase"] == "result"][0]
         self.assertEqual((result["verb"], result["site"], result["job"], result["ok"], result["rc"], result["caller"]), ("delete", "wptest", job, True, 0, "panel"))
 
@@ -519,7 +519,7 @@ class Jobs(Base):
         job = self.start()
         self.control("rc", 3)
         self.run_job(job)
-        self.assertEqual(self.call({"verb": "job-status", "job": job})[1], {"ok": True, "job": job, "state": "done", "rc": 3})
+        self.assertEqual(self.call({"verb": "job-status", "job": job})[1], {"ok": True, "job": job, "verb": "delete", "site": "wptest", "state": "done", "rc": 3})
         self.assertEqual([l["ok"] for l in self.audit() if l["phase"] == "result"], [False])
 
     def test_a_job_runs_once_whatever_restarts_the_unit(self):
@@ -810,6 +810,33 @@ class Intake(Base):
                 self.assertIn("7 findings", reply["out"])
         self.assertEqual(set(self.calls()), {"wp-vulnfeed [check] [wptest]"})
 
+    USERS = [{"user_login": "admin", "roles": "administrator"}, {"user_login": "ed.itor@x", "roles": "editor,author"}]
+
+    def test_users_lists_logins_and_roles_from_the_tools_json_and_audits_nothing(self):
+        self.control("stdout.wp-site-cli", "Notice: something\n" + json.dumps(self.USERS) + "\n")
+        rc, reply = self.call({"verb": "users", "site": "wptest"})
+        self.assertEqual((rc, reply), (0, {"ok": True, "site": "wptest", "users": [{"user": "admin", "roles": "administrator"}, {"user": "ed.itor@x", "roles": "editor,author"}]}))
+        self.assertEqual(self.calls(), ["wp-site-cli [wptest] [user] [list] [--fields=user_login,roles] [--format=json]"])
+        self.assertEqual(self.audit(), [], "a read is not audited")
+
+    def test_users_drops_rows_that_are_not_plausible_users_and_refuses_what_is_not_the_tools_json(self):
+        junk = [{"user_login": "a b", "roles": "x"}, {"user_login": "../x"}, {"roles": "x"}, "str", {"user_login": "ok", "roles": ["nope"]}]
+        self.control("stdout.wp-site-cli", json.dumps(junk) + "\n")
+        rc, reply = self.call({"verb": "users", "site": "wptest"})
+        self.assertEqual(reply["users"], [{"user": "ok", "roles": ""}])
+        for text, rc_ in (("not json\n", 0), ("", 0), ("{}\n", 0), (json.dumps(self.USERS) + "\n", 1), ("Error: wptest is stopped\n", 1)):
+            with self.subTest(text=text[:20], rc=rc_):
+                self.control("stdout.wp-site-cli", text)
+                self.control("rc", rc_)
+                rc, reply = self.call({"verb": "users", "site": "wptest"})
+                self.assertEqual((rc, reply["ok"], reply["error"]), (2, False, "tool_output"))
+
+    def test_users_needs_an_existing_site(self):
+        for site in HOSTILE_SITES:
+            rc, reply = self.call({"verb": "users", "site": site})
+            self.assertEqual(rc, 2)
+        self.assert_nothing_happened()
+
     def test_vuln_check_needs_an_existing_site(self):
         for site in HOSTILE_SITES:
             rc, reply = self.call({"verb": "vuln-check", "site": site})
@@ -912,7 +939,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "import-new", "update-check", "update-apply", "import-rescan"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "import-new", "update-check", "update-apply", "import-rescan"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)

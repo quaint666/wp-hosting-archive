@@ -134,7 +134,7 @@ class Make(Base):
         (secrets_dir / "session_key").write_text(v["aopenpanel_panel_session_key"])
         (secrets_dir / "password_hash").write_text(v["aopenpanel_panel_password_hash"])
         (secrets_dir / "totp_secret").write_text(v["aopenpanel_panel_totp_secret"])
-        s = config.load({"PANEL_CTL_HOST": "dellwp", "PANEL_SECRET_DIR": str(secrets_dir)})
+        s = config.load({"PANEL_CTL_HOST": "dellwp", "PANEL_SITE_DOMAIN": "example.test", "PANEL_SECRET_DIR": str(secrets_dir)})
         self.assertTrue(check_password_hash(s.password_hash, PASSWORD))
         self.assertGreaterEqual(len(s.session_key), 32)
 

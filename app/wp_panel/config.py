@@ -17,10 +17,11 @@ class SettingsError(Exception):
 
 
 class Settings:
-    def __init__(self, ctl_host, ctl_user, ctl_key, known_hosts, state_dir, session_s, session_key, password_hash, totp_secret):
+    def __init__(self, ctl_host, ctl_user, ctl_key, known_hosts, state_dir, session_s, session_key, password_hash, totp_secret, site_domain):
         self.ctl_host, self.ctl_user, self.ctl_key, self.known_hosts = ctl_host, ctl_user, ctl_key, known_hosts
         self.state_dir, self.session_s = state_dir, session_s
         self.session_key, self.password_hash, self.totp_secret = session_key, password_hash, totp_secret
+        self.site_domain = site_domain
 
 
 def read_file(path):
@@ -39,6 +40,9 @@ def load(env=None, read=read_file):
         return value
 
     host = need("PANEL_CTL_HOST")
+    domain = need("PANEL_SITE_DOMAIN")
+    if domain and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+", domain):
+        problems.append("PANEL_SITE_DOMAIN must be a domain name in lower case (the zone the sites live in, e.g. example.com)")
     secret_dir = env.get("PANEL_SECRET_DIR", SECRET_DIR_DEFAULT)
     hours = env.get("PANEL_SESSION_HOURS", "3")
     if not re.fullmatch(r"[1-9][0-9]{0,2}", hours) or not 1 <= int(hours) <= 24:
@@ -64,4 +68,4 @@ def load(env=None, read=read_file):
     if problems:
         raise SettingsError("; ".join(problems))
     return Settings(host, env.get("PANEL_CTL_USER", "wpctl"), env.get("PANEL_CTL_KEY", os.path.join(secret_dir, "panel_ssh_key")), env.get("PANEL_KNOWN_HOSTS", os.path.join(secret_dir, "known_hosts")),
-                    env.get("PANEL_STATE_DIR", STATE_DIR_DEFAULT), int(hours) * 3600, key, pw, totp)
+                    env.get("PANEL_STATE_DIR", STATE_DIR_DEFAULT), int(hours) * 3600, key, pw, totp, domain)

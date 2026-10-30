@@ -61,6 +61,7 @@ READ_VERBS = {
     "import-report": {"site": (True, _site)},
     "import-list": {},
     "vuln-check": {"site": (True, _site)},
+    "users": {"site": (True, _site)},
     "jobs": {},
     "job-status": {"job": (True, _job)},
     "job-log": {"job": (True, _job), "offset": (False, _int(0, 2 ** 40))},

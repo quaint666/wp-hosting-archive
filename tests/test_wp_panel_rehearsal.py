@@ -51,7 +51,7 @@ class Server:
     def __init__(self, d, days=30, strict_sni=True, hsts=True, banner="nginx", name=NAME, rewrite=None, no_logout_csrf=False):
         self.dir = d
         self.cert, self.key = make_cert(d, days, name)
-        settings = config.Settings("dellwp", "wpctl", "/k", "/kh", str(d / "state"), 3 * 3600, b"k" * 40, generate_password_hash(PASSWORD, method="pbkdf2:sha256:1000"), TOTP)
+        settings = config.Settings("dellwp", "wpctl", "/k", "/kh", str(d / "state"), 3 * 3600, b"k" * 40, generate_password_hash(PASSWORD, method="pbkdf2:sha256:1000"), TOTP, "example.test")
         self.ctl = FakeCtl()
         self.app = create_app(settings, self.ctl)
         if no_logout_csrf:                     # a bad app: logging out needs no token
@@ -136,7 +136,7 @@ class Driver(Base):
             self.assertNotIn(secret, r.stdout + r.stderr)
         self.assertIn(("show", {"site": "alpha"}), s.ctl.calls)
         self.assertIn(("job-log", {"job": JOB, "offset": 0}), s.ctl.calls)
-        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail", "import-report", "import-list", "vuln-check"}, "the rehearsal asked for read verbs only, and submitted no form")
+        self.assertTrue({v for v, _ in s.ctl.calls} <= {"list", "show", "jobs", "job-status", "job-log", "audit-tail", "import-report", "import-list", "vuln-check", "users"}, "the rehearsal asked for read verbs only, and submitted no form")
 
     def test_login_only_skips_the_checks_it_has_already_made(self):
         r = run_driver(self.server(), "--login-only", stdin="%s\n%s\n" % (PASSWORD, code()))

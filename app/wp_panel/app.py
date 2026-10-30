@@ -32,6 +32,11 @@ def create_app(settings, ctl, clock=time.time):
                       PERMANENT_SESSION_LIFETIME=timedelta(seconds=settings.session_s), MAX_CONTENT_LENGTH=MAX_BODY, TESTING=False, DEBUG=False, PROPAGATE_EXCEPTIONS=False)
     app.extensions["panel_ctl"] = ctl
     app.extensions["panel_clock"] = clock
+
+    @app.template_global()
+    def site_url(name, path="/"):
+        """The public address of a site: https://<name>.<the sites' zone><path>. The name is a checked site name (views.py asks wp-ctl first), the zone is the app's setting."""
+        return "https://%s.%s%s" % (name, settings.site_domain, path)
     throttle = auth.Throttle(settings.state_dir, clock)
     def ago(then):
         """'3 h ago' for a Unix time; anything that is not a time is shown as a dash."""

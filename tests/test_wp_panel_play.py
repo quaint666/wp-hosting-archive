@@ -51,7 +51,7 @@ def task(part):
 class Variables(unittest.TestCase):
     def test_the_variables_are_the_documented_ones_and_hold_no_secret(self):
         raw = yaml.safe_load((ROOT / "host_vars/aopenpanel/vars.yml").read_text())
-        for key in ("panel_dir", "panel_build_dir", "panel_secret_dir", "panel_uid", "panel_container", "panel_memory", "panel_bind", "panel_session_hours", "panel_domain", "panel_ctl_host", "panel_ctl_user", "panel_upload_max_mb"):
+        for key in ("panel_dir", "panel_build_dir", "panel_secret_dir", "panel_uid", "panel_container", "panel_memory", "panel_bind", "panel_session_hours", "panel_domain", "panel_ctl_host", "panel_ctl_user", "panel_site_domain", "panel_upload_max_mb"):
             self.assertIn(key, raw)
         self.assertFalse([k for k in raw if k.startswith("aopenpanel_panel_")], "the secrets are in the vault, never in vars.yml")
         self.assertEqual(PANEL_VARS["panel_ctl_host"], net.HOSTS["dellwp"]["overlay_ip"])
@@ -97,6 +97,7 @@ class Unit(unittest.TestCase):
         self.assertLessEqual(set(names), read, "an environment variable the app never reads")
         self.assertEqual(names["PANEL_CTL_HOST"], net.HOSTS["dellwp"]["overlay_ip"])
         self.assertEqual(names["PANEL_CTL_USER"], "wpctl")
+        self.assertEqual(names["PANEL_SITE_DOMAIN"], net.HOSTS["dellwp"]["wp_domain"], "the sites' zone is dellwp's own variable, not a copy")
         self.assertEqual(names["PANEL_SECRET_DIR"], "/run/secrets")
         self.assertEqual(names["PANEL_STATE_DIR"], "/run/panel")
         self.assertEqual(names["PANEL_BIND"], PANEL_VARS["panel_bind"])
@@ -341,7 +342,7 @@ class SecretsContract(unittest.TestCase):
             for name, var in by_name.items():
                 (secrets / name).write_text(values[var].strip() + "\n")           # content: "{{ item.value | trim }}\n"
                 (secrets / name).chmod(0o400)
-            s = config.load({"PANEL_CTL_HOST": "10.8.0.41", "PANEL_SECRET_DIR": str(secrets)})
+            s = config.load({"PANEL_CTL_HOST": "10.8.0.41", "PANEL_SITE_DOMAIN": "example.test", "PANEL_SECRET_DIR": str(secrets)})
             self.assertEqual(s.password_hash, values["aopenpanel_panel_password_hash"])
             self.assertEqual(len(s.session_key), len(values["aopenpanel_panel_session_key"]) + 1)
             self.assertTrue(cred.password_ok(s.password_hash, pw))

@@ -18,7 +18,7 @@ if touch /app/should-not-be-writable 2>/dev/null; then fail "the root file syste
 python -c 'import os, sys, pyotp; from werkzeug.security import generate_password_hash as g; d = sys.argv[1]; open(d + "/session_key", "wb").write(os.urandom(48)); open(d + "/password_hash", "w").write(g("smoke-test-password", method="pbkdf2:sha256:1000")); open(d + "/totp_secret", "w").write(pyotp.random_base32())' "$d"
 touch /run/panel/x && rm /run/panel/x || fail "the state directory /run/panel is not writable"
 ask() { python -c 'import http.client, sys; c = http.client.HTTPConnection("127.0.0.1", 8000, timeout=5); c.request("GET", sys.argv[1]); r = c.getresponse(); print(r.status, r.getheader("Content-Security-Policy") or "-", r.getheader("Location") or "-")' "$1"; }
-PANEL_CTL_HOST=dellwp PANEL_SECRET_DIR="$d" PANEL_STATE_DIR=/run/panel PANEL_BIND=127.0.0.1:8000 gunicorn -c /app/gunicorn.conf.py wp_panel.wsgi:app >"$d/gunicorn.log" 2>&1 &
+PANEL_CTL_HOST=dellwp PANEL_SITE_DOMAIN=example.test PANEL_SECRET_DIR="$d" PANEL_STATE_DIR=/run/panel PANEL_BIND=127.0.0.1:8000 gunicorn -c /app/gunicorn.conf.py wp_panel.wsgi:app >"$d/gunicorn.log" 2>&1 &
 pid=$!
 n=0
 until login=$(ask /login 2>/dev/null); do
