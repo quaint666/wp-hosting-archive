@@ -4,7 +4,7 @@
 # the checks hold. It never changes anything on dellwp itself: it only calls read-only commands (wp-ctl show / list / import-list, wp-site-cli reads, grep, test).
 #   bash scripts/wp_checklist_dellwp.sh [--name SITE] [--out FILE] [--host NAME] [--loopback-http]
 # Steps: 0 pre-flight, 1 create, 2 install WordPress, 3 move to live (and, with --loopback-http, the page cache: MISS, HIT, BYPASS), 4 the 2FA page and its QR code, 5 authenticator set-up, 6 mail log/send (with or without the Resend key), 7 the three
-# switches (XML-RPC, application passwords, user enumeration) each on and off, 8 import a .wpress (optional), 9 stop and delete.
+# switches (XML-RPC, application passwords, user enumeration) each on and off, 7b the mini-cart refresh cache, 8 import a .wpress (optional), 9 stop and delete.
 # The results (one PASS / FAIL / SKIP line per check, and what the machine said) go to FILE (default ~/.local/state/wp-perf/wp_checklist_<UTC stamp>.txt, mode 0600). They hold no secret: wp-config.php
 # is only counted for lines, never printed; the password you type into the panel never touches this script. Exit status is 1 when any check failed.
 # --loopback-http adds curl requests to nginx on dellwp's loopback (the page cache answers MISS, then HIT, and BYPASS for login and search; the QR script comes back 200; /xmlrpc.php and ?author=1 answer as the switches say), inside the ssh session. Without it the script
@@ -153,6 +153,22 @@ done
 if [ "$LOOP" = 1 ]; then
   say "  INFO  with every switch off, ?author=1 answers $(remote "curl -s -o /dev/null -w '%{http_code}' -H 'Host: $host' -H 'X-Forwarded-Proto: https' 'http://127.0.0.1:$port/?author=1'") (403 expected) and /xmlrpc.php $(remote "curl -s -o /dev/null -w '%{http_code}' -H 'Host: $host' -H 'X-Forwarded-Proto: https' http://127.0.0.1:$port/xmlrpc.php") (403 expected)"
 fi
+
+say ""; say "== 7b the mini-cart refresh cache (cart_fragments)"
+manual "cart_fragments = cache" "Panel > $NAME > Settings > Mini-cart refresh: choose cache, Set. Wait for the job to say Finished." "Did it finish without an error?"
+expect "registry cart_fragments is cache" "$(jget "$(show)" registry.cart_fragments)" cache
+expect "the vhost has the mini-cart location" "$(count "$conf" 'location = /__wph_fragments')" 1
+if [ "$LOOP" = 1 ]; then
+  frag() { remote "curl -s -o /dev/null -D - -X POST -H 'Host: $host' -H 'X-Forwarded-Proto: https' -H 'X-Requested-With: XMLHttpRequest' $1 --data 'time=1' 'http://127.0.0.1:$port/?wc-ajax=get_refreshed_fragments' | tr -d '\r' | awk 'tolower(\$1)==\"x-cache-status:\"{print \$2}'"; }
+  remote "sudo find /var/cache/nginx/wp_pages -type f -delete" >/dev/null
+  expect "the first mini-cart refresh is a MISS" "$(frag '')" MISS
+  expect "the second is a HIT" "$(frag '')" HIT
+  expect "with a cart cookie it is not shared (BYPASS)" "$(frag "-H 'Cookie: woocommerce_items_in_cart=1'")" BYPASS
+  expect "with a language cookie it is not shared (BYPASS)" "$(frag "-H 'Cookie: pll_language=en'")" BYPASS
+fi
+manual "the mini-cart still works" "On a site WITH WooCommerce (not this throwaway one: press s here): open the shop in a browser, add a product to the cart; the header cart must show it, and show it empty again after you remove it." "Did the mini-cart update?"
+manual "cart_fragments = normal" "Panel > $NAME > Settings > Mini-cart refresh: choose normal, Set." "Did it finish without an error?"
+expect "the mini-cart location is gone again" "$(count "$conf" 'location = /__wph_fragments')" 0
 
 say ""; say "== 8 import a .wpress (optional: press s to skip)"
 manual "import into $NAME" "Panel > Import > pick a .wpress (one is already on dellwp if you uploaded one) > 'Replace the data of a site that has some' (not 'Load it into an existing empty site': step 2 put WordPress in this one, and that mode refuses a site with tables) > type $NAME > run, then read the report page." "Did the report appear and read sensibly?"

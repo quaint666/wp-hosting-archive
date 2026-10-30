@@ -193,6 +193,7 @@ for name, rs in sorted(groups.items(), key=lambda kv: -sum(r["ms"] for r in kv[1
     ms = sorted(r["ms"] for r in rs)
     print("    %-60s n=%d  median %.0f ms  p95 %.0f ms  queries %s  peak %.0f MB" % (name[:60], len(rs), med(ms), ms[int(0.95 * (len(ms) - 1))], med([r.get("queries") or 0 for r in rs]), max(r.get("mem_mb", 0) for r in rs)))
     seen = [k for k in ORDER if sum(1 for r in rs if k in (r.get("marks") or {})) * 2 >= len(rs)]
+    seen.sort(key=lambda k: med([r["marks"][k] for r in rs if k in r["marks"]]))          # in the order they were reached, whatever ORDER says
     prev, parts = None, []
     for k in seen:
         at = med([r["marks"][k] for r in rs if k in r["marks"]])
