@@ -3,11 +3,11 @@
 # whether it worked, and after each step reads the state from dellwp over ssh to see whether the machine agrees. Neither side is trusted alone: a step passes only when you say it worked AND
 # the checks hold. It never changes anything on dellwp itself: it only calls read-only commands (wp-ctl show / list / import-list, wp-site-cli reads, grep, test).
 #   bash scripts/wp_checklist_dellwp.sh [--name SITE] [--out FILE] [--host NAME] [--loopback-http]
-# Steps: 0 pre-flight, 1 create, 2 install WordPress, 3 move to live, 4 the 2FA page and its QR code, 5 authenticator set-up, 6 mail log/send (with or without the Resend key), 7 the three
+# Steps: 0 pre-flight, 1 create, 2 install WordPress, 3 move to live (and, with --loopback-http, the page cache: MISS, HIT, BYPASS), 4 the 2FA page and its QR code, 5 authenticator set-up, 6 mail log/send (with or without the Resend key), 7 the three
 # switches (XML-RPC, application passwords, user enumeration) each on and off, 8 import a .wpress (optional), 9 stop and delete.
 # The results (one PASS / FAIL / SKIP line per check, and what the machine said) go to FILE (default ~/.local/state/wp-perf/wp_checklist_<UTC stamp>.txt, mode 0600). They hold no secret: wp-config.php
 # is only counted for lines, never printed; the password you type into the panel never touches this script. Exit status is 1 when any check failed.
-# --loopback-http adds curl requests to nginx on dellwp's loopback (the QR script comes back 200; /xmlrpc.php and ?author=1 answer as the switches say), inside the ssh session. Without it the script
+# --loopback-http adds curl requests to nginx on dellwp's loopback (the page cache answers MISS, then HIT, and BYPASS for login and search; the QR script comes back 200; /xmlrpc.php and ?author=1 answer as the switches say), inside the ssh session. Without it the script
 # is ssh-only and those behaviours rest on your own y/N and on the rendered nginx file, which proves the config, not the answer.
 # COST: a closed site's name, port and quota id are never reused (docs/wordpress_hosting_explained.md), so every full run, delete included, uses up one of each for good. Skip step 9 to keep the site.
 # Needs a terminal. Run it after the playbooks that carry the fixes (dellwp/wp_sites_dellwp.yml, and wp_tools if the renderer changed).
@@ -105,12 +105,20 @@ J=$(show)
 expect "registry state is live" "$(jget "$J" registry.state)" live
 expect "nginx answers as live" "$(jget "$J" status.actual)" live
 expect "the vhost no longer denies visitors" "$(count "$conf" 'deny all')" 0
+if [ "$LOOP" = 1 ]; then
+  port=$(remote "awk '\$1==\"listen\"{sub(\".*:\",\"\",\$2); gsub(\";\",\"\",\$2); print \$2; exit}' $conf")
+  host=$(remote "awk '\$1==\"server_name\"{gsub(\";\",\"\",\$2); print \$2; exit}' $conf")
+  xcache() { remote "curl -s -o /dev/null -D - -H 'Host: $host' -H 'X-Forwarded-Proto: https' 'http://127.0.0.1:$port$1' | tr -d '\r' | awk 'tolower(\$1)==\"x-cache-status:\"{print \$2}'"; }
+  remote "sudo find /var/cache/nginx/wp_pages -type f -delete" >/dev/null       # an empty cache, so the first answer is a MISS (this deletes only cached copies)
+  expect "the home page's first answer is a cache MISS" "$(xcache /)" MISS
+  expect "its second answer is a cache HIT" "$(xcache /)" HIT
+  expect "wp-login.php is never cached" "$(xcache /wp-login.php)" BYPASS
+  expect "a search is never cached" "$(xcache '/?s=test')" BYPASS
+fi
 
 say ""; say "== 4 the 2FA page and its QR code"
 manual "log in and land on the profile page" "Open https://$NAME.<the wp domain>/wp-admin/ in a browser and log in as $ADMIN. wp-admin must send you to your profile with a notice that two-factor login is required." "Did it?"
 if [ "$LOOP" = 1 ]; then
-  port=$(remote "awk '\$1==\"listen\"{sub(\".*:\",\"\",\$2); gsub(\";\",\"\",\$2); print \$2; exit}' $conf")
-  host=$(remote "awk '\$1==\"server_name\"{gsub(\";\",\"\",\$2); print \$2; exit}' $conf")
   js=$(remote "ls -d $MU/two-factor-*/includes/qrcode-generator/qrcode.js 2>/dev/null | head -n1")
   expect "the QR script is served (loopback)" "$(remote "curl -s -o /dev/null -w '%{http_code}' -H 'Host: $host' -H 'X-Forwarded-Proto: https' http://127.0.0.1:$port/wp-mu/${js#$MU/}")" 200
 fi
@@ -147,7 +155,7 @@ if [ "$LOOP" = 1 ]; then
 fi
 
 say ""; say "== 8 import a .wpress (optional: press s to skip)"
-manual "import into $NAME" "Panel > Import > upload a small .wpress, load it into $NAME, run it, and read the report page." "Did the report appear and read sensibly?"
+manual "import into $NAME" "Panel > Import > pick a .wpress (one is already on dellwp if you uploaded one) > 'Replace the data of a site that has some' (not 'Load it into an existing empty site': step 2 put WordPress in this one, and that mode refuses a site with tables) > type $NAME > run, then read the report page." "Did the report appear and read sensibly?"
 say "  INFO  what dellwp says is waiting: $(remote 'sudo /usr/local/sbin/wp-ctl import-list' | cut -c1-400)"
 manual "decide on the import" "Approve it if the report is clean, otherwise Reset (the site goes back to what it was)." "Did the decision finish without an error?"
 say "  INFO  after the decision: $(remote 'sudo /usr/local/sbin/wp-ctl import-list' | cut -c1-400)"

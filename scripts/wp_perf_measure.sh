@@ -10,7 +10,7 @@
 #   headers   whether a page and a static file come gzip-compressed and with what Cache-Control / Expires.
 #   database  the InnoDB buffer pool: size, how many reads missed it (the number that says whether 64 MB is too small), slow queries, temp tables spilled to disk, connections, database size, and
 #             how much autoloaded data wp_options carries (loaded on every page).
-#   php       container memory against its limit, restarts, whether the kernel's OOM killer ever fired, and the last seven days of php-fpm slow-log entries and "reached max_children" warnings.
+#   php       the number of .php files against opcache's file limit, container memory against its limit, restarts, whether the kernel's OOM killer ever fired, and the last seven days of php-fpm slow-log entries and "reached max_children" warnings.
 #   traffic   the current nginx access log: status codes, the ten most requested paths (query strings cut off) and the share of requests that are static files.
 # And once: the VM's load, memory, swap and pressure-stall numbers.
 # What this does not show: the page weight a visitor downloads, Cloudflare's cache hit rate, or anything from outside the apartment; time to first byte here is the origin alone. The request log has no
@@ -58,7 +58,7 @@ req() {   # host port path
   curl -s -o /dev/null --max-time 30 -H "Host: $1" -H 'X-Forwarded-Proto: https' -w '  %{http_code}  ttfb %{time_starttransfer}s  total %{time_total}s  %{size_download} bytes\n' "http://127.0.0.1:$2$3" </dev/null || echo "  curl failed"
 }
 hdrs() {  # host port path
-  curl -s -o /dev/null -D - --max-time 30 -H "Host: $1" -H 'X-Forwarded-Proto: https' -H 'Accept-Encoding: gzip' "http://127.0.0.1:$2$3" </dev/null | tr -d '\r' | grep -iE '^(HTTP/|content-encoding|cache-control|expires|vary|content-length)' | sed 's/^/  /' || echo "  no answer"
+  curl -s -o /dev/null -D - --max-time 30 -H "Host: $1" -H 'X-Forwarded-Proto: https' -H 'Accept-Encoding: gzip' "http://127.0.0.1:$2$3" </dev/null | tr -d '\r' | grep -iE '^(HTTP/|content-encoding|cache-control|expires|vary|content-length|x-cache-status)' | sed 's/^/  /' || echo "  no answer"
 }
 
 hr "measured $(date -u +%FT%TZ) on $(hostname), http=$HTTP, sites: ${names[*]:-none}"
@@ -104,6 +104,7 @@ for n in "${names[@]}"; do
   echo "php"
   docker inspect -f '  {{.Name}} started {{.State.StartedAt}}, restarts {{.RestartCount}}, OOM-killed {{.State.OOMKilled}}' "$db" "$php" 2>&1 </dev/null
   docker stats --no-stream --format '  {{.Name}}: cpu {{.CPUPerc}}, memory {{.MemUsage}} ({{.MemPerc}})' "$db" "$php" 2>&1 </dev/null
+  echo "  php files in the site: $(find "$SITES/$n/html" -name '*.php' 2>/dev/null | wc -l), opcache.max_accelerated_files: $(docker exec "$php" php -r 'echo ini_get("opcache.max_accelerated_files");' 2>&1 </dev/null | tail -n1), opcache.memory_consumption: $(docker exec "$php" php -r 'echo ini_get("opcache.memory_consumption");' 2>&1 </dev/null | tail -n1) MB (more files than the first number thrashes the cache)"
   logs=$(docker logs --since 168h "$php" 2>&1 </dev/null || true)
   echo "  last 7 days: $(printf '%s\n' "$logs" | grep -c 'script_filename =' || true) slow-log entries (10 s and over), $(printf '%s\n' "$logs" | grep -c 'max_children' || true) max_children warnings"
   printf '%s\n' "$logs" | grep 'script_filename =' | sort | uniq -c | sort -rn | head -3 | sed 's/^/    /' || true
