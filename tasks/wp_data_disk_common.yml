@@ -4,7 +4,7 @@
 # wrapper (dellwp/wp_data_disk_dellwp.yml). Vars (host_vars/dellwp/vars.yml): wp_data_device, wp_data_label, wp_data_mount. The disk itself is declared on the Proxmox
 # side (data_disk in host_vars/delloptiplex3040/vars.yml, tasks/proxmox_vms_common.yml).
 #
-# Project quotas are how a site is capped (docs/handoff_wp_hosting_temp.md section 10): every site's directory gets a project id and a hard block limit, so a runaway
+# Project quotas are how a site is capped (docs/wordpress_hosting_explained.md): every site's directory gets a project id and a hard block limit, so a runaway
 # site fills its own quota, not the disk. The filesystem is made with the `project` and `quota` features and `quotatype=prjquota`; the mount option `prjquota` turns
 # enforcement on. Directories below the mount point are plain here; the site engine gives each one its project id and limit.
 #
