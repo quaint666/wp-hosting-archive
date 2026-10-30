@@ -85,7 +85,7 @@
   ('State', status, ['deployed', 'actual', 'unit', 'containers', 'frozen']),
   ('Backup', status, ['backup_timer', 'backup_stamp', 'backup_age_h', 'backup_quota_pct']),
   ('Site', status, ['core', 'plugins', 'cron_timer', 'quota_pct']),
-  ('Registry record', registry, ['state', 'created', 'update_policy', 'mail_mode', 'port', 'quota_id', 'schema']),
+  ('Registry record', registry, ['state', 'created', 'update_policy', 'mail_mode', 'cart_fragments', 'port', 'quota_id', 'schema']),
 ] %}
 {% set units = {'backup_age_h': ' h ago', 'quota_pct': ' % used', 'backup_quota_pct': ' % used'} %}
 {% macro kvgroup(title, source, keys) %}

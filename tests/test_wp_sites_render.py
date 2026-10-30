@@ -266,6 +266,43 @@ class PageCacheRules(unittest.TestCase):
         key = "%s%s%s%s" % (c, u, auth, probe)
         return "0" if key == "000" else "1"                                             # the third map: default 1, only "000" is 0
 
+    def test_the_mini_cart_request_is_matched_exactly_and_skips_only_on_cookies_an_authorization_header_or_the_probe_port(self):
+        def exact(method, uri):
+            default, rules = self.entries_exact("$request_method $request_uri", "$wph_fragments")
+            return rules.get("%s %s" % (method, uri), default)
+        self.assertEqual(exact("POST", "/?wc-ajax=get_refreshed_fragments"), "1")
+        for method, uri in (("GET", "/?wc-ajax=get_refreshed_fragments"), ("POST", "/?wc-ajax=get_refreshed_fragments&x=1"), ("POST", "/"), ("POST", "/?wc-ajax=add_to_cart"), ("POST", "/wp-login.php"),
+                            ("POST", "/?wc-ajax=get_refreshed_fragments/")):
+            self.assertEqual(exact(method, uri), "0", "%s %s is not the mini-cart refresh" % (method, uri))
+        def frag_skip(cookie="", auth="", probe="0"):
+            c = self.mapped("$http_cookie", "$wp_cache_cookie", cookie)
+            default, rules = self.entries_exact("$wp_cache_cookie$http_authorization$wp_probe", "$wph_frag_skip")
+            return rules.get("%s%s%s" % (c, auth, probe), default)
+        self.assertEqual(frag_skip(), "0", "an anonymous visitor with no cookie is served the shared answer")
+        self.assertEqual(frag_skip(cookie="_ga=GA1.2.3; theme=dark"), "0", "an analytics or preference cookie is not a reason to skip")
+        for cookie in ("woocommerce_items_in_cart=1", "woocommerce_cart_hash=ab", "wp_woocommerce_session_9=x||y", "wordpress_logged_in_a=1", "wp-wpml_current_language=vi", "pll_language=en", "woocs=EUR",
+                       "aelia_cs_selected_currency=USD", "my_currency=eur"):
+            self.assertEqual(frag_skip(cookie=cookie), "1", cookie)
+        self.assertEqual(frag_skip(auth="Basic x"), "1")
+        self.assertEqual(frag_skip(probe="1"), "1")
+        for uri in ("/", "/shop/"):                              # the page cache bypasses language and currency cookies too, in the same map
+            self.assertEqual(self.skip(uri, cookie="pll_language=en"), "1")
+
+    def entries_exact(self, source, target):
+        """The default and the exact-string entries of a map block (the ones that are not regexes)."""
+        import re
+        block = re.search(r"map %s %s \{\n(.*?)\n\s*\}" % (re.escape('"' + source + '"') if " " in source or source.count("$") > 1 else re.escape(source), re.escape(target)), self.base, re.S).group(1)
+        default, rules = None, {}
+        for line in block.splitlines():
+            m = re.match(r'\s*default (\S+);', line)
+            if m:
+                default = m.group(1)
+                continue
+            m = re.match(r'\s*"([^~"][^"]*)" (\S+);', line)
+            if m:
+                rules[m.group(1)] = m.group(2)
+        return default, rules
+
     def test_the_third_map_is_what_this_evaluator_assumes(self):
         self.assertIn('map "$wp_cache_cookie$wp_cache_uri$http_authorization$wp_probe" $wp_skip_cache {\n              default 1;\n              "000" 0;\n          }', self.base)
 
@@ -309,8 +346,9 @@ class PageCacheRules(unittest.TestCase):
     def test_the_checklists_vhost_patterns_match_the_vhost_the_template_renders(self):
         import re
         check = (ROOT / "scripts/wp_checklist_dellwp.sh").read_text()
-        conf = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")), undefined=jinja2.StrictUndefined).get_template("wp/site_nginx.conf.j2").render(
-            **{**self.v, "wp_s": {**self.v["wp_site_defaults"], "name": "alpha", "port": 9101, "state": "live"}, "wp_host": "alpha.x.test", "wp_site_dir": "/srv/wp/sites/alpha"})
+        tmpl = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROOT / "templates")), undefined=jinja2.StrictUndefined).get_template("wp/site_nginx.conf.j2")
+        conf = "\n".join(tmpl.render(**{**self.v, "wp_s": {**self.v["wp_site_defaults"], "name": "alpha", "port": 9101, "state": "live", "cart_fragments": mode}, "wp_host": "alpha.x.test",
+                                         "wp_site_dir": "/srv/wp/sites/alpha"}) for mode in ("normal", "cache"))
         for pattern in re.findall(r"""count "\$conf" '([^']+)'""", check):
             self.assertTrue(re.search(pattern, conf) or "deny all" in pattern, "the checklist greps for %r, which the vhost does not contain" % pattern)
 

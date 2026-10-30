@@ -61,6 +61,14 @@ server {
         return 403;
     }
 {% endif %}
+{% if wp_s.cart_fragments == 'cache' and wp_page_cache_s | int > 0 %}
+
+    # WooCommerce's mini-cart refresh (cart_fragments cache): the browser POSTs /?wc-ajax=get_refreshed_fragments after a page loads, and for a visitor with no cart the answer is the same "empty cart" for
+    # everyone, yet it costs a whole WordPress start-up each time. This sends exactly that request to the location below, after the maintenance 503 and the rules above.
+    if ($wph_fragments) {
+        rewrite ^ /__wph_fragments last;
+    }
+{% endif %}
 
     # PHP never runs from places a visitor or an upload can write to.
     location ~* ^/wp-content/(uploads|upgrade)/.*\.(php|phar|phtml|php[0-9])$ {
@@ -108,6 +116,38 @@ server {
         add_header Referrer-Policy strict-origin-when-cross-origin always;
     }
 
+{% if wp_s.cart_fragments == 'cache' and wp_page_cache_s | int > 0 %}
+    # The answer to the mini-cart refresh, kept for {{ wp_page_cache_s | int }} s for visitors with no cart, login, language or currency cookie ($wph_frag_skip in tasks/wp_nginx_base_common.yml); anyone else goes to
+    # PHP every time, as before. WooCommerce marks this answer no-store, so the two headers that say so are ignored HERE and nowhere else; a Set-Cookie is still respected (nginx never stores such an
+    # answer). It is its own location because the ordinary PHP location must keep obeying those headers: some pages mean them. The parameters repeat that location's, with the script named by hand
+    # (the rewrite made $uri /__wph_fragments) and the visitor's original request line left in REQUEST_URI and QUERY_STRING, which is what WordPress and WooCommerce read.
+    location = /__wph_fragments {
+        internal;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;
+        fastcgi_param SCRIPT_NAME /index.php;
+        fastcgi_param DOCUMENT_URI /index.php;
+        fastcgi_param DOCUMENT_ROOT /var/www/html;
+        fastcgi_param HTTPS $wp_https;
+        fastcgi_pass 127.0.0.1:{{ wp_s.port }};
+        fastcgi_read_timeout 60s;
+        fastcgi_cache {{ wp_page_cache_zone }};
+        fastcgi_cache_methods POST;
+        fastcgi_cache_key "$wp_https$host$request_uri";
+        fastcgi_cache_valid 200 {{ wp_page_cache_s | int }}s;
+        fastcgi_ignore_headers Cache-Control Expires;
+        fastcgi_cache_bypass $wph_frag_skip;
+        fastcgi_no_cache $wph_frag_skip;
+        fastcgi_cache_lock on;
+        fastcgi_cache_use_stale error timeout updating http_500 http_503;
+        fastcgi_cache_background_update on;
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+    }
+
+{% endif %}
     location / {
         try_files $uri $uri/ /index.php?$args;
     }

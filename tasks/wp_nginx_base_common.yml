@@ -84,6 +84,8 @@
           map $http_cookie $wp_cache_cookie {
               default 0;
               "~*(wordpress_logged_in_|wordpress_sec_|wp-postpass_|comment_author_|woocommerce_items_in_cart|woocommerce_cart_hash|wp_woocommerce_session_)" 1;
+              # a language or currency the visitor chose changes the page and the mini-cart: never one shared copy
+              "~*(wp-wpml|pll_language|woocs|aelia_cs|currency)" 1;
           }
           map $request_uri $wp_cache_uri {
               default 0;
@@ -95,6 +97,18 @@
           map "$wp_cache_cookie$wp_cache_uri$http_authorization$wp_probe" $wp_skip_cache {
               default 1;
               "000" 0;
+          }
+
+          # WooCommerce's mini-cart refresh, exactly as the browser sends it. A vhost whose site has cart_fragments cache sends this request to its own location (templates/wp/site_nginx.conf.j2),
+          # which keeps the answer for a visitor with no cart, login, language or currency cookie (the answer is the same "empty cart" for all of them). The URL rules of $wp_skip_cache do not
+          # apply to it (they skip every wc-ajax call), so it has its own: the cookies, an Authorization header, and the probe port.
+          map "$request_method $request_uri" $wph_fragments {
+              default 0;
+              "POST /?wc-ajax=get_refreshed_fragments" 1;
+          }
+          map "$wp_cache_cookie$http_authorization$wp_probe" $wph_frag_skip {
+              default 1;
+              "00" 0;
           }
 
           server {

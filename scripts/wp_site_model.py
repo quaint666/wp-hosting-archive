@@ -22,6 +22,7 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 STATES = ("hold", "live", "stopped", "closed")
 POLICIES = ("auto", "notify", "freeze")
 MAIL_MODES = ("log", "send")
+CART_MODES = ("normal", "cache")                                              # cart_fragments: see templates/wp/site_nginx.conf.j2
 PORT_BASE, QUOTA_BASE = 9100, 1000                                            # a first site gets 9101 and 1001: above the base
 # What `set` may change: key -> (kind, minimum, maximum). `state` is not here: it has its own verb. `name`, `port` and `quota_id` are
 # never editable (the name is in the container, database, unit, vhost, directories and quota projects; the port and the id are assigned from the registry).
@@ -36,6 +37,7 @@ EDITABLE = {
     "allow_app_passwords": ("bool",),
     "allow_user_enum": ("bool",),
     "mail_mode": ("choice", MAIL_MODES),
+    "cart_fragments": ("choice", CART_MODES),
     "label": ("text", 100),
     "note": ("text", 500),
 }

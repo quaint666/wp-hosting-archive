@@ -171,6 +171,29 @@ class Parity(unittest.TestCase):
         self.assertNotIn("open_basedir", ini, "off means the line is not there, not an empty value")
         self.assertIn("opcache.memory_consumption", ini, "the lines after it are still there")
 
+    def test_cart_fragments_cache_is_its_own_location_and_only_when_asked(self):
+        def vhost(state="live", extra=None, **site):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            files = rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], "state": state, **site})
+            return next(f["content"] for f in files if f["path"].endswith("wp_site_alpha.conf"))
+        self.assertEqual(self.v["wp_site_defaults"]["cart_fragments"], "normal", "the default changes nothing for a site")
+        for conf in (vhost(), vhost(cart_fragments="normal"), vhost(state="stopped", cart_fragments="cache"), vhost(extra={"wp_page_cache_s": 0}, cart_fragments="cache")):
+            self.assertNotIn("__wph_fragments", conf)
+        on = vhost(cart_fragments="cache")
+        loc = on.split("location = /__wph_fragments {")[1].split("\n    }\n")[0]
+        for needle in ("internal;", "fastcgi_cache %s;" % self.v["wp_page_cache_zone"], "fastcgi_cache_methods POST;", 'fastcgi_cache_key "$wp_https$host$request_uri";', "fastcgi_ignore_headers Cache-Control Expires;",
+                       "fastcgi_cache_bypass $wph_frag_skip;", "fastcgi_no_cache $wph_frag_skip;", "fastcgi_cache_valid 200 %ds;" % int(self.v["wp_page_cache_s"]), "fastcgi_pass 127.0.0.1:9101;",
+                       "fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;", "fastcgi_param SCRIPT_NAME /index.php;", "X-Cache-Status $upstream_cache_status"):
+            self.assertIn(needle, loc)
+        self.assertNotIn("Set-Cookie", loc, "a Set-Cookie is not in the list of headers ignored: nginx then never stores such an answer")
+        # the header-ignoring is confined to that one location (the ordinary PHP location keeps obeying no-store and no-cache)
+        self.assertEqual(on.count("fastcgi_ignore_headers"), 1)
+        self.assertNotIn("fastcgi_ignore_headers", on.rpartition("location ~ \\.php$ {")[2])
+        # the redirect to it comes after the maintenance 503 and the author rule, so those still win, and sends only what the base's map says is the mini-cart request
+        self.assertLess(on.index("return 503;"), on.index("if ($wph_fragments) {"))
+        self.assertLess(on.index("if ($wph_fragments) {"), on.index("location = /__wph_fragments {"))
+        self.assertIn("rewrite ^ /__wph_fragments last;", on)
+
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}
         first = self.renderer.files(site)

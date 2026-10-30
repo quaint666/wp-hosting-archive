@@ -42,7 +42,7 @@ JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 BACKUP_TAGS = ("pre-update", "final", "pre-import")
-SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
+SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
 STATES = ("hold", "live", "stopped")
 ANY_RE = re.compile(r".*", re.S)                                              # `set` takes any text here: the tool holds the rule of each field, and a refusal of it is a refusal of the job
 SET_VALUE_MAX = 500                                                           # the longest value of any field (a site's note)

@@ -66,6 +66,7 @@ SETTINGS = [
     ("allow_app_passwords", "Allow application passwords", "bool", ("true", "false"), "a reload"),
     ("allow_user_enum", "Allow user enumeration", "bool", ("true", "false"), "a reload"),
     ("mail_mode", "Mail", "choice", ("log", "send"), "send needs the Resend key in the vault"),
+    ("cart_fragments", "Mini-cart refresh", "choice", ("normal", "cache"), "cache keeps WooCommerce's empty-cart answer for visitors with no cart; nginx reloads"),
     ("label", "Label", "text", 100, "registry only: nothing is applied"),
     ("note", "Note", "text", 500, "registry only: nothing is applied"),
 ]
