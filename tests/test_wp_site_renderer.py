@@ -127,6 +127,37 @@ class Parity(unittest.TestCase):
         self.assertNotIn("add_header", off.rpartition("location ~ \\.php$ {")[2])
         self.assertNotIn("fastcgi_cache", vhost("stopped"), "a stopped site serves a 503 and nothing else")
 
+    def test_the_php_and_fpm_variables_default_to_what_ran_before_and_each_mode_renders_what_php_fpm_accepts(self):
+        def render(extra=None, **site):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            files = {f["path"].rsplit("/", 1)[1]: f["content"] for f in rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], **site})}
+            return files["fpm-pool.conf"], files["php.ini"]
+        pool, ini = render()
+        for line in ("pm = ondemand", "pm.max_children = 4", "pm.process_idle_timeout = 20s", "pm.max_requests = 500", "request_terminate_timeout = 120s", "request_slowlog_timeout = 10s"):
+            self.assertIn(line + "\n", pool, "the defaults are the values that ran before they were variables: " + line)
+        for line in ("opcache.max_accelerated_files = 4000", "opcache.interned_strings_buffer = 8", "opcache.validate_timestamps = 1", "opcache.revalidate_freq = 2", "realpath_cache_ttl = 120", "zend.assertions = 1"):
+            self.assertIn(line + "\n", ini, line)
+        self.assertNotIn("pm.start_servers", pool)
+        pool, _ = render({"wp_fpm_pm": "dynamic"})
+        for line in ("pm = dynamic", "pm.start_servers = 1", "pm.min_spare_servers = 1", "pm.max_spare_servers = 2"):
+            self.assertIn(line + "\n", pool)
+        self.assertNotIn("process_idle_timeout", pool, "an ondemand setting has no place in a dynamic pool")
+        pool, _ = render({"wp_fpm_pm": "dynamic", "wp_fpm_start_servers": 9, "wp_fpm_min_spare_servers": 9, "wp_fpm_max_spare_servers": 9}, fpm_max_children=2)
+        for key in ("start_servers", "min_spare_servers", "max_spare_servers"):
+            self.assertIn("pm.%s = 2\n" % key, pool, "php-fpm refuses to start when a spare count is above pm.max_children: it is cut down")
+        pool, _ = render({"wp_fpm_pm": "static"})
+        self.assertIn("pm = static\n", pool)
+        for gone in ("process_idle_timeout", "spare_servers", "start_servers"):
+            self.assertNotIn(gone, pool)
+        with self.assertRaises(r.RenderError) as cm:
+            render({"wp_fpm_pm": "fast"})
+        self.assertIn("must be ondemand, dynamic or static", str(cm.exception))
+        pool, ini = render({"wp_fpm_slowlog_s": 1, "wp_php_assertions": -1, "wp_php_opcache_files": 20000, "wp_php_opcache_strings_mb": 16, "wp_php_opcache_validate": 0})
+        for line in ("request_slowlog_timeout = 1s",):
+            self.assertIn(line + "\n", pool)
+        for line in ("zend.assertions = -1", "opcache.max_accelerated_files = 20000", "opcache.interned_strings_buffer = 16", "opcache.validate_timestamps = 0"):
+            self.assertIn(line + "\n", ini)
+
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}
         first = self.renderer.files(site)

@@ -18,6 +18,31 @@ wp_page_cache_keys_mb: 10
 wp_page_cache_zone: "wp_pages_{{ wp_page_cache_keys_mb }}m"
 wp_page_cache_path: /var/cache/nginx/wp_pages
 wp_page_cache_max_mb: 256
+# php-fpm and PHP for every site (templates/wp/site_fpm_pool.conf.j2, templates/wp/site_php.ini.j2). Each value is what ran before it became a variable, so changing none of them changes nothing; the
+# experiment is one line here, a run of dellwp/wp_sites_dellwp.yml --tags wp_tools and `wp-site-provision apply <site>`, then scripts/wp_traffic_sim.sh and scripts/wp_perf_measure.sh.
+# pm: ondemand (no idle workers: the first request after wp_fpm_idle_timeout_s of quiet starts one, 50 to 350 ms measured on dellwp), dynamic (the three spare counts below keep workers
+# alive; each idle one holds RAM), or static (pm.max_children workers always). The spare counts are cut down to the site's fpm_max_children, which php-fpm insists on.
+wp_fpm_pm: ondemand
+wp_fpm_idle_timeout_s: 20
+wp_fpm_start_servers: 1
+wp_fpm_min_spare_servers: 1
+wp_fpm_max_spare_servers: 2
+# A worker is replaced after this many requests (a guard against leaks); with opcache a respawn is cheap.
+wp_fpm_max_requests: 500
+# A request that runs longer than this many whole seconds has its PHP stack written to the container's log (docker logs); 0 turns it off. php-fpm takes whole seconds only (units s, m, h, d,
+# no fractions), so 1 is the lowest that logs: it catches a stale page's refresh or a cold start, not a 400 ms uncached request. 10 is for trouble, 1 is for looking; the stacks name the plugin
+# on top at that moment (scripts/wp_perf_measure.sh ranks them). Keep it below request_terminate_timeout (120 s in the pool template).
+wp_fpm_slowlog_s: 10
+# 1 is PHP's own default with no php.ini (assertions are evaluated); -1 is what a production php.ini sets.
+wp_php_assertions: 1
+# opcache: the image's own settings (4000 files, 8 MB of interned strings, a file's age checked every 2 s). A site has about 8000 PHP files on disk, most never loaded; guides for WordPress
+# with WooCommerce suggest 16 to 32 MB of strings and a file limit well above the count of loaded files. validate 0 stops checking whether files changed: only safe if every change to a
+# site's code is followed by a php reload (the update job reloads; wp-site-ext does not), or the site runs stale code.
+wp_php_opcache_files: 4000
+wp_php_opcache_strings_mb: 8
+wp_php_opcache_validate: 1
+wp_php_opcache_revalidate_s: 2
+wp_php_realpath_ttl_s: 120
 # A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
 # tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
 wp_health_host: wp-healthz.internal
@@ -100,6 +125,13 @@ wp_provision_platform_vars:
   - wp_db_stop_grace_s
   - wp_db_uid
   - wp_domain
+  - wp_fpm_idle_timeout_s
+  - wp_fpm_max_requests
+  - wp_fpm_max_spare_servers
+  - wp_fpm_min_spare_servers
+  - wp_fpm_pm
+  - wp_fpm_slowlog_s
+  - wp_fpm_start_servers
   - wp_image_db
   - wp_image_php
   - wp_login_limit_ip
@@ -114,7 +146,13 @@ wp_provision_platform_vars:
   - wp_nginx_probe_port
   - wp_page_cache_s
   - wp_page_cache_zone
+  - wp_php_assertions
   - wp_php_disable_functions
+  - wp_php_opcache_files
+  - wp_php_opcache_revalidate_s
+  - wp_php_opcache_strings_mb
+  - wp_php_opcache_validate
+  - wp_php_realpath_ttl_s
   - wp_php_uid
   - wp_stack_start_timeout_s
   - wp_stack_stop_timeout_s

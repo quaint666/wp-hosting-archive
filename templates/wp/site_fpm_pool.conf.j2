@@ -1,11 +1,21 @@
 ; Managed by Ansible (templates/wp/site_fpm_pool.conf.j2). Site {{ wp_s.name }}. Loaded after the image's www.conf and zz-docker.conf (which sets the listen port).
 [www]
-pm = ondemand
+{% if wp_fpm_pm not in ['ondemand', 'dynamic', 'static'] %}
+{{ {}['wp_fpm_pm (host_vars/dellwp/vars.yml) must be ondemand, dynamic or static'] }}
+{% endif %}
+pm = {{ wp_fpm_pm }}
 pm.max_children = {{ wp_s.fpm_max_children }}
-pm.process_idle_timeout = 20s
-pm.max_requests = 500
+{% if wp_fpm_pm == 'ondemand' %}
+pm.process_idle_timeout = {{ wp_fpm_idle_timeout_s | int }}s
+{% elif wp_fpm_pm == 'dynamic' %}
+; php-fpm refuses to start when a spare count is above pm.max_children, so each is cut down to it.
+pm.start_servers = {{ [wp_fpm_start_servers | int, wp_s.fpm_max_children | int] | min }}
+pm.min_spare_servers = {{ [wp_fpm_min_spare_servers | int, wp_s.fpm_max_children | int] | min }}
+pm.max_spare_servers = {{ [wp_fpm_max_spare_servers | int, wp_s.fpm_max_children | int] | min }}
+{% endif %}
+pm.max_requests = {{ wp_fpm_max_requests | int }}
 request_terminate_timeout = 120s
-request_slowlog_timeout = 10s
+request_slowlog_timeout = {{ wp_fpm_slowlog_s | int }}s
 slowlog = /proc/self/fd/2
 catch_workers_output = yes
 decorate_workers_output = no

@@ -340,6 +340,24 @@ class PageCacheRules(unittest.TestCase):
             self.assertEqual((m.group("method"), m.group("uri"), m.group("status"), m.group("rt"), m.group("urt"), m.group("cache")), ("GET", "/shop/?x=1", "200", "0.391", urt, cache))
         self.assertIsNone(rx.search('1.2.3.4 - - [30/Oct/2026:13:00:00 +0000] "GET / HTTP/2.0" 200 5120 "-" "ua"'), "an older line has no timing and is counted as untimed")
 
+    def test_the_slow_log_summary_in_the_measurement_script_ranks_what_the_stacks_name(self):
+        import re
+        import subprocess
+        import tempfile
+        script = (ROOT / "scripts/wp_perf_measure.sh").read_text()
+        code = re.search(r"python3 - \"\$slow\" <<'PYSLOW'\n(.*?)\nPYSLOW\n", script, re.S).group(1)
+        entry = ("[30-Oct-2026 13:00:00]  [pool www] pid %d\nscript_filename = /var/www/html/index.php\n[0x00007f01] %s %s\n[0x00007f02] get_option() /var/www/html/wp-includes/option.php:123\n"
+                 "[0x00007f03] %s /var/www/html/wp-content/plugins/%s/x.php:9\n[0x00007f04] require() /var/www/html/wp-settings.php:500\n")
+        log = "".join(entry % (i, "mysqli_query()", "/var/www/html/wp-includes/class-wpdb.php:2345", "do_thing()", "woocommerce") for i in range(3)) \
+            + entry % (9, "preg_match()", "/var/www/html/wp-content/themes/envo/functions.php:10", "setup()", "elementor") + "noise that is not an entry\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".log") as f:
+            f.write(log)
+            f.flush()
+            out = subprocess.run([sys.executable, "-I", "-c", code, f.name], capture_output=True, text=True, timeout=30).stdout
+        flat = re.sub(r" +", " ", out)
+        for needle in ("slow-log entries in the last 7 days: 4", "4 /index.php", "3 plugin woocommerce", "1 theme envo", "3 mysqli_query() wp-includes/class-wpdb.php:2345"):
+            self.assertIn(needle, flat)
+
     def test_the_base_stays_balanced_after_the_template_variables_are_taken_out(self):
         import re
         content = self.base.split("content: |\n", 1)[1].split("register: wp_nginx_base", 1)[0]

@@ -107,9 +107,67 @@ for n in "${names[@]}"; do
   docker inspect -f '  {{.Name}} started {{.State.StartedAt}}, restarts {{.RestartCount}}, OOM-killed {{.State.OOMKilled}}' "$db" "$php" 2>&1 </dev/null
   docker stats --no-stream --format '  {{.Name}}: cpu {{.CPUPerc}}, memory {{.MemUsage}} ({{.MemPerc}})' "$db" "$php" 2>&1 </dev/null
   echo "  php files in the site: $(find "$SITES/$n/html" -name '*.php' 2>/dev/null | wc -l), opcache.max_accelerated_files: $(docker exec "$php" php -r 'echo ini_get("opcache.max_accelerated_files");' 2>&1 </dev/null | tail -n1), opcache.memory_consumption: $(docker exec "$php" php -r 'echo ini_get("opcache.memory_consumption");' 2>&1 </dev/null | tail -n1) MB (more files than the first number thrashes the cache)"
-  logs=$(docker logs --since 168h "$php" 2>&1 </dev/null || true)
-  echo "  last 7 days: $(printf '%s\n' "$logs" | grep -c 'script_filename =' || true) slow-log entries (10 s and over), $(printf '%s\n' "$logs" | grep -c 'max_children' || true) max_children warnings"
-  printf '%s\n' "$logs" | grep 'script_filename =' | sort | uniq -c | sort -rn | head -3 | sed 's/^/    /' || true
+  slow=$(mktemp)
+  docker logs --since 168h "$php" > "$slow" 2>&1 </dev/null || true
+  thr=$(docker exec "$php" sh -c 'cat /usr/local/etc/php-fpm.d/*.conf 2>/dev/null | grep -h "^request_slowlog_timeout" | tail -n1' </dev/null 2>/dev/null || true)
+  echo "  last 7 days: $(grep -c 'max_children' "$slow" || true) max_children warnings; slow log threshold ${thr:-unknown} (a request over it has its PHP stack logged, whole seconds only)"
+  python3 - "$slow" <<'PYSLOW'
+import collections, re, sys
+entries, cur = [], None
+for line in open(sys.argv[1], errors="replace"):
+    line = line.rstrip("\n")
+    if re.search(r"\[pool \w+\] pid \d+", line):
+        cur = {"script": "", "frames": []}
+        entries.append(cur)
+        continue
+    if cur is None:
+        continue
+    m = re.match(r"script_filename = (.*)$", line)
+    if m:
+        cur["script"] = m.group(1)
+        continue
+    m = re.match(r"\[0x[0-9a-f]+\] (.+?) (/\S+):(\d+)$", line)
+    if m:
+        cur["frames"].append((m.group(1), m.group(2), m.group(3)))
+
+
+def owner(path):
+    m = re.search(r"/wp-content/plugins/([^/]+)/", path)
+    if m:
+        return "plugin " + m.group(1)
+    m = re.search(r"/wp-content/themes/([^/]+)/", path)
+    if m:
+        return "theme " + m.group(1)
+    if "/wp-mu/" in path:
+        return "mu-plugins (ours)"
+    if "/wp-includes/" in path:
+        return "wp-includes"
+    if "/wp-admin/" in path:
+        return "wp-admin"
+    return "other"
+
+
+print("  slow-log entries in the last 7 days: %d" % len(entries))
+if entries:
+    scripts, tops, blame = collections.Counter(), collections.Counter(), collections.Counter()
+    for e in entries:
+        scripts[re.sub(r"^/var/www/html", "", e["script"]) or "?"] += 1
+        if e["frames"]:
+            fn, path, line = e["frames"][0]
+            tops["%s  %s:%s" % (fn, re.sub(r"^/var/www/html/", "", path), line)] += 1
+            third = next((owner(f[1]) for f in e["frames"] if owner(f[1]).startswith(("plugin ", "theme ", "mu-"))), owner(path))
+            blame[third] += 1
+    print("    by script:")
+    for k, c in scripts.most_common(5):
+        print("      %4d  %s" % (c, k))
+    print("    by the plugin or theme nearest the top of the stack (the code that was running):")
+    for k, c in blame.most_common(6):
+        print("      %4d  %s" % (c, k))
+    print("    most common place the stack was in:")
+    for k, c in tops.most_common(5):
+        print("      %4d  %s" % (c, k[:110]))
+PYSLOW
+  rm -f "$slow"
 
   echo "traffic (current nginx access log)"
   log="$LOGS/wp_$n.access.log"
