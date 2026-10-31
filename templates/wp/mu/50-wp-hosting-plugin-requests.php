@@ -206,13 +206,35 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 			'failed'    => 'could not be installed',
 			'expired'   => 'expired without an answer',
 		);
-		echo '<div class="notice notice-info"><p><strong>Plugin requests</strong></p><ul>';
+		$rows  = '';
+		$seen  = array();
+		$files = array_keys( get_plugins() );
 		foreach ( $list as $entry ) {
-			$state = wph_pr_state( $entry, $results );
+			if ( isset( $seen[ $entry['slug'] ] ) ) {
+				continue;
+			}
+			$seen[ $entry['slug'] ] = true;
+			$state                  = wph_pr_state( $entry, $results );
+			if ( 'installed' === $state ) {
+				// Said until the plugin is switched on (or gone): the line is there to say "activate it", and then it has nothing left to say.
+				$inactive = false;
+				foreach ( $files as $file ) {
+					if ( 0 === strpos( $file, $entry['slug'] . '/' ) && ! is_plugin_active( $file ) ) {
+						$inactive = true;
+					}
+				}
+				if ( ! $inactive ) {
+					continue;
+				}
+			} elseif ( 'waiting' !== $state && $entry['t'] < time() - 30 * DAY_IN_SECONDS ) {   // an old answer has nothing left to say
+				continue;
+			}
 			$note  = isset( $results[ $entry['id'] ] ) && '' !== $results[ $entry['id'] ]['note'] ? ' (' . $results[ $entry['id'] ]['note'] . ')' : '';
-			echo '<li>' . esc_html( $entry['slug'] . ': ' . $words[ $state ] . $note ) . '</li>';
+			$rows .= '<li>' . esc_html( $entry['slug'] . ': ' . $words[ $state ] . $note ) . '</li>';
 		}
-		echo '</ul></div>';
+		if ( '' !== $rows ) {
+			echo '<div class="notice notice-info"><p><strong>Plugin requests</strong></p><ul>' . $rows . '</ul></div>';
+		}
 	}
 
 	add_filter( 'map_meta_cap', 'wph_pr_caps', 99, 3 );
