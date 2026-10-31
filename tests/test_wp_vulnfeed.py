@@ -272,6 +272,23 @@ class Check(Base):
         rc, text = self.go("check", "alpha")
         self.assertEqual(rc, 0); self.assertIn("3 plugins, themes and core checked against 2 records; none known", text)
 
+    def test_one_plugin_version_is_checked_before_it_is_installed_anywhere(self):
+        rc, text = self.go("check-plugin", "example", "1.1.0")
+        self.assertEqual((rc, text), (1, "plugin example 1.1.0: Example - XSS (CVE-2026-0001, CVSS 6.5, fixed in 1.2.4)"))
+        rc, text = self.go("check-plugin", "example", "1.2.4")
+        self.assertEqual(rc, 0); self.assertIn("plugin example 1.2.4 checked against 2 records; none known", text)
+        self.assertEqual(self.go("check-plugin", "never-heard-of", "1.0")[0], 0)
+        self.assertEqual(self.cli_calls, [], "it asks no site")
+
+    def test_check_plugin_refuses_a_slug_or_version_that_is_not_one_and_is_not_run_without_a_fresh_index(self):
+        for slug, version in (("../x", "1.0"), ("Example", "1.0"), ("example", ""), ("example", "x1"), ("example", "1.0\n"), ("", "1.0"), ("a b", "1.0")):
+            rc, text = self.go("check-plugin", slug, version)
+            self.assertEqual(rc, 2, (slug, version, text))
+        self.assertEqual(self.go("check-plugin", "example")[0], 2)
+        (self.tmp / "state/index.json").unlink()
+        rc, text = self.go("check-plugin", "example", "1.1.0")
+        self.assertEqual(rc, 3); self.assertIn("NOT RUN", text)
+
     def test_a_site_without_wordpress_has_nothing_to_check(self):
         rc, text = self.go("check", "beta")
         self.assertEqual(rc, 0); self.assertIn("no WordPress yet", text)

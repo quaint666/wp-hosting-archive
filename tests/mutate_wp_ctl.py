@@ -13,6 +13,7 @@ Last full run 2026-10-28: 76 entries, all caught but two: 33 (the control-charac
 Entry 323 (the driver accepts an old TLS version) is an EQUIVALENT mutant: Python's own TLS client refuses anything older than 1.2 before the driver looks, so the check is defence in depth.
 Entries 202 onward are the control app's and need Flask: run the harness with the interpreter that has app/requirements.txt installed. 208 (a login code of any shape is looked at) is an EQUIVALENT mutant:
 a code of the wrong shape can never be the right code, so that check is defence in depth and no test can tell it is gone.
+Entries 383 onward are the plugin requests'. 389 (a plugin request's token is cleared before it acts) is an EQUIVALENT mutant: decide() clears the same tokens on every path that goes on, so the early clear is defence in depth.
 """
 import shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -408,6 +409,29 @@ M = [
  ("the panel deletes a plugin on the first press", 'app/wp_panel/views.py', '        if what == "delete" and not typed:', '        if False:', 'tests/test_wp_panel.py'),
  ("the panel client lets a delete go without the typed name", 'app/wp_panel/ctl.py', 'args.get("action") == "delete" and args.get("confirm_plugin") != args.get("plugin")', 'False', 'tests/test_wp_panel.py'),
  ("the plugin page offers delete on an active plugin", 'app/wp_panel/templates/plugins.html', "{% if p.status == 'inactive' %}\n        <form", "{% if p.status in ('active', 'inactive') %}\n        <form", 'tests/test_wp_panel.py'),
+ ('a vulnerable plugin gets an Approve button', 'scripts/wp_plugin_requests.py', 'return bool(entry.get("found")) and entry.get("vuln") == "clean"', 'return bool(entry.get("found"))', 'tests/test_wp_plugin_requests.py'),
+ ('a risk is approved without typing the name', 'scripts/wp_plugin_requests.py', 'if by != "panel" or accept_slug != slug:', 'if False:', 'tests/test_wp_plugin_requests.py'),
+ ('a request is decided twice', 'scripts/wp_plugin_requests.py', '        if e["state"] != PENDING:\n            raise Refuse("this request is', '        if False:\n            raise Refuse("this request is', 'tests/test_wp_plugin_requests.py'),
+ ('the install is not marked before it starts', 'scripts/wp_plugin_requests.py', '        save(cfg, store)                                   # saved before the install starts', '        pass', 'tests/test_wp_plugin_requests.py'),
+ ('the page cache is not cleared after an install', 'scripts/wp_plugin_requests.py', 'cleared = wp_ctl.purge_page_cache(cfg) if rc == 0 else None', 'cleared = None', 'tests/test_wp_plugin_requests.py'),
+ ('an approved plugin is activated', 'scripts/wp_plugin_requests.py', '"wp-site-ext"), site, "plugin", "install", slug]', '"wp-site-ext"), site, "plugin", "install", slug, "--activate"]', 'tests/test_wp_plugin_requests.py'),
+ ('a token survives its use', 'scripts/wp_plugin_requests.py', '        e["tokens"] = {}                                   # one use: consumed before anything runs', '        pass', 'tests/test_wp_plugin_requests.py'),
+ ('a token need not have been issued', 'scripts/wp_plugin_requests.py', 'e["tokens"].get(d["n"]) != d["a"]', 'False', 'tests/test_wp_plugin_requests.py'),
+ ('a token is not bound to its request', 'scripts/wp_plugin_requests.py', 'identity_sha(e["site"], e["slug"], e["id"]) == d["r"]]', 'True]', 'tests/test_wp_plugin_requests.py'),
+ ('a phone approve on an unclean request', 'scripts/wp_plugin_requests.py', 'if d["a"] == "approve" and not can_approve_by_phone(e):', 'if False:', 'tests/test_wp_plugin_requests.py'),
+ ('a similar plugin name counts as the plugin', 'scripts/wp_plugin_requests.py', 'if isinstance(r, dict) and r.get("slug") == slug:', 'if isinstance(r, dict) and slug in str(r.get("slug")):', 'tests/test_wp_plugin_requests.py'),
+ ('old requests are accepted', 'scripts/wp_plugin_requests.py', 'if key in store or now - raw["t"] > cfg["expire_days"] * DAY or raw["t"] > now + DAY:', 'if key in store:', 'tests/test_wp_plugin_requests.py'),
+ ('a site may have any number waiting', 'scripts/wp_plugin_requests.py', 'or waiting >= cfg["max_pending_per_site"]:', ':', 'tests/test_wp_plugin_requests.py'),
+ ('a time that is not a whole number is accepted', 'scripts/wp_plugin_requests.py', 'isinstance(t, int) and not isinstance(t, bool) and t > 0', 'True', 'tests/test_wp_plugin_requests.py'),
+ ('a user name is not cleaned', 'scripts/wp_plugin_requests.py', 'USER_RE.sub("", user)[:60]', 'user[:60]', 'tests/test_wp_plugin_requests.py'),
+ ('a notification is marked sent even when it failed', 'scripts/wp_plugin_requests.py', 'e["notified"] = not why', 'e["notified"] = True', 'tests/test_wp_plugin_requests.py'),
+ ('a plugin wordpress.org does not have can be approved', 'scripts/wp_plugin_requests.py', '        if not e.get("found"):\n            raise Refuse("%s is not on wordpress.org', '        if False:\n            raise Refuse("%s is not on wordpress.org', 'tests/test_wp_plugin_requests.py'),
+ ('a deny is not told to the site', 'scripts/wp_plugin_requests.py', 'problem = write_result(cfg, run, site, rid, DENIED, "")', 'problem = ""', 'tests/test_wp_plugin_requests.py'),
+ ('a stopped site is asked', 'scripts/wp_plugin_requests.py', 'if state in ("live", "hold"):', 'if True:', 'tests/test_wp_plugin_requests.py'),
+ ('the tokens are issued even for the unchecked', 'scripts/wp_plugin_requests.py', '(("approve",) if can_approve_by_phone(entry) else ())', '("approve",)', 'tests/test_wp_plugin_requests.py'),
+ ('the plugin token signature does not cover its prefix', 'scripts/wp_approvals.py', 'return "p1.%s.%s" % (text, sign(key, "p1." + text)), nonce', 'return "p1.%s.%s" % (text, sign(key, text)), nonce', 'tests/test_wp_approvals.py'),
+ ('a plugin token goes to the import tool', 'scripts/wp_approval_listener.py', 'self.cfg["tool"] if kind == "import" else self.cfg["plugin_tool"]', 'self.cfg["tool"]', 'tests/test_wp_approvals.py'),
+ ('check-plugin accepts any slug', 'scripts/wp_vulnfeed.py', 're.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug or "")', 'True', 'tests/test_wp_vulnfeed.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
