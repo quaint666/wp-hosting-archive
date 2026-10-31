@@ -25,8 +25,8 @@ KEY = "k" * 40
 RID1, RID2, RID3 = "aabbccdd0011", "aabbccdd0022", "aabbccdd0033"
 
 
-def entry(rid=RID1, slug="akismet", t=NOW - 60, user="owner"):
-    return {"id": rid, "slug": slug, "t": t, "user": user}
+def entry(rid=RID1, slug="akismet", t=NOW - 60, user="owner", kind=None):
+    return {"id": rid, "slug": slug, "t": t, "user": user, **({"kind": kind} if kind else {})}
 
 
 def row(slug="akismet", name="Akismet Anti-spam", version="5.3", installs=5000000, rating=90, updated="2026-10-01"):
@@ -39,6 +39,8 @@ class Fake:
     def __init__(self):
         self.calls, self.requests, self.results, self.posted, self.journal = [], {}, {}, [], []
         self.search = {"akismet": [row()], "jetpack": [row("jetpack", "Jetpack", "13.0")], "hello-dolly": [row("hello-dolly", "Hello Dolly", "1.7.2")]}
+        self.apply_rc = 0
+        self.themes = {"astra": [{"slug": "astra", "name": "Astra", "version": "4.8.0", "rating": 98}]}
         self.search_rc, self.vuln, self.ext_rc, self.ext_text, self.down, self.on_ext, self.update_rc = 0, {}, 0, "Success: Installed 1 of 1 plugins.", set(), None, 0
 
     def __call__(self, cmd, **kw):
@@ -51,6 +53,8 @@ class Fake:
         if tool == "wp-vulnfeed":
             rc, line = self.vuln.get(cmd[2], (0, "plugin %s %s checked against 2 records; none known" % (cmd[2], cmd[3])))
             return done(rc, line + "\n")
+        if tool == "wp-site-provision":
+            return done(self.apply_rc, "applied\n" if not self.apply_rc else "", "" if not self.apply_rc else "Error: boom\n")
         if tool == "wp-site-ext":
             if self.on_ext:
                 self.on_ext()
@@ -72,6 +76,8 @@ class Fake:
             return done(0, "Success: Updated 'wph_plugin_request_results' option.\n")
         if args[:2] == ["plugin", "search"]:
             return done(self.search_rc, "Notice: x\n" + json.dumps(self.search.get(args[2], [])) + "\n")
+        if args[:2] == ["theme", "search"]:
+            return done(self.search_rc, "Notice: x\n" + json.dumps(self.themes.get(args[2], [])) + "\n")
         raise AssertionError(cmd)
 
     def post(self, url, auth, payload, timeout=15):
@@ -307,7 +313,7 @@ class Deciding(Base):
         self.assertEqual(self.fake.results["alpha"], {RID1: {"status": "denied", "note": ""}})
         self.assertNotIn("wp-site-ext", self.fake.tools())
         self.assertEqual(self.cache_files(), ["a", "b"])
-        self.assertEqual(self.fake.journal, ["site=alpha request=%s slug=akismet decision=deny by=panel" % RID1])
+        self.assertEqual(self.fake.journal, ["site=alpha request=%s kind=plugin slug=akismet decision=deny by=panel" % RID1])
 
     def test_approve_installs_by_slug_inactive_clears_the_page_cache_and_tells_the_site(self):
         rc, text = self.go("decide", "alpha", RID1, "approve")
@@ -391,6 +397,126 @@ class Deciding(Base):
         self.go("decide", "alpha", RID1, "approve", "--accept-risk", "jetpack")
         installs = [c for c in self.fake.calls if os.path.basename(c[0]) == "wp-site-ext"]
         self.assertEqual(installs, [["/opt/bin/wp-site-ext", "alpha", "plugin", "install", "akismet"]])
+
+
+class Themes(Base):
+    """A request has a kind. A theme goes through the same steps as a plugin: its own lookup, its own vulnerability check, wp-site-ext with `theme`, and a token that fits only it."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.requests["alpha"] = [entry(RID1, "astra", kind="theme")]
+
+    def test_a_theme_is_looked_up_as_a_theme_checked_as_a_theme_and_told_as_a_theme(self):
+        rc, text = self.go("collect")
+        self.assertEqual(rc, 0, text)
+        search = next(c for c in self.fake.calls if c[2:4] == ["theme", "search"])
+        self.assertNotIn("active_installs", " ".join(search), "a theme has no install count")
+        self.assertIn(["/opt/bin/wp-vulnfeed", "check-theme", "astra", "4.8.0"], self.fake.calls)
+        e = self.store()[self.key()]
+        self.assertEqual((e["kind"], e["found"], e["vuln"], e["name"], e["version"]), ("theme", True, "clean", "Astra", "4.8.0"))
+        msg = self.fake.posted[0][1]
+        self.assertIn("owner asks to install theme astra on alpha.", msg["message"])
+        self.assertEqual(msg["title"], "Theme request: alpha")
+
+    def test_an_entry_without_a_kind_is_a_plugin_and_an_unknown_kind_is_dropped(self):
+        self.fake.requests["alpha"] = [entry(RID1, "akismet"), entry(RID2, "astra", kind="mu-plugin"), entry(RID3, "x", kind=7)]
+        self.go("collect")
+        self.assertEqual({k: v["kind"] for k, v in self.store().items()}, {self.key(): "plugin"})
+        self.assertIn(["/opt/bin/wp-vulnfeed", "check-plugin", "akismet", "5.3"], self.fake.calls)
+
+    def test_a_theme_and_a_plugin_with_the_same_slug_are_two_requests(self):
+        self.fake.search["astra"] = [row("astra", "Astra Plugin", "1.0")]
+        self.fake.requests["alpha"] = [entry(RID1, "astra", kind="theme"), entry(RID2, "astra")]
+        self.go("collect")
+        self.assertEqual(sorted(v["kind"] for v in self.store().values()), ["plugin", "theme"])
+
+    def test_approving_a_theme_installs_it_with_wp_site_ext_inactive(self):
+        self.go("collect")
+        rc, text = self.go("decide", "alpha", RID1, "approve")
+        self.assertEqual(rc, 0, text)
+        self.assertIn(["/opt/bin/wp-site-ext", "alpha", "theme", "install", "astra"], self.fake.calls)
+        self.assertNotIn("--activate", " ".join(" ".join(c) for c in self.fake.calls))
+        self.assertIn("installed theme astra on alpha, inactive", text)
+        self.assertIn("kind=theme slug=astra decision=approve by=panel", self.fake.journal[0])
+
+    def test_denying_a_theme_says_so(self):
+        self.go("collect")
+        rc, text = self.go("decide", "alpha", RID1, "deny")
+        self.assertEqual((rc, text), (0, "denied theme astra for alpha"))
+
+    def test_a_theme_with_a_known_vulnerability_has_the_same_rule_as_a_plugin(self):
+        self.fake.vuln["astra"] = (1, "theme astra 4.8.0: CVE-2026-0001 (score 8.8)")
+        self.go("collect")
+        self.assertEqual([a["label"] for a in self.fake.posted[0][1]["actions"]], ["Deny"], "no phone Approve button")
+        rc, text = self.go("decide", "alpha", RID1, "approve")
+        self.assertEqual(rc, 2)
+        self.assertNotIn("wp-site-ext", self.fake.tools())
+        rc, text = self.go("decide", "alpha", RID1, "approve", "--accept-risk", "astra")
+        self.assertEqual(rc, 0, text)
+        self.assertIn(["/opt/bin/wp-site-ext", "alpha", "theme", "install", "astra"], self.fake.calls)
+
+    def test_a_theme_wordpress_org_does_not_have_cannot_be_approved(self):
+        self.fake.themes = {}
+        self.go("collect")
+        rc, text = self.go("decide", "alpha", RID1, "approve")
+        self.assertEqual(rc, 2)
+        self.assertIn("not on wordpress.org", text)
+
+    def test_the_phone_buttons_of_a_theme_work_and_are_bound_to_the_kind(self):
+        self.go("collect")
+        tokens = {a["label"].lower(): a["body"] for a in self.fake.posted[0][1]["actions"]}
+        self.assertNotEqual(pr.identity_sha("alpha", "astra", RID1, "theme"), pr.identity_sha("alpha", "astra", RID1, "plugin"))
+        self.assertEqual(pr.identity_sha("alpha", "akismet", RID1), pr.identity_sha("alpha", "akismet", RID1, "plugin"), "a plugin token keeps the form it always had")
+        rc, text = self.go("resolve", tokens["approve"])
+        self.assertEqual(rc, 0, text)
+        self.assertIn(["/opt/bin/wp-site-ext", "alpha", "theme", "install", "astra"], self.fake.calls)
+
+    def test_list_names_the_kind_and_an_old_entry_without_one_is_a_plugin(self):
+        self.go("collect")
+        s = self.store()
+        s[self.key()].pop("kind")
+        pr.save(self.cfg, s)
+        rc, text = self.go("list")
+        self.assertEqual(json.loads(text)["requests"][0]["kind"], "plugin")
+        s[self.key()]["kind"] = "theme"
+        pr.save(self.cfg, s)
+        self.assertEqual(json.loads(self.go("list")[1])["requests"][0]["kind"], "theme")
+
+
+class ApplyAfter(Base):
+    """All-in-One WP Migration's storage mount waits for its directory, so approving that plugin applies the site; no other plugin does."""
+
+    def approve(self, slug, kind=None):
+        self.fake.search[slug] = self.fake.search.get(slug) or [row(slug, slug, "1.0")]
+        self.fake.themes[slug] = [{"slug": slug, "name": slug, "version": "1.0", "rating": 90}]
+        self.fake.requests["alpha"] = [entry(RID1, slug, kind=kind)]
+        self.go("collect")
+        return self.go("decide", "alpha", RID1, "approve")
+
+    def test_approving_the_migration_plugin_applies_the_site_after_the_install(self):
+        rc, text = self.approve("all-in-one-wp-migration")
+        self.assertEqual(rc, 0, text)
+        calls = [c for c in self.fake.calls if os.path.basename(c[0]) in ("wp-site-ext", "wp-site-provision")]
+        self.assertEqual([c[1:] for c in calls], [["alpha", "plugin", "install", "all-in-one-wp-migration"], ["apply", "alpha"]], "the install first")
+        self.assertIn("applied alpha", text)
+
+    def test_other_plugins_and_a_theme_of_that_name_do_not(self):
+        self.approve("akismet")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+        self.approve("all-in-one-wp-migration", kind="theme")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+
+    def test_a_failed_install_applies_nothing_and_a_failed_apply_does_not_undo_the_install(self):
+        self.fake.ext_rc = 1
+        self.approve("all-in-one-wp-migration")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+        self.fake.ext_rc, self.fake.apply_rc = 0, 1
+        self.setUp()
+        self.fake.apply_rc = 1
+        rc, text = self.approve("all-in-one-wp-migration")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("applying alpha failed (status 1): Error: boom", text)
+        self.assertEqual(self.store()[self.key()]["state"], "installed")
 
 
 class Tokens(Base):

@@ -10,7 +10,7 @@ from flask import abort, current_app, jsonify, redirect, render_template, reques
 
 from werkzeug.exceptions import ClientDisconnected
 
-from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, REQUEST_DECISIONS, REQUEST_ID_RE, SET_KEYS, UPLOAD_MAX, CtlError
+from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, REQUEST_DECISIONS, REQUEST_ID_RE, SET_KEYS, STAMP_RE, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -67,6 +67,7 @@ SETTINGS = [
     ("allow_user_enum", "Allow user enumeration", "bool", ("true", "false"), "a reload"),
     ("mail_mode", "Mail", "choice", ("log", "send"), "send needs the Resend key in the vault"),
     ("cart_fragments", "Mini-cart refresh", "choice", ("normal", "cache"), "cache keeps WooCommerce's empty-cart answer for visitors with no cart; nginx reloads"),
+    ("ai1wm_export", "Allow All-in-One WP Migration export", "bool", ("true", "false"), "restarts the stack: about ten seconds offline; on by default, and mounted only once All-in-One WP Migration is installed (approving its request applies it)"),
     ("label", "Label", "text", 100, "registry only: nothing is applied"),
     ("note", "Note", "text", 500, "registry only: nothing is applied"),
 ]
@@ -325,6 +326,46 @@ def register(app):
     @action
     def import_reset(name):
         return started(ask("import-reset", site=name, confirm_name=field("confirm_name", 60), req=field("req", 80)))
+
+    def site_state(name):
+        reply = ask("show", site=name)                          # an unknown site is a 404 here
+        return (reply.get("status") or {}).get("deployed") or (reply.get("registry") or {}).get("state")
+
+    @app.get("/sites/<name>/backups")
+    @page
+    def backups_page(name):
+        """The site's snapshots, newest first, each with a Restore button that opens a page of its own. wp-ctl reads the backup directory; a list that cannot be had is said, not an error page."""
+        state = site_state(name)
+        try:
+            rows, problem = [r for r in ask("backups", site=name).get("backups", []) if isinstance(r, dict) and isinstance(r.get("stamp"), str) and STAMP_RE.fullmatch(r["stamp"])], ""
+        except CtlError as e:
+            if e.kind not in ("failed", "refused"):
+                raise
+            rows, problem = [], str(e)
+        return render_template("backups.html", name=name, state=state, rows=rows, problem=problem)
+
+    @app.get("/sites/<name>/restore")
+    @page
+    def restore_confirm(name):
+        """The first step: what would be replaced, from which snapshot. Nothing starts here; the form on this page does, with the site's name typed."""
+        stamp = request.args.get("stamp", "")
+        if not STAMP_RE.fullmatch(stamp):
+            abort(400)
+        state = site_state(name)
+        snap = next((r for r in ask("backups", site=name).get("backups", []) if isinstance(r, dict) and r.get("stamp") == stamp), None)
+        if snap is None:
+            abort(404)
+        return render_template("restore_confirm.html", name=name, state=state, snap=snap, req=new_req())
+
+    @app.post("/sites/<name>/restore")
+    @action
+    def restore_site(name):
+        typed, stamp = field("confirm_name", 60), field("stamp", 20)
+        if typed != name:
+            return render_template("error.html", status=400, title="The form was not accepted", message="The name typed is not the site's name. Nothing was restored."), 400
+        if not STAMP_RE.fullmatch(stamp):
+            abort(400)
+        return started(ask("restore", site=name, stamp=stamp, confirm_name=typed, req=field("req", 80)))
 
     @app.get("/sites/<name>/plugins")
     @page

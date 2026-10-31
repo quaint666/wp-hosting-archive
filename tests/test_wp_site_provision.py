@@ -591,6 +591,45 @@ class SetAndState(Base):
                 self.make().set("alpha", sets)
         self.unchanged("a refused set")
 
+    MOUNT = "all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage"
+
+    def compose(self):
+        return (self.site_dir() / "compose.yml").read_text()
+
+    def plugin_dir(self):
+        return self.site_dir() / "html/wp-content/plugins/all-in-one-wp-migration"
+
+    def test_ai1wm_export_is_on_by_default_but_nothing_is_mounted_until_the_plugin_is_there(self):
+        self.assertTrue(self.cfg["defaults"]["ai1wm_export"], "on by default")
+        self.assertNotIn("ai1wm_export", self.record(), "the site follows the default")
+        self.assertNotIn("all-in-one-wp-migration", self.compose(), "no plugin directory, so no mount point for docker to make as root")
+        self.assertNotIn("AI1WM_", (self.site_dir() / "wp-config.php").read_text())
+        self.make().apply("alpha")
+        self.assertFalse(self.plugin_dir().exists(), "and nothing makes the plugin's directory")
+
+    def test_with_the_plugin_there_an_apply_makes_the_storage_directory_and_the_mount(self):
+        self.plugin_dir().mkdir(parents=True)
+        self.make().apply("alpha")
+        self.assertTrue((self.plugin_dir() / "storage").is_dir())
+        php = int(self.cfg["platform"]["wp_php_uid"])
+        self.assertIn((self.plugin_dir() / "storage", php, php), [(Path(a[0]), a[1], a[2]) for a in self.chowns])
+        self.assertIn(self.MOUNT, self.compose())
+        self.assertIn("define( 'AI1WM_DEFAULT_BACKUPS_PATH'", (self.site_dir() / "wp-config.php").read_text())
+
+    def test_a_site_that_turned_it_off_gets_no_mount_even_with_the_plugin(self):
+        self.plugin_dir().mkdir(parents=True)
+        self.make().set("alpha", ["ai1wm_export=false"])
+        self.assertNotIn("all-in-one-wp-migration", self.compose())
+        self.assertFalse((self.plugin_dir() / "storage").exists())
+
+    def test_a_plugin_that_is_removed_takes_the_mount_with_it_at_the_next_apply(self):
+        self.plugin_dir().mkdir(parents=True)
+        self.make().apply("alpha")
+        self.assertIn(self.MOUNT, self.compose())
+        shutil.rmtree(self.plugin_dir())
+        self.make().apply("alpha")
+        self.assertNotIn("all-in-one-wp-migration", self.compose(), "a mount of a missing directory would be remade by docker as root")
+
     def test_a_set_that_no_longer_fits_the_vm_is_refused_before_anything_is_written(self):
         self.before = self.record()
         with self.assertRaises(model.Refuse) as e:

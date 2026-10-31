@@ -39,6 +39,14 @@ define( 'WP_HOSTING_ALLOW_APP_PASSWORDS', {{ 'true' if wp_s.allow_app_passwords 
 define( 'WP_HOSTING_ALLOW_USER_ENUM', {{ 'true' if wp_s.allow_user_enum else 'false' }} );
 define( 'WP_HOSTING_2FA_ROLES', '{{ wp_2fa_roles }}' );
 define( 'WP_HOSTING_TIMING', {{ wp_php_timing | int }} );
+{% if wp_s.ai1wm_export %}
+
+// All-in-One WP Migration keeps its exports in the writable uploads directory (the default, wp-content/ai1wm-backups, is read-only here). nginx answers 403 for that folder.
+// __DIR__, not WP_CONTENT_DIR: WordPress defines that constant in wp-settings.php, after this file, and an undefined constant is a fatal error in PHP 8.
+define( 'AI1WM_DEFAULT_BACKUPS_PATH', __DIR__ . '/wp-content/uploads/ai1wm-backups' );
+// Read by the download gate (templates/wp/mu/60-wp-hosting-download-gate.php): only a site with the switch on answers a download request.
+define( 'WP_HOSTING_AI1WM_EXPORT', true );
+{% endif %}
 define( 'WP_HOSTING_PLUGIN_REQUESTS_MAX', {{ wp_plugin_requests_max | int }} );
 define( 'WP_HOSTING_MAIL_MODE', '{{ wp_s.mail_mode }}' );
 define( 'WP_HOSTING_MAIL_FROM', '{{ wp_s.name }} <{{ wp_s.name }}@{{ wp_mail_sender_domain }}>' );

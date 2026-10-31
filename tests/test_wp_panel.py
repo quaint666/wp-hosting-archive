@@ -67,7 +67,8 @@ class FakeCtl:
                 {"site": "alpha", "id": "aabbccdd0022", "slug": "shady", "user": "owner", "first_seen": T0 - 300, "state": "pending", "note": "", "name": "Shady", "version": "1.0", "found": True, "vuln": "found",
                  "vuln_line": "plugin shady 1.0: Shady - RCE (CVE-2026-9)"},
                 {"site": "bravo", "id": "aabbccdd0033", "slug": "ghost", "user": "x", "first_seen": T0 - 100, "state": "pending", "note": "", "found": False, "vuln": "unchecked", "vuln_line": "not on wordpress.org"},
-                {"site": "alpha", "id": "aabbccdd0044", "slug": "jetpack", "user": "owner", "first_seen": T0 - 86400, "state": "installed", "note": ""}]},
+                {"site": "alpha", "id": "aabbccdd0044", "slug": "jetpack", "user": "owner", "first_seen": T0 - 86400, "state": "installed", "note": ""},
+                {"site": "alpha", "id": "aabbccdd0055", "kind": "theme", "slug": "astra", "user": "owner", "first_seen": T0 - 90000, "state": "installed", "note": ""}]},
             "plugin-requests-collect": {"ok": True, "rc": 0, "ran": True, "out": "alpha: 1 request read, 0 new\n3 requests waiting\n"},
             "plugin-request-decide": {"ok": True, "rc": 0, "ran": True, "out": "installed akismet on alpha, inactive\n"},
             "plugin-set": {"ok": True, "rc": 0, "ran": True, "out": "Success: done.\npage cache: 12 files cleared\n"},
@@ -76,6 +77,10 @@ class FakeCtl:
             "import-run": {"ok": True, "job": JOB},
             "import-approve": {"ok": True, "job": JOB},
             "import-reset": {"ok": True, "job": JOB},
+            "backups": {"ok": True, "site": "alpha", "backups": [
+                {"stamp": "20261031T020000Z", "tag": "pre-update", "core": "7.1.4", "kbytes": 204800, "empty": False},
+                {"stamp": "20261030T020000Z", "tag": "", "core": "7.1.3", "kbytes": None, "empty": True}]},
+            "restore": {"ok": True, "job": JOB},
             "import-discard": {"ok": True, "rc": 0, "ran": True, "out": "removed a1.wpress from the intake directory\n"},
             "create": {"ok": True, "job": JOB},
             "delete": {"ok": True, "job": JOB},
@@ -155,7 +160,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/plugins", "/requests", "/sites/alpha/password"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/plugins", "/sites/alpha/backups", "/requests", "/sites/alpha/password"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -941,6 +946,13 @@ class RequestsPage(Base):
         self.assertIn("not on wordpress.org", ghost); self.assertNotIn('value="approve"', ghost, "nothing to approve: wordpress.org does not have it"); self.assertIn('value="deny"', ghost)
         self.assertIn("Decided or expired", html); self.assertIn("jetpack", html)
 
+    def test_a_theme_request_says_it_is_a_theme_and_a_request_without_a_kind_a_plugin(self):
+        html = self.get("/requests").get_data(as_text=True)
+        done = html.split("Decided or expired")[1]
+        theme = next(r for r in re.findall(r"<tr>(.*?)</tr>", done, re.S) if "astra" in r)
+        plugin = next(r for r in re.findall(r"<tr>(.*?)</tr>", done, re.S) if "jetpack" in r)
+        self.assertIn(">theme</span>", theme); self.assertIn(">plugin</span>", plugin)
+
     def test_text_from_a_request_is_shown_as_text(self):
         html = self.get("/requests").get_data(as_text=True)
         self.assertNotIn("<i>Anti-spam</i>", html); self.assertIn("&lt;i&gt;Anti-spam&lt;/i&gt;", html)
@@ -1358,6 +1370,64 @@ class Imports(Base):
         r = self.post("/sites/alpha/import/reset", {"confirm_name": "alpha", "req": "pr1"})
         self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
         self.assertEqual([a for v, a in self.ctl.calls if v == "import-reset"], [{"site": "alpha", "confirm_name": "alpha", "req": "pr1"}])
+
+
+class RestorePage(Base):
+    """The backups list and the restore: a page that lists starts nothing, a restore needs the site's name typed and the session's token, and only a stamp from the list reaches wp-ctl."""
+    STAMP = "20261031T020000Z"
+
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+
+    def post(self, path, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.csrf(path="/sites/alpha")
+        if token:
+            data["csrf"] = token
+        return self.c.post(path, data=data, base_url=BASE)
+
+    def test_the_backups_page_lists_the_snapshots_newest_first_with_a_button_each(self):
+        html = self.get("/sites/alpha/backups").get_data(as_text=True)
+        self.assertLess(html.index("2026-10-31 02:00"), html.index("2026-10-30 02:00"))
+        self.assertIn("before an update", html); self.assertIn("nightly", html); self.assertIn("empty site", html); self.assertIn("200.0 MB", html)
+        self.assertEqual(html.count("Restore…"), 2)
+        self.assertIn("/sites/alpha/restore?stamp=" + self.STAMP, html)
+        self.assertEqual([c for c in self.ctl.calls if c[0] == "restore"], [], "a page that lists starts nothing")
+
+    def test_a_stopped_site_has_no_restore_button_and_the_page_says_why(self):
+        self.ctl.replies["show"]["status"]["deployed"] = "stopped"
+        html = self.get("/sites/alpha/backups").get_data(as_text=True)
+        self.assertNotIn("Restore…", html); self.assertIn("Move it to hold first", html)
+
+    def test_a_list_that_cannot_be_had_is_said_on_the_page(self):
+        self.ctl.fail["backups"] = CtlError("failed", "the backup directory could not be read")
+        r = self.get("/sites/alpha/backups")
+        self.assertEqual(r.status_code, 200); self.assertIn("could not be read", r.get_data(as_text=True))
+
+    def test_the_confirm_page_names_the_snapshot_and_a_live_site_gets_the_maintenance_warning(self):
+        html = self.get("/sites/alpha/restore?stamp=" + self.STAMP).get_data(as_text=True)
+        self.assertIn("2026-10-31 02:00 UTC", html); self.assertIn("before an update", html); self.assertIn("maintenance page", html)
+        self.assertIn('name="stamp" value="%s"' % self.STAMP, html); self.assertIn('name="confirm_name"', html)
+        self.assertEqual([c for c in self.ctl.calls if c[0] == "restore"], [])
+
+    def test_a_stamp_that_is_not_one_or_not_in_the_list_is_refused_before_a_page_is_drawn(self):
+        for stamp in ("", "latest", "../x", self.STAMP + "x", "20261029T020000Z"):
+            self.assertIn(self.get("/sites/alpha/restore?stamp=" + stamp).status_code, (400, 404), stamp)
+
+    def test_the_restore_needs_the_site_name_typed_exactly_and_nothing_else_reaches_the_tool(self):
+        for typed in ("", "bravo", "Alpha", "alpha "):
+            self.assertEqual(self.post("/sites/alpha/restore", {"confirm_name": typed, "stamp": self.STAMP, "req": "pr1"}).status_code, 400, typed)
+        self.assertEqual(self.post("/sites/alpha/restore", {"confirm_name": "alpha", "stamp": "latest", "req": "pr1"}).status_code, 400)
+        self.assertEqual([c for c in self.ctl.calls if c[0] == "restore"], [])
+        r = self.post("/sites/alpha/restore", {"confirm_name": "alpha", "stamp": self.STAMP, "req": "pr1"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (303, "/jobs/" + JOB))
+        self.assertEqual([a for v, a in self.ctl.calls if v == "restore"], [{"site": "alpha", "stamp": self.STAMP, "confirm_name": "alpha", "req": "pr1"}])
+
+    def test_the_restore_form_needs_the_session_token(self):
+        self.assertIn(self.post("/sites/alpha/restore", {"confirm_name": "alpha", "stamp": self.STAMP, "req": "pr1"}, token=False).status_code, (400, 403))
+        self.assertEqual([c for c in self.ctl.calls if c[0] == "restore"], [])
 
 
 STAND_IN_SSH = """#!{python}

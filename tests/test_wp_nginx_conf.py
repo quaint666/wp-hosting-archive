@@ -89,6 +89,13 @@ class NginxAcceptsIt(unittest.TestCase):
         rc, err = self.check()
         self.assertEqual(rc, 0, err)
 
+    def test_the_ai1wm_download_gate_locations_are_accepted_by_nginx(self):
+        self.write_site("alpha", ai1wm_export=True)
+        text = (self.tmp / "conf.d" / "wp_site_alpha.conf").read_text()
+        self.assertIn("location ^~ /__wph_ai1wm/", text)
+        rc, err = self.check()
+        self.assertEqual(rc, 0, err)
+
     def test_the_check_really_fails_on_a_wrong_file(self):
         """A test that cannot fail proves nothing: break the rendered vhost three ways and nginx must refuse each."""
         for label, old, new in (("an unknown variable", "fastcgi_cache_bypass $wph_frag_skip;", "fastcgi_cache_bypass $wph_no_such_variable;"), ("an unknown directive", "fastcgi_cache_lock on;", "fastcgi_cache_lockk on;"),

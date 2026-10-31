@@ -99,6 +99,17 @@ class Provisioner:
     def site_dir(self, name):
         return Path(self.cfg["data_dir"]) / name
 
+    def ai1wm_dir(self, name):
+        return self.site_dir(name) / "html/wp-content/plugins/all-in-one-wp-migration"
+
+    def effective(self, site):
+        """The site as it is rendered. ai1wm_export (on by default) puts a writable mount inside the plugin's own directory, and Docker makes a missing mount point as a root-owned directory, which the
+        plugin's install would then refuse: so the switch counts only while the plugin's directory exists. Before the plugin is installed (and after it is removed) nothing is mounted; approving the
+        plugin's request applies the site (wp-plugin-requests) and the mount appears."""
+        if site.get("ai1wm_export") and not self.ai1wm_dir(site["name"]).is_dir():
+            return {**site, "ai1wm_export": False}
+        return site
+
     def secrets(self):
         try:
             master = renderer.read_secret_file(self.cfg["master_secret_file"])
@@ -112,7 +123,7 @@ class Provisioner:
         """The rendered files of a site (merged over the defaults), or Failed with the reason: no secret file, a value the platform lacks, a field a template reads that the site does not have."""
         master, resend = self.secrets()
         try:
-            return renderer.Renderer(self.cfg["template_dir"], self.platform, master, resend).files(site)
+            return renderer.Renderer(self.cfg["template_dir"], self.platform, master, resend).files(self.effective(site))
         except renderer.RenderError as e:
             raise Failed(str(e))
 
@@ -333,6 +344,8 @@ class Provisioner:
                      SEED_SCRIPT.format(php=p["wp_php_uid"]), timeout=300)
             note("seeded WordPress core from the image")
         (d / "html/wp-config-docker.php").unlink(missing_ok=True)
+        if self.effective(site)["ai1wm_export"]:
+            self.ensure_dir(self.ai1wm_dir(name) / "storage", p["wp_php_uid"], p["wp_php_uid"], 0o755)
 
         wrote = {fname: self.put(by[fname]) for fname in (".env", "wp-config.php", "php.ini", "fpm-pool.conf", "compose.yml")}
         for fname, changed in wrote.items():

@@ -12,7 +12,7 @@ root never opens a file the site controls. EVERYTHING in the site's option is th
 max_pending_per_site waiting, and nothing is trusted to be on wordpress.org until wordpress.org says so (wp-site-cli ... plugin search). A request that is not found there, that names a plugin version in the vulnerability
 index, or whose check could not be run has NO Approve button on the phone: "not checked" is never a pass. At the control page it can still be approved on purpose, by typing the plugin's name (--accept-risk).
 
-Approve installs the plugin from wordpress.org by slug with wp-site-ext (checksum checked, removed again if it does not match), INACTIVE: activating runs the plugin's code, and that stays the administrator's or the
+A request is for a plugin (the default) or a theme (`kind` "theme": the same rules, `theme search`, `wp-vulnfeed check-theme`, `wp-site-ext <site> theme install`). Approve installs the plugin or theme from wordpress.org by slug with wp-site-ext (checksum checked, removed again if it does not match), INACTIVE: activating runs the plugin's code, and that stays the administrator's or the
 operator's own step. Then the page cache is cleared (wp_ctl.purge_page_cache) and the result is written back for the site's administrator to read. A token is single use and bound to one request.
 Exit status: 0 done, 1 the install failed, 2 refused or usage, 3 nothing could be read at all."""
 import fcntl
@@ -38,6 +38,8 @@ VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+_-]{0,39}\Z")
 DAY = 86400
 PENDING, INSTALLING, INSTALLED, FAILED, DENIED, EXPIRED = "pending", "installing", "installed", "failed", "denied", "expired"
 KEEP_FINISHED_DAYS = 60
+KINDS = ("plugin", "theme")
+APPLY_AFTER = ("all-in-one-wp-migration",)      # plugins whose directory a site mounts something into (templates/wp/site_compose.yml.j2, ai1wm_export): the site is applied once they are installed
 RESULTS_KEEP = 50
 
 
@@ -81,8 +83,9 @@ def key_of(site, rid):
     return "%s:%s" % (site, rid)
 
 
-def identity_sha(site, slug, rid):
-    return hashlib.sha256(("plugin-request:%s:%s:%s" % (site, slug, rid)).encode()).hexdigest()
+def identity_sha(site, slug, rid, kind="plugin"):
+    """What a token is bound to. A plugin request keeps the form it always had (tokens in flight stay good); a theme request has its own, so neither kind's token fits the other."""
+    return hashlib.sha256((("plugin-request:%s:%s:%s" if kind == "plugin" else kind + "-request:%s:%s:%s") % (site, slug, rid)).encode()).hexdigest()
 
 
 def audit(cfg, run, text):
@@ -123,10 +126,12 @@ def clean_entry(raw):
     """A request as the plugin writes it, or None. The id, the slug, the time and the user name must be the shapes the plugin makes; anything else is dropped without a word."""
     if not isinstance(raw, dict):
         return None
-    rid, slug, t, user = raw.get("id"), raw.get("slug"), raw.get("t"), raw.get("user", "")
+    rid, slug, t, user, kind = raw.get("id"), raw.get("slug"), raw.get("t"), raw.get("user", ""), raw.get("kind", "plugin")
+    if kind not in KINDS:
+        return None
     if not (isinstance(rid, str) and ID_RE.fullmatch(rid) and isinstance(slug, str) and SLUG_RE.fullmatch(slug) and isinstance(t, int) and not isinstance(t, bool) and t > 0):
         return None
-    return {"id": rid, "slug": slug, "t": t, "user": USER_RE.sub("", user)[:60] if isinstance(user, str) else ""}
+    return {"id": rid, "slug": slug, "t": t, "kind": kind, "user": USER_RE.sub("", user)[:60] if isinstance(user, str) else ""}
 
 
 def sites_to_ask(cfg, only=None):
@@ -179,9 +184,11 @@ def write_result(cfg, run, site, rid, status, note):
 
 # ---- looking a plugin up before anyone is asked to approve it
 
-def lookup(cfg, run, site, slug):
-    """{name, version, installs, rating, updated} of the plugin wordpress.org has under exactly this slug, or None when it has none; raises Refuse when wordpress.org could not be asked."""
-    rc, text = cli(cfg, run, site, "plugin", "search", slug, "--per-page=10", "--fields=slug,name,version,rating,active_installs,last_updated", "--format=json", "--skip-plugins", "--skip-themes")
+def lookup(cfg, run, site, slug, kind="plugin"):
+    """{name, version, installs, rating, updated} of the plugin or theme wordpress.org has under exactly this slug, or None when it has none; raises Refuse when wordpress.org could not be asked.
+    A theme has no install count or update date in the answer: those two stay empty."""
+    fields = "slug,name,version,rating,active_installs,last_updated" if kind == "plugin" else "slug,name,version,rating"
+    rc, text = cli(cfg, run, site, kind, "search", slug, "--per-page=10", "--fields=" + fields, "--format=json", "--skip-plugins", "--skip-themes")
     rows = json_line(text)
     if rc != 0 or not isinstance(rows, list):
         raise Refuse("wordpress.org could not be asked about %s (status %d)" % (slug, rc))
@@ -193,17 +200,22 @@ def lookup(cfg, run, site, slug):
     return None
 
 
-def vulnerabilities(cfg, run, slug, version):
+def vulnerabilities(cfg, run, slug, version, kind="plugin"):
     """('clean'|'found'|'unchecked', one line). Exit codes are wp-vulnfeed's: 0 nothing known, 1 found, 3 not run; a version it cannot name is unchecked."""
     if not version:
         return "unchecked", "no version to check"
     try:
-        p = run([os.path.join(cfg["tools_bin"], "wp-vulnfeed"), "check-plugin", slug, version], capture_output=True, text=True, timeout=cfg["cli_timeout_s"], stdin=subprocess.DEVNULL)
+        p = run([os.path.join(cfg["tools_bin"], "wp-vulnfeed"), "check-" + kind, slug, version], capture_output=True, text=True, timeout=cfg["cli_timeout_s"], stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as e:
         return "unchecked", "the vulnerability check could not run (%s)" % w.printable(e, limit=60)
     lines = [l for l in ((p.stdout or "") + "\n" + (p.stderr or "")).splitlines() if l.strip()]
     first = w.printable(lines[0], limit=200) if lines else "no output"
     return ("clean" if p.returncode == 0 else "found" if p.returncode == 1 else "unchecked"), first
+
+
+def named(kind, slug):
+    """How a message names what was asked for: a plugin by its slug, as it always was, a theme as 'theme <slug>'."""
+    return slug if kind == "plugin" else "%s %s" % (kind, slug)
 
 
 def can_approve_by_phone(entry):
@@ -221,7 +233,7 @@ def message_body(entry):
         bits.append("NOT FOUND on wordpress.org under that name")
     bits.append({"clean": "Vulnerabilities: none known.", "found": "Vulnerabilities: " + entry.get("vuln_line", "?"), "unchecked": "Vulnerabilities: NOT CHECKED (%s)." % entry.get("vuln_line", "?")}.get(entry.get("vuln"), "Vulnerabilities: ?"))
     bits.append("Approve installs it inactive; they activate it." if can_approve_by_phone(entry) else "No Approve button: decide at the control page, where it can still be approved on purpose.")
-    return "%s asks to install %s on %s.\n%s" % (entry.get("user") or "someone", entry["slug"], entry["site"], "\n".join(bits))
+    return "%s asks to install %s on %s.\n%s" % (entry.get("user") or "someone", named(entry.get("kind", "plugin"), entry["slug"]), entry["site"], "\n".join(bits))
 
 
 def notify(cfg, entry, now, post):
@@ -234,13 +246,13 @@ def notify(cfg, entry, now, post):
         url, ask_topic = ap.read_conf(a["ntfy_conf"])
         sender = ap.sender_auth(a["netrc"], url)
         button = ap.approver_auth(a["approver_file"])
-        sha = identity_sha(entry["site"], entry["slug"], entry["id"])
+        sha = identity_sha(entry["site"], entry["slug"], entry["id"], entry.get("kind", "plugin"))
         tokens, issued = {}, {}
         for action in (("approve",) if can_approve_by_phone(entry) else ()) + ("deny",):
             tokens[action], nonce = ap.mint_plugin(key, entry["site"], action, sha, a["ttl_s"], now)
             issued[nonce] = action
         (post or ap.post_json)(url, sender, ap.build_message(url, ask_topic, a["reply_topic"], button, entry["site"], message_body(entry), tokens,
-                                                              title="Plugin request: %s" % entry["site"], tags=["jigsaw"]))
+                                                              title="%s request: %s" % (entry.get("kind", "plugin").capitalize(), entry["site"]), tags=["jigsaw"]))
         entry["tokens"] = issued
         return ""
     except ap.ApprovalError as e:
@@ -276,7 +288,7 @@ def cmd_collect(cfg, only, notify_phone, out, run, clock, post):
                 key = key_of(site, raw["id"])
                 if key in store or now - raw["t"] > cfg["expire_days"] * DAY or raw["t"] > now + DAY:
                     continue
-                if any(e["site"] == site and e["slug"] == raw["slug"] and e["state"] in (PENDING, INSTALLING) for e in store.values()) or waiting >= cfg["max_pending_per_site"]:
+                if any(e["site"] == site and e["slug"] == raw["slug"] and e.get("kind", "plugin") == raw["kind"] and e["state"] in (PENDING, INSTALLING) for e in store.values()) or waiting >= cfg["max_pending_per_site"]:
                     continue
                 store[key] = dict(raw, site=site, first_seen=now, state=PENDING, note="", tokens={}, notified=False)
                 waiting += 1
@@ -286,14 +298,14 @@ def cmd_collect(cfg, only, notify_phone, out, run, clock, post):
             if e["state"] != PENDING or "found" in e:
                 continue
             try:                                           # who it is and whether it is known to be bad, once, when it first appears
-                info = lookup(cfg, run, e["site"], e["slug"])
+                info = lookup(cfg, run, e["site"], e["slug"], e.get("kind", "plugin"))
             except Refuse as err:
                 e["note"] = str(err)
                 continue
             e["found"] = info is not None
             if info:
                 e.update(info)
-                e["vuln"], e["vuln_line"] = vulnerabilities(cfg, run, e["slug"], info["version"])
+                e["vuln"], e["vuln_line"] = vulnerabilities(cfg, run, e["slug"], info["version"], e.get("kind", "plugin"))
             else:
                 e["vuln"], e["vuln_line"] = "unchecked", "not on wordpress.org"
         if notify_phone:
@@ -319,12 +331,23 @@ def cmd_list(cfg, out):
     rows = []
     for e in store.values():
         rows.append({k: e.get(k) for k in ("site", "id", "slug", "user", "t", "first_seen", "state", "note", "name", "version", "installs", "rating", "updated", "found", "vuln", "vuln_line", "notified")})
+        rows[-1]["kind"] = e.get("kind", "plugin")
     rows.sort(key=lambda r: (r["state"] != PENDING, -(r["first_seen"] or 0)))
     out(json.dumps({"ok": True, "requests": rows[:200]}, sort_keys=True))
     return 0
 
 
 # ---- deciding
+
+def apply_site(cfg, run, site):
+    """Apply a site's record so a mount that waited for a plugin is made (wp-site-provision restarts the stack: about ten seconds). A failure is said, never raised: the install stands."""
+    try:
+        p = run([os.path.join(cfg["tools_bin"], "wp-site-provision"), "apply", site], capture_output=True, text=True, timeout=cfg["install_timeout_s"], stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as err:
+        return "the site could not be applied (%s): run wp-site-provision apply %s" % (w.printable(err, limit=60), site)
+    lines = [l for l in ((p.stdout or "") + (p.stderr or "")).splitlines() if l.strip()]
+    return "applied %s" % site if p.returncode == 0 else "applying %s failed (status %d): %s" % (site, p.returncode, w.printable(lines[-1], limit=120) if lines else "no output")
+
 
 def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
     """Approve or deny one waiting request. `by` is 'panel' or 'phone' (for the journal). Returns the exit status."""
@@ -337,13 +360,13 @@ def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
             raise Refuse("there is no such request")
         if e["state"] != PENDING:
             raise Refuse("this request is %s, not waiting" % e["state"])
-        slug = e["slug"]
+        slug, kind = e["slug"], e.get("kind", "plugin")
         if decision == "deny":
             e["state"], e["tokens"], e["note"] = DENIED, {}, ""
             save(cfg, store)
-            audit(cfg, run, "site=%s request=%s slug=%s decision=deny by=%s" % (site, rid, slug, by))
+            audit(cfg, run, "site=%s request=%s kind=%s slug=%s decision=deny by=%s" % (site, rid, kind, slug, by))
             problem = write_result(cfg, run, site, rid, DENIED, "")
-            out("denied %s for %s" % (slug, site) + ((" (%s)" % problem) if problem else ""))
+            out("denied %s for %s" % (named(kind, slug), site) + ((" (%s)" % problem) if problem else ""))
             return 0
         if not e.get("found"):
             raise Refuse("%s is not on wordpress.org under that name: nothing to install" % slug)
@@ -352,9 +375,9 @@ def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
                 raise Refuse("%s has %s (%s): approve it only on purpose, from the control page, by typing its name" % (slug, "a known vulnerability" if e.get("vuln") == "found" else "no vulnerability check", e.get("vuln_line", "?")))
         e["state"], e["tokens"] = INSTALLING, {}
         save(cfg, store)                                   # saved before the install starts: a second approval finds it taken
-        audit(cfg, run, "site=%s request=%s slug=%s decision=approve by=%s%s" % (site, rid, slug, by, " accept-risk" if not can_approve_by_phone(e) else ""))
+        audit(cfg, run, "site=%s request=%s kind=%s slug=%s decision=approve by=%s%s" % (site, rid, kind, slug, by, " accept-risk" if not can_approve_by_phone(e) else ""))
         try:
-            p = run([os.path.join(cfg["tools_bin"], "wp-site-ext"), site, "plugin", "install", slug], capture_output=True, text=True, timeout=cfg["install_timeout_s"], stdin=subprocess.DEVNULL)
+            p = run([os.path.join(cfg["tools_bin"], "wp-site-ext"), site, kind, "install", slug], capture_output=True, text=True, timeout=cfg["install_timeout_s"], stdin=subprocess.DEVNULL)
             rc, text = p.returncode, (p.stdout or "") + (p.stderr or "")
         except subprocess.TimeoutExpired:
             rc, text = 124, "the install did not finish in time"
@@ -366,7 +389,9 @@ def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
         cleared = wp_ctl.purge_page_cache(cfg) if rc == 0 else None
         save(cfg, store)
         problem = write_result(cfg, run, site, rid, e["state"], e["note"])
-        out(("installed %s on %s, inactive" % (slug, site) + (("; page cache: %d files cleared" % cleared) if cleared is not None else "")) if rc == 0 else "the install of %s on %s failed: %s" % (slug, site, last))
+        if rc == 0 and kind == "plugin" and slug in APPLY_AFTER:
+            out(apply_site(cfg, run, site))
+        out(("installed %s on %s, inactive" % (named(kind, slug), site) + (("; page cache: %d files cleared" % cleared) if cleared is not None else "")) if rc == 0 else "the install of %s on %s failed: %s" % (named(kind, slug), site, last))
         if problem:
             out(problem)
         return 0 if rc == 0 else 1
@@ -383,7 +408,7 @@ def cmd_resolve(cfg, token, out, run, clock):
         raise Refuse("token refused: %s" % e)
     with locked(cfg):
         store = load(cfg)
-        mine = [e for e in store.values() if e["site"] == d["s"] and identity_sha(e["site"], e["slug"], e["id"]) == d["r"]]
+        mine = [e for e in store.values() if e["site"] == d["s"] and identity_sha(e["site"], e["slug"], e["id"], e.get("kind", "plugin")) == d["r"]]
         if not mine:
             raise Refuse("token refused: it was not issued for a request this host remembers")
         e = mine[0]
