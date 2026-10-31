@@ -798,10 +798,10 @@ class Actions(Base):
         self.ctl.replies["show"]["registry"].update(php_mem_mb=640, update_policy="freeze", allow_xmlrpc=False, note="n")
         html = self.text("/sites/alpha")
         forms = re.findall(r'<form method="post" action="/sites/alpha/set".*?</form>', html, re.S)
-        self.assertEqual([re.search(r'name="key" value="([a-z_]+)"', f).group(1) for f in forms], list(SET_KEYS))
+        self.assertEqual([re.search(r'name="key" value="([a-z0-9_]+)"', f).group(1) for f in forms], list(SET_KEYS))
         self.assertEqual(len({re.search(r'name="req" value="([^"]+)"', f).group(1) for f in forms}), len(SET_KEYS))
         self.assertTrue(all('name="csrf" value="' in f for f in forms))
-        by = {re.search(r'name="key" value="([a-z_]+)"', f).group(1): f for f in forms}
+        by = {re.search(r'name="key" value="([a-z0-9_]+)"', f).group(1): f for f in forms}
         self.assertIn('value="640"', by["php_mem_mb"])
         self.assertRegex(by["update_policy"], r'<option value="freeze" selected>')
         self.assertRegex(by["allow_xmlrpc"], r'<option value="false" selected>')
@@ -1748,7 +1748,7 @@ class ReadOnly(Base):
         rules = sorted((r.rule, tuple(sorted(m for m in r.methods if m not in ("HEAD", "OPTIONS")))) for r in self.app.url_map.iter_rules())
         self.assertEqual(rules, sorted([("/", ("GET",)), ("/audit", ("GET",)), ("/import", ("GET",)), ("/import/discard", ("POST",)), ("/import/files/<file>", ("PUT",)), ("/import/run", ("POST",)),
                                         ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
-                                        ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
+                                        ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/backups", ("GET",)), ("/sites/<name>/delete", ("POST",)), ("/sites/<name>/restore", ("GET",)), ("/sites/<name>/restore", ("POST",)),
                                         ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/rescan", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
                                         ("/requests", ("GET",)), ("/requests/decide", ("POST",)), ("/requests/refresh", ("POST",)), ("/sites/<name>/plugins", ("GET",)), ("/sites/<name>/plugins", ("POST",)), ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/sites/<name>/updates/apply", ("POST",)), ("/sites/<name>/updates/check", ("POST",)),
