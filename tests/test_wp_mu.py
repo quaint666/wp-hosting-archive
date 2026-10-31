@@ -164,7 +164,9 @@ class WpConfigAndCompose(unittest.TestCase):
     def test_the_ai1wm_backups_path_is_set_only_when_the_export_switch_is_on(self):
         self.assertNotIn("AI1WM_", self.cfg())
         self.assertFalse(self.v["wp_site_defaults"]["ai1wm_export"])
-        self.assertIn("define( 'AI1WM_DEFAULT_BACKUPS_PATH', WP_CONTENT_DIR . '/uploads/ai1wm-backups' );", self.cfg(ai1wm_export=True))
+        t = self.cfg(ai1wm_export=True)
+        self.assertIn("define( 'AI1WM_DEFAULT_BACKUPS_PATH', __DIR__ . '/wp-content/uploads/ai1wm-backups' );", t)
+        self.assertNotIn("WP_CONTENT_DIR .", t.split("wp-settings.php")[0].replace("// __DIR__, not WP_CONTENT_DIR", ""), "WP_CONTENT_DIR is defined by wp-settings.php: before it, the constant is undefined and PHP 8 stops with a fatal error")
 
     def test_the_key_is_in_the_config_only_in_send_mode(self):
         self.assertNotIn("WP_HOSTING_MAIL_KEY", self.cfg(mail_mode="log"))
