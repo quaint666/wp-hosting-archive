@@ -166,6 +166,7 @@ wp_provision_platform_vars:
   - wp_php_realpath_ttl_s
   - wp_php_timing
   - wp_php_uid
+  - wp_plugin_requests_max
   - wp_stack_start_timeout_s
   - wp_stack_stop_timeout_s
   - wp_unit_dir
@@ -350,3 +351,5 @@ wp_login_window_s: 900
 wp_mail_sender_domain: "mail.{{ wp_domain }}"
 wp_mail_per_hour: 20
 wp_mail_per_day: 60
+# Plugin requests (templates/wp/mu/50-wp-hosting-plugin-requests.php): how many a site may have waiting for the operator at once. 0 turns the feature off (wp-admin has no Add New, as before).
+wp_plugin_requests_max: 5

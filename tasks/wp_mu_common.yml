@@ -2,7 +2,7 @@
 # tasks/wp_mu_common.yml
 # The must-use plugins of the hosting service on dellwp: one root-owned directory (wp_mu_dir) that every site's php container mounts read-only at /var/www/wp-mu and names as WPMU_PLUGIN_DIR in its
 # wp-config.php. Imported with import_tasks from tasks/wp_sites_common.yml (a bind mount of a missing directory would make Docker create it as root).
-# Holds: the login throttle (10-), the Two Factor plugin pinned by version and checksum with its loader (20-), the mail plugin (30-). The sources are templates/wp/mu/; tests/php/ runs them.
+# Holds: the login throttle (10-), the Two Factor plugin pinned by version and checksum with its loader (20-), the mail plugin (30-), the timing plugin (40-), the plugin-request screen (50-). The sources are templates/wp/mu/; tests/php/ runs them.
 # Secret: dellwp_wp_resend_key (host_vars/dellwp/vault_wp.yml), needed only while a site has mail_mode: send (wp-site-provision refuses such a site without the key file).
 # Check mode cannot show: the download, the unpack, or whether PHP accepts these files; tests/php/run_all.php and the rehearsal do.
 
@@ -74,6 +74,7 @@
     - 10-wp-hosting-login.php
     - 30-wp-hosting-mail.php
     - 40-wp-hosting-timing.php
+    - 50-wp-hosting-plugin-requests.php
 
 - name: Deploy the Two Factor loader
   ansible.builtin.template:

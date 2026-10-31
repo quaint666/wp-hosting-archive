@@ -21,7 +21,7 @@ from test_wp_backup import Base  # noqa: E402
 from test_wp_sites_render import ROOT, base_vars, env, load, site_vars  # noqa: E402
 
 MU = ROOT / "templates/wp/mu"
-FILES = ("10-wp-hosting-login.php", "20-wp-hosting-two-factor.php.j2", "30-wp-hosting-mail.php", "40-wp-hosting-timing.php")
+FILES = ("10-wp-hosting-login.php", "20-wp-hosting-two-factor.php.j2", "30-wp-hosting-mail.php", "40-wp-hosting-timing.php", "50-wp-hosting-plugin-requests.php")
 BANNED = ("eval", "exec", "system", "shell_exec", "passthru", "proc_open", "popen", "assert", "create_function", "unserialize", "file_put_contents", "fopen", "curl_exec", "extract",
           "call_user_func", "preg_replace_callback", "base64_decode", "move_uploaded_file", "chmod", "unlink")
 
@@ -113,6 +113,15 @@ class Shape(unittest.TestCase):
         self.assertIn("wph_mail_setting( 'WP_HOSTING_MAIL_KEY'", (MU / "30-wp-hosting-mail.php").read_text())
         self.assertNotIn("update_option( 'wph_mail_key'", mail)
 
+    def test_the_plugin_request_screen_answers_before_wordpress_and_never_installs_anything(self):
+        text = (MU / "50-wp-hosting-plugin-requests.php").read_text()
+        c = code_only(text)
+        self.assertIn("add_action( 'wp_ajax_install-plugin', 'wph_pr_ajax', 0 );", text, "WordPress registers its own handler at priority 1: this one must come first")
+        self.assertIn("'upload-plugin' === $action", text)
+        for forbidden in ("Plugin_Upgrader", "plugins_api", "WP_Filesystem", "download_url", "unzip_file", "activate_plugin", "wp_remote_get", "wp_remote_post"):
+            self.assertNotIn(forbidden, c, "this file files requests; it installs, downloads and activates nothing")
+        self.assertEqual(re.findall(r"update_option\(\s*'(\w+)'", text), ["wph_plugin_requests"], "the site writes only its own option; the host's answers are another one")
+
     def test_the_visitor_address_is_only_ever_remote_addr(self):
         c = code_only(rendered("10-wp-hosting-login.php"))
         self.assertIn("REMOTE_ADDR", (MU / "10-wp-hosting-login.php").read_text())
@@ -135,7 +144,7 @@ class WpConfigAndCompose(unittest.TestCase):
         v = self.v
         self.assertIn("define( 'WPMU_PLUGIN_DIR', '%s' );" % v["wp_mu_mount"], t)
         for name, want in (("WP_HOSTING_LOGIN_LIMIT_IP", v["wp_login_limit_ip"]), ("WP_HOSTING_LOGIN_LIMIT_USER", v["wp_login_limit_user"]), ("WP_HOSTING_LOGIN_WINDOW_S", v["wp_login_window_s"]),
-                           ("WP_HOSTING_MAIL_PER_HOUR", v["wp_mail_per_hour"]), ("WP_HOSTING_MAIL_PER_DAY", v["wp_mail_per_day"])):
+                           ("WP_HOSTING_MAIL_PER_HOUR", v["wp_mail_per_hour"]), ("WP_HOSTING_MAIL_PER_DAY", v["wp_mail_per_day"]), ("WP_HOSTING_PLUGIN_REQUESTS_MAX", v["wp_plugin_requests_max"])):
             self.assertIn("define( '%s', %d );" % (name, want), t)
         self.assertIn("define( 'WP_HOSTING_2FA_ROLES', '%s' );" % v["wp_2fa_roles"], t)
         self.assertLess(t.index("WPMU_PLUGIN_DIR"), t.index("wp-settings.php"), "defined before WordPress loads its plugins")
