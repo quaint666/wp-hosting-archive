@@ -39,6 +39,11 @@ define( 'WP_HOSTING_ALLOW_APP_PASSWORDS', {{ 'true' if wp_s.allow_app_passwords 
 define( 'WP_HOSTING_ALLOW_USER_ENUM', {{ 'true' if wp_s.allow_user_enum else 'false' }} );
 define( 'WP_HOSTING_2FA_ROLES', '{{ wp_2fa_roles }}' );
 define( 'WP_HOSTING_TIMING', {{ wp_php_timing | int }} );
+{% if wp_s.ai1wm_export %}
+
+// All-in-One WP Migration keeps its exports in the writable uploads directory (the default, wp-content/ai1wm-backups, is read-only here). nginx answers 403 for that folder.
+define( 'AI1WM_DEFAULT_BACKUPS_PATH', WP_CONTENT_DIR . '/uploads/ai1wm-backups' );
+{% endif %}
 define( 'WP_HOSTING_PLUGIN_REQUESTS_MAX', {{ wp_plugin_requests_max | int }} );
 define( 'WP_HOSTING_MAIL_MODE', '{{ wp_s.mail_mode }}' );
 define( 'WP_HOSTING_MAIL_FROM', '{{ wp_s.name }} <{{ wp_s.name }}@{{ wp_mail_sender_domain }}>' );

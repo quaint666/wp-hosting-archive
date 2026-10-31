@@ -50,7 +50,7 @@ REQUEST_KEYS = ("site", "id", "slug", "user", "t", "first_seen", "state", "note"
 PLUGIN_STATUSES = ("active", "inactive", "active-network", "must-use", "dropin", "parent")
 PLUGIN_MAX = 300                                                              # the most plugins one reply lists
 BACKUP_TAGS = ("pre-update", "final", "pre-import")
-SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
+SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "ai1wm_export", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
 STATES = ("hold", "live", "stopped")
 ANY_RE = re.compile(r".*", re.S)                                              # `set` takes any text here: the tool holds the rule of each field, and a refusal of it is a refusal of the job
 SET_VALUE_MAX = 500                                                           # the longest value of any field (a site's note)

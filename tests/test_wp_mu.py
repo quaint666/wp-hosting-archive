@@ -161,6 +161,11 @@ class WpConfigAndCompose(unittest.TestCase):
         d = self.v["wp_site_defaults"]
         self.assertEqual((d["allow_xmlrpc"], d["allow_app_passwords"], d["allow_user_enum"], d["mail_mode"]), (False, False, False, "log"))
 
+    def test_the_ai1wm_backups_path_is_set_only_when_the_export_switch_is_on(self):
+        self.assertNotIn("AI1WM_", self.cfg())
+        self.assertFalse(self.v["wp_site_defaults"]["ai1wm_export"])
+        self.assertIn("define( 'AI1WM_DEFAULT_BACKUPS_PATH', WP_CONTENT_DIR . '/uploads/ai1wm-backups' );", self.cfg(ai1wm_export=True))
+
     def test_the_key_is_in_the_config_only_in_send_mode(self):
         self.assertNotIn("WP_HOSTING_MAIL_KEY", self.cfg(mail_mode="log"))
         self.assertNotIn("re_testkey123", self.cfg(mail_mode="log"))

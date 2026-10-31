@@ -63,6 +63,11 @@ services:
     volumes:
       - ./html:/var/www/html:ro
       - ./html/wp-content/uploads:/var/www/html/wp-content/uploads
+{% if wp_s.ai1wm_export %}
+      # All-in-One WP Migration's export scratch directory: the one place under the plugins that php may write (the plugin cannot be told another path). wp-site-provision makes it, and refuses
+      # the switch until the plugin's own directory exists, because a missing mount point is made by docker as a root-owned directory that the plugin install would then trip over.
+      - ./html/wp-content/plugins/all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage
+{% endif %}
       - ./wp-config.php:/var/www/html/wp-config.php:ro
       - {{ wp_mu_dir }}:{{ wp_mu_mount }}:ro
       - ./php.ini:/usr/local/etc/php/conf.d/zz-site.ini:ro

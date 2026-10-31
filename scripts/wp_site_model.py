@@ -38,6 +38,7 @@ EDITABLE = {
     "allow_user_enum": ("bool",),
     "mail_mode": ("choice", MAIL_MODES),
     "cart_fragments": ("choice", CART_MODES),
+    "ai1wm_export": ("bool",),                                                # a writable storage mount for All-in-One WP Migration's export; refused until the plugin is installed (wp-site-provision)
     "label": ("text", 100),
     "note": ("text", 500),
 }

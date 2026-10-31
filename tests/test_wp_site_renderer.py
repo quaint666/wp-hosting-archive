@@ -171,6 +171,20 @@ class Parity(unittest.TestCase):
         self.assertNotIn("open_basedir", ini, "off means the line is not there, not an empty value")
         self.assertIn("opcache.memory_consumption", ini, "the lines after it are still there")
 
+    def test_ai1wm_export_adds_the_storage_mount_and_the_two_nginx_blocks_only_when_on(self):
+        rr = r.Renderer(TEMPLATES, platform(), MASTER, RESEND)
+
+        def files(**site):
+            out = rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], **site})
+            return {f["path"].rsplit("/", 1)[1]: f["content"] for f in out}
+        off, on = files(), files(ai1wm_export=True)
+        self.assertNotIn("all-in-one-wp-migration", off["compose.yml"] + off["wp_site_alpha.conf"])
+        self.assertIn("./html/wp-content/plugins/all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage", on["compose.yml"])
+        self.assertNotIn(":ro", [ln for ln in on["compose.yml"].splitlines() if "all-in-one-wp-migration/storage" in ln and not ln.lstrip().startswith("#")][0])
+        for needle in ("location ~* ^/wp-content/plugins/all-in-one-wp-migration/storage/ {", "location ~* ^/wp-content/uploads/ai1wm-backups/ {"):
+            self.assertIn(needle, on["wp_site_alpha.conf"])
+            self.assertIn("return 403;", on["wp_site_alpha.conf"].split(needle)[1].split("}")[0])
+
     def test_cart_fragments_cache_is_its_own_location_and_only_when_asked(self):
         def vhost(state="live", extra=None, **site):
             rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)

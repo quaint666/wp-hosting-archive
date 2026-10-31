@@ -34,7 +34,7 @@ def record(name="alpha", port=9101, quota_id=1001, state="hold", **more):
 
 class Fields(unittest.TestCase):
     def test_every_editable_field_has_a_rule_and_a_range_the_page_can_rely_on(self):
-        self.assertEqual(set(m.EDITABLE), {"update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note"})
+        self.assertEqual(set(m.EDITABLE), {"update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "ai1wm_export", "label", "note"})
         self.assertNotIn("state", m.EDITABLE)
 
     def test_the_boundaries_of_every_number_and_the_values_that_are_not_numbers(self):
@@ -54,7 +54,7 @@ class Fields(unittest.TestCase):
             self.assertEqual(m.validate_value(key, good), (good, None))
             self.assertIsNotNone(m.validate_value(key, bad)[1])
             self.assertIsNotNone(m.validate_value(key, "")[1])
-        for key in ("allow_xmlrpc", "allow_app_passwords", "allow_user_enum"):
+        for key in ("allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "ai1wm_export"):
             self.assertEqual(m.validate_value(key, "true"), (True, None))
             self.assertEqual(m.validate_value(key, "false"), (False, None))
             for bad in ("yes", "1", "True", "FALSE", ""):

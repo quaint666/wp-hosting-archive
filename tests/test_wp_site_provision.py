@@ -591,6 +591,33 @@ class SetAndState(Base):
                 self.make().set("alpha", sets)
         self.unchanged("a refused set")
 
+    def test_ai1wm_export_is_refused_until_the_plugin_is_installed_and_nothing_is_written(self):
+        self.before = self.record()
+        with self.assertRaises(model.Refuse) as e:
+            self.make().set("alpha", ["ai1wm_export=true"])
+        self.assertIn("installed", str(e.exception))
+        self.unchanged("a set that needs the plugin")
+        self.make().set("alpha", ["ai1wm_export=false"])      # off is always allowed (and already the case: nothing to do)
+        with self.assertRaises(model.Refuse):
+            self.make().create("beta", ["ai1wm_export=true"])
+        self.assertFalse((self.site_dir("beta")).exists(), "a refused create leaves nothing")
+
+    def test_ai1wm_export_with_the_plugin_there_makes_the_storage_directory_and_mounts_it(self):
+        plugin = self.site_dir() / "html/wp-content/plugins/all-in-one-wp-migration"
+        plugin.mkdir(parents=True)
+        self.make().set("alpha", ["ai1wm_export=true"])
+        self.assertTrue((plugin / "storage").is_dir())
+        php = int(self.cfg["platform"]["wp_php_uid"])
+        self.assertIn((plugin / "storage", php, php), [(Path(a[0]), a[1], a[2]) for a in self.chowns])
+        self.assertIn("all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage", (self.site_dir() / "compose.yml").read_text())
+
+    def test_an_apply_with_the_switch_on_and_the_plugin_gone_stops_before_the_mount_can_be_made(self):
+        self.edit_record(ai1wm_export=True)
+        with self.assertRaises(prov.Failed) as e:
+            self.make().apply("alpha")
+        self.assertIn("installed", str(e.exception))
+        self.assertNotIn("all-in-one-wp-migration", (self.site_dir() / "compose.yml").read_text(), "the compose file was not rewritten with the mount")
+
     def test_a_set_that_no_longer_fits_the_vm_is_refused_before_anything_is_written(self):
         self.before = self.record()
         with self.assertRaises(model.Refuse) as e:

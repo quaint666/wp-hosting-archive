@@ -20,7 +20,7 @@ import threading
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")                                 # wp-ctl's REQ_RE
 LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")                          # wp-ctl's LABEL_RE
-SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note")
+SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "ai1wm_export", "label", "note")
 STATES = ("hold", "live", "stopped")
 SET_VALUE_MAX = 500
 USER_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,60}$")                         # wp-ctl's USER_NAME_RE (an existing WordPress user)

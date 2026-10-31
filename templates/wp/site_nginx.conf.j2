@@ -80,6 +80,16 @@ server {
     location ~* ^/wp-content/(ai1wm-backups|backup|backups|backup-db|updraft)/ {
         return 403;
     }
+{% if wp_s.ai1wm_export %}
+    # All-in-One WP Migration's export scratch directory is writable by php, so no PHP runs from it, and its exports (a whole site: database and files) are not served to anyone until the
+    # download gate exists: the export is made, the Download button answers 403.
+    location ~* ^/wp-content/plugins/all-in-one-wp-migration/storage/ {
+        return 403;
+    }
+    location ~* ^/wp-content/uploads/ai1wm-backups/ {
+        return 403;
+    }
+{% endif %}
     location ~* ^/wp-content/debug\.log$ {
         return 403;
     }
