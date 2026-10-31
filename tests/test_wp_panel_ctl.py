@@ -63,7 +63,7 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply", "plugin-set"},
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply", "plugin-set", "plugin-requests-collect", "plugin-request-decide"},
                          "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
@@ -76,7 +76,7 @@ class Allowlist(unittest.TestCase):
         self.assertEqual(set(ctl.STREAM_VERBS), {"import-receive"})
         self.assertEqual(wp_ctl.VERBS["import-receive"].kind, "stream")
         self.assertEqual(set(ctl.STREAM_VERBS["import-receive"]), set(wp_ctl.VERBS["import-receive"].args))
-        for verb in ("import-report", "import-list", "vuln-check", "users", "plugins"):
+        for verb in ("import-report", "import-list", "vuln-check", "users", "plugins", "plugin-requests"):
             self.assertEqual(ctl.READ_VERBS[verb].keys(), wp_ctl.VERBS[verb].args.keys(), verb)
             self.assertEqual(wp_ctl.VERBS[verb].kind, "read", verb)
 

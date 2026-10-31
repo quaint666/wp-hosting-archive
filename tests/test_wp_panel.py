@@ -61,6 +61,15 @@ class FakeCtl:
                 {"name": "woocommerce", "title": "WooCommerce", "status": "active", "version": "9.3.3", "update": False},
                 {"name": "old-thing", "title": "Old <b>Thing</b>", "status": "inactive", "version": "1.0", "update": True},
                 {"name": "hosting-mail", "title": "hosting-mail", "status": "must-use", "version": "1", "update": False}]},
+            "plugin-requests": {"ok": True, "requests": [
+                {"site": "alpha", "id": "aabbccdd0011", "slug": "akismet", "user": "owner", "first_seen": T0 - 600, "state": "pending", "note": "", "name": "Akismet <i>Anti-spam</i>", "version": "5.3", "installs": 5000000,
+                 "updated": "2026-10-01", "found": True, "vuln": "clean", "vuln_line": "none known"},
+                {"site": "alpha", "id": "aabbccdd0022", "slug": "shady", "user": "owner", "first_seen": T0 - 300, "state": "pending", "note": "", "name": "Shady", "version": "1.0", "found": True, "vuln": "found",
+                 "vuln_line": "plugin shady 1.0: Shady - RCE (CVE-2026-9)"},
+                {"site": "bravo", "id": "aabbccdd0033", "slug": "ghost", "user": "x", "first_seen": T0 - 100, "state": "pending", "note": "", "found": False, "vuln": "unchecked", "vuln_line": "not on wordpress.org"},
+                {"site": "alpha", "id": "aabbccdd0044", "slug": "jetpack", "user": "owner", "first_seen": T0 - 86400, "state": "installed", "note": ""}]},
+            "plugin-requests-collect": {"ok": True, "rc": 0, "ran": True, "out": "alpha: 1 request read, 0 new\n3 requests waiting\n"},
+            "plugin-request-decide": {"ok": True, "rc": 0, "ran": True, "out": "installed akismet on alpha, inactive\n"},
             "plugin-set": {"ok": True, "rc": 0, "ran": True, "out": "Success: done.\npage cache: 12 files cleared\n"},
             "vuln-check": {"ok": True, "rc": 1, "ran": True, "out": "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3 (7 findings)\n"},
             "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB}, "import-rescan": {"ok": True, "job": JOB},
@@ -146,7 +155,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/plugins", "/sites/alpha/password"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/plugins", "/requests", "/sites/alpha/password"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -304,7 +313,7 @@ class Access(Base):
 
     def test_the_bar_marks_the_page_you_are_on(self):
         c = self.logged_in()
-        for path, label in (("/sites", "Sites"), ("/sites/alpha", "Sites"), ("/new-site", "Sites"), ("/import", "Import"), ("/sites/alpha/import", "Import"), ("/jobs", "Jobs"), ("/jobs/" + JOB, "Jobs"), ("/audit", "Audit")):
+        for path, label in (("/sites", "Sites"), ("/sites/alpha", "Sites"), ("/new-site", "Sites"), ("/import", "Import"), ("/sites/alpha/import", "Import"), ("/requests", "Requests"), ("/jobs", "Jobs"), ("/jobs/" + JOB, "Jobs"), ("/audit", "Audit")):
             html = self.get(path, c).get_data(as_text=True)
             marked = re.findall(r'<a href="[^"]+" aria-current="page">([^<]+)</a>', html)
             self.assertEqual(marked, [label], path)
@@ -904,6 +913,86 @@ class PluginsPage(Base):
         r = self.post({"plugin": "woocommerce", "action": "activate"})
         self.assertEqual(r.status_code, 400)
         self.assertIn("wrong_state", r.get_data(as_text=True))
+
+
+class RequestsPage(Base):
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+
+    def post(self, path, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.csrf(path="/sites/alpha")
+        if token:
+            data["csrf"] = token
+        return self.c.post(path, data=data, base_url=BASE)
+
+    def acted(self):
+        return [(v, a) for v, a in self.ctl.calls if v in ("plugin-request-decide", "plugin-requests-collect")]
+
+    def test_waiting_requests_come_first_with_the_buttons_their_checks_allow(self):
+        html = self.get("/requests").get_data(as_text=True)
+        self.assertIn("Waiting (3)", html)
+        rows = re.findall(r"<tr>(.*?)</tr>", html, re.S)[1:]
+        clean, bad, ghost = rows[0], rows[1], rows[2]
+        self.assertIn("none known", clean); self.assertIn('value="approve"', clean); self.assertNotIn("Approve…", clean)
+        self.assertIn("known vulnerability", bad); self.assertIn("Approve…", bad); self.assertIn("RCE", bad)
+        self.assertIn("not on wordpress.org", ghost); self.assertNotIn('value="approve"', ghost, "nothing to approve: wordpress.org does not have it"); self.assertIn('value="deny"', ghost)
+        self.assertIn("Decided or expired", html); self.assertIn("jetpack", html)
+
+    def test_text_from_a_request_is_shown_as_text(self):
+        html = self.get("/requests").get_data(as_text=True)
+        self.assertNotIn("<i>Anti-spam</i>", html); self.assertIn("&lt;i&gt;Anti-spam&lt;/i&gt;", html)
+        self.assertNotIn("<script", html.lower())
+
+    def test_a_clean_request_is_approved_at_once_with_one_verb(self):
+        r = self.post("/requests/decide", {"site": "alpha", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual(r.status_code, 200); self.assertIn("installed akismet on alpha, inactive", r.get_data(as_text=True))
+        self.assertEqual(self.acted(), [("plugin-request-decide", {"site": "alpha", "id": "aabbccdd0011", "decision": "approve"})])
+
+    def test_deny_needs_no_confirmation(self):
+        self.assertEqual(self.post("/requests/decide", {"site": "bravo", "id": "aabbccdd0033", "decision": "deny"}).status_code, 200)
+        self.assertEqual(self.acted(), [("plugin-request-decide", {"site": "bravo", "id": "aabbccdd0033", "decision": "deny"})])
+
+    def test_a_risky_approval_is_two_steps_and_the_first_installs_nothing(self):
+        r = self.post("/requests/decide", {"site": "alpha", "id": "aabbccdd0022", "decision": "approve"})
+        html = r.get_data(as_text=True)
+        self.assertEqual((r.status_code, self.acted()), (200, []))
+        self.assertIn("known vulnerability", html); self.assertIn('name="confirm_slug"', html); self.assertIn("CVE-2026-9", html)
+        r = self.post("/requests/decide", {"site": "alpha", "id": "aabbccdd0022", "decision": "approve", "confirm_slug": "shady"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.acted(), [("plugin-request-decide", {"site": "alpha", "id": "aabbccdd0022", "decision": "approve", "confirm_slug": "shady"})])
+
+    def test_a_typed_name_cannot_go_with_a_deny_and_odd_forms_are_refused(self):
+        self.assertEqual(self.post("/requests/decide", {"site": "alpha", "id": "aabbccdd0011", "decision": "deny", "confirm_slug": "akismet"}).status_code, 400)
+        for data in ({"site": "alpha", "id": "zz", "decision": "approve"}, {"site": "alpha", "id": "aabbccdd0011", "decision": "install"}, {"site": "alpha", "id": "aabbccdd0011"}, {}):
+            self.assertEqual(self.post("/requests/decide", data).status_code, 400, data)
+        self.assertEqual(self.acted(), [])
+
+    def test_a_request_dellwp_does_not_remember_is_a_404_and_asks_nothing(self):
+        r = self.post("/requests/decide", {"site": "alpha", "id": "ffffffffffff", "decision": "approve"})
+        self.assertEqual(r.status_code, 404); self.assertEqual(self.acted(), [])
+
+    def test_refresh_collects_and_shows_what_the_tool_said(self):
+        r = self.post("/requests/refresh", {})
+        self.assertEqual(r.status_code, 200); self.assertIn("3 requests waiting", r.get_data(as_text=True))
+        self.assertEqual(self.acted(), [("plugin-requests-collect", {})])
+
+    def test_no_token_no_request(self):
+        for path, data in (("/requests/refresh", {}), ("/requests/decide", {"site": "alpha", "id": "aabbccdd0011", "decision": "approve"})):
+            for token in (False, "", "wrong"):
+                self.assertEqual(self.post(path, data, token=token).status_code, 400, (path, token))
+        self.assertEqual(self.acted(), [])
+
+    def test_a_refusal_from_the_tool_is_shown(self):
+        self.ctl.fail["plugin-request-decide"] = CtlError("failed", "wp-ctl failed: no error code (akismet has a known vulnerability)", None)
+        r = self.post("/requests/decide", {"site": "alpha", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertIn("known vulnerability", r.get_data(as_text=True))
+
+    def test_the_list_that_cannot_be_had_is_an_error_page(self):
+        self.ctl.fail["plugin-requests"] = CtlError("unreachable", "dellwp could not be reached")
+        self.assertEqual(self.get("/requests").status_code, 503)
 
 
 class Secrets(Base):
@@ -1591,7 +1680,7 @@ class ReadOnly(Base):
                                         ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
                                         ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
                                         ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/rescan", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
-                                        ("/sites/<name>/plugins", ("GET",)), ("/sites/<name>/plugins", ("POST",)), ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
+                                        ("/requests", ("GET",)), ("/requests/decide", ("POST",)), ("/requests/refresh", ("POST",)), ("/sites/<name>/plugins", ("GET",)), ("/sites/<name>/plugins", ("POST",)), ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/sites/<name>/updates/apply", ("POST",)), ("/sites/<name>/updates/check", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),
                          "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install; batch 13: the import)")

@@ -432,6 +432,11 @@ M = [
  ('the plugin token signature does not cover its prefix', 'scripts/wp_approvals.py', 'return "p1.%s.%s" % (text, sign(key, "p1." + text)), nonce', 'return "p1.%s.%s" % (text, sign(key, text)), nonce', 'tests/test_wp_approvals.py'),
  ('a plugin token goes to the import tool', 'scripts/wp_approval_listener.py', 'self.cfg["tool"] if kind == "import" else self.cfg["plugin_tool"]', 'self.cfg["tool"]', 'tests/test_wp_approvals.py'),
  ('check-plugin accepts any slug', 'scripts/wp_vulnfeed.py', 're.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug or "")', 'True', 'tests/test_wp_vulnfeed.py'),
+ ('the panel approves a risky request on the first press', 'app/wp_panel/views.py', 'if what == "approve" and not (mine.get("found") and mine.get("vuln") == "clean") and not typed:', 'if False:', 'tests/test_wp_panel.py'),
+ ('the panel offers Approve for a plugin wordpress.org does not have', 'app/wp_panel/templates/requests.html', '        {% if r.found %}\n        <form', '        {% if True %}\n        <form', 'tests/test_wp_panel.py'),
+ ('the panel client lets a typed name ride on a deny', 'app/wp_panel/ctl.py', 'if verb == "plugin-request-decide" and "confirm_slug" in args and args.get("decision") != "approve":', 'if False:', 'tests/test_wp_panel.py'),
+ ('wp-ctl lets a typed name ride on a deny', 'scripts/wp_ctl.py', 'if "confirm_slug" in a and a["decision"] != "approve":', 'if False:', 'tests/test_wp_ctl.py'),
+ ('wp-ctl does not check the request id', 'scripts/wp_ctl.py', '"id": Arg("text", rx=REQUEST_ID_RE)', '"id": Arg("text", rx=ANY_RE)', 'tests/test_wp_ctl.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

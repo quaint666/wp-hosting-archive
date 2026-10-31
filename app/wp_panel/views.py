@@ -10,7 +10,7 @@ from flask import abort, current_app, jsonify, redirect, render_template, reques
 
 from werkzeug.exceptions import ClientDisconnected
 
-from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, SET_KEYS, UPLOAD_MAX, CtlError
+from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, REQUEST_DECISIONS, REQUEST_ID_RE, SET_KEYS, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -358,6 +358,42 @@ def register(app):
         reply = ask("plugin-set", **args)
         titles = {"activate": "Plugin activated", "deactivate": "Plugin deactivated", "delete": "Plugin deleted"}
         return done(titles[what], name, reply.get("out"), back="plugins")
+
+    def request_rows():
+        return [r for r in ask("plugin-requests").get("requests", []) if isinstance(r, dict) and isinstance(r.get("site"), str) and isinstance(r.get("id"), str)]
+
+    @app.get("/requests")
+    @page
+    def requests_page():
+        """What the sites ask to have installed (Install in a site's wp-admin), waiting ones first. The list is what dellwp last collected: the Refresh button asks every site now."""
+        rows = request_rows()
+        waiting = [r for r in rows if r.get("state") == "pending"]
+        return render_template("requests.html", waiting=waiting, finished=[r for r in rows if r.get("state") != "pending"][:30])
+
+    @app.post("/requests/refresh")
+    @action
+    def requests_refresh():
+        reply = ask("plugin-requests-collect")
+        return done("Requests collected", "", reply.get("out"), back="requests_page")
+
+    @app.post("/requests/decide")
+    @action
+    def request_decide():
+        """Approve or deny one request. A request that is clean is decided at once. One with a known vulnerability, or that could not be checked, is approved only on purpose: the first press opens a page that says why, and
+        the plugin's name has to be typed. wp-ctl and the tool check the same thing again, so this page is only where the person is asked."""
+        site, rid, what, typed = field("site", 40), field("id", 40), field("decision", 20), field("confirm_slug", 120)
+        if what not in REQUEST_DECISIONS or not REQUEST_ID_RE.fullmatch(rid):
+            return render_template("error.html", status=400, title="The form was not accepted", message="That is not a request decision. Nothing was changed."), 400
+        mine = next((r for r in request_rows() if r["site"] == site and r["id"] == rid), None)
+        if mine is None:
+            return render_template("error.html", status=404, title="Not found", message="dellwp does not remember that request: it may have expired. Nothing was changed."), 404
+        if what == "approve" and not (mine.get("found") and mine.get("vuln") == "clean") and not typed:
+            return render_template("request_confirm.html", r=mine)
+        args = {"site": site, "id": rid, "decision": what}
+        if typed:
+            args["confirm_slug"] = typed
+        reply = ask("plugin-request-decide", **args)
+        return done("Request approved" if what == "approve" else "Request denied", site, reply.get("out"), back="requests_page")
 
     @app.get("/sites/<name>/security")
     @page

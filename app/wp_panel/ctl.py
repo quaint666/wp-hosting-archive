@@ -29,6 +29,9 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                          # 
 MIN_PASSWORD, MAX_PASSWORD = 14, 200                                          # wp-ctl's MIN_PASSWORD and MAX_TEXT
 PLUGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")                  # wp-ctl's PLUGIN_RE
 PLUGIN_ACTIONS = ("activate", "deactivate", "delete")                          # wp-ctl's PLUGIN_ACTIONS
+REQUEST_ID_RE = re.compile(r"^[a-f0-9]{8,24}$")                                # wp-ctl's REQUEST_ID_RE
+REQUEST_DECISIONS = ("approve", "deny")                                        # wp-ctl's REQUEST_DECISIONS
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")                                  # wp-ctl's SLUG_RE (a wordpress.org plugin name)
 REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")      # wp-ctl's REJECT_RE: plugin and theme slugs, comma separated
 FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")                                # wp-ctl's IMPORT_FILE_RE
 FILE_MAX = 100
@@ -65,6 +68,7 @@ READ_VERBS = {
     "vuln-check": {"site": (True, _site)},
     "users": {"site": (True, _site)},
     "plugins": {"site": (True, _site)},
+    "plugin-requests": {},
     "jobs": {},
     "job-status": {"job": (True, _job)},
     "job-log": {"job": (True, _job), "offset": (False, _int(0, 2 ** 40))},
@@ -89,6 +93,8 @@ ACTION_VERBS = {
     "ensure-state": {"site": (True, _site), "state": (True, _one_of(STATES)), "confirm_name": (False, _site)},
 }
 ACTION_VERBS["plugin-set"] = {"site": (True, _site), "plugin": (True, _text(100, PLUGIN_RE)), "action": (True, _one_of(PLUGIN_ACTIONS)), "confirm_plugin": (False, _text(100, PLUGIN_RE))}
+ACTION_VERBS["plugin-requests-collect"] = {}
+ACTION_VERBS["plugin-request-decide"] = {"site": (True, _site), "id": (True, _text(24, REQUEST_ID_RE)), "decision": (True, _one_of(REQUEST_DECISIONS)), "confirm_slug": (False, _text(100, SLUG_RE))}
 ACTION_VERBS["delete"] = {"site": (True, _site), "confirm_name": (True, _site), "confirm_again": (True, _site)}
 
 
@@ -136,6 +142,8 @@ def _rules(verb, args):
             raise CtlError("not_allowed", "deleting a plugin needs its name typed exactly")
         if args.get("action") != "delete" and "confirm_plugin" in args:
             raise CtlError("not_allowed", "only a delete is confirmed by the plugin's name")
+    if verb == "plugin-request-decide" and "confirm_slug" in args and args.get("decision") != "approve":
+        raise CtlError("not_allowed", "only an approval is confirmed by the plugin's name")
     if verb == "import-reset" and args.get("confirm_name") != args.get("site"):
         raise CtlError("not_allowed", "a reset needs the site's name typed exactly")
     if verb == "import-run":
