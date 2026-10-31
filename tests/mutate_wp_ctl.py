@@ -437,6 +437,18 @@ M = [
  ('the panel client lets a typed name ride on a deny', 'app/wp_panel/ctl.py', 'if verb == "plugin-request-decide" and "confirm_slug" in args and args.get("decision") != "approve":', 'if False:', 'tests/test_wp_panel.py'),
  ('wp-ctl lets a typed name ride on a deny', 'scripts/wp_ctl.py', 'if "confirm_slug" in a and a["decision"] != "approve":', 'if False:', 'tests/test_wp_ctl.py'),
  ('wp-ctl does not check the request id', 'scripts/wp_ctl.py', '"id": Arg("text", rx=REQUEST_ID_RE)', '"id": Arg("text", rx=ANY_RE)', 'tests/test_wp_ctl.py'),
+ ('the A/B test does not put php.ini back', 'scripts/wp_ab_test.py', '            site.write_ini(original)\n            site.restart()\n            out("  restored', '            pass\n            site.restart()\n            out("  restored', 'tests/test_wp_ab_test.py'),
+ ('the A/B test ignores the signals', 'scripts/wp_ab_test.py', 'handlers[s] = signal.signal(s, stop)', 'handlers[s] = signal.getsignal(s)', 'tests/test_wp_ab_test.py'),
+ ('the A/B test calls any difference real', 'scripts/wp_ab_test.py', 'NOISE_FACTOR = 2.0', 'NOISE_FACTOR = 0.0', 'tests/test_wp_ab_test.py'),
+ ('the A/B test calls a 1 % difference real', 'scripts/wp_ab_test.py', 'MIN_REAL_CHANGE = 0.03', 'MIN_REAL_CHANGE = 0.0', 'tests/test_wp_ab_test.py'),
+ ('the A/B test reports faster as slower', 'scripts/wp_ab_test.py', '"slower" if change > 0 else "faster"', '"faster" if change > 0 else "slower"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test keeps the page cache between phases', 'scripts/wp_ab_test.py', '        self.flush_cache()\n        take("cold"', '        take("cold"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test runs B first', 'scripts/wp_ab_test.py', 'phases += [("A%d" % (r + 1), "A"), ("B%d" % (r + 1), "B")]', 'phases += [("B%d" % (r + 1), "B"), ("A%d" % (r + 1), "A")]', 'tests/test_wp_ab_test.py'),
+ ('the A/B test accepts a setting equal to the present one', 'scripts/wp_ab_test.py', 'if m.group(2) == val:', 'if False:', 'tests/test_wp_ab_test.py'),
+ ('the A/B test ignores a held lock', 'scripts/wp_ab_test.py', 'raise SystemExit("another change to', 'print("another change to', 'tests/test_wp_ab_test.py'),
+ ('the A/B test sends the mini-cart POST without a cart cookie', 'scripts/wp_ab_test.py', '"Cookie": "woocommerce_items_in_cart=1; woocommerce_cart_hash=ab"', '"X-A": "b"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test does not ask whether php.ini is back', 'scripts/wp_ab_test.py', 'ok = line.split()[:1] == ["same"]', 'ok = True', 'tests/test_wp_ab_test.py'),
+ ('the A/B test writes php.ini to a new file', 'scripts/wp_ab_test.py', 'with open(self.ini, "r+") as f:', 'with open(self.ini + ".new", "w") as f:', 'tests/test_wp_ab_test.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

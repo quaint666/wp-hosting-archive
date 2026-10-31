@@ -39,7 +39,9 @@ wp_php_assertions: 1
 # with WooCommerce suggest 16 to 32 MB of strings and a file limit well above the count of loaded files. validate 0 stops checking whether files changed: only safe if every change to a
 # site's code is followed by a php reload (the update job reloads; wp-site-ext does not), or the site runs stale code.
 wp_php_opcache_files: 4000
-wp_php_opcache_strings_mb: 8
+# 16, not the image's 8: the timing plugin (2026-10-31, envo-ecommerce) found the interned-strings buffer full, 8 MB used and none free; PHP then stops sharing new strings between workers. 16 is the figure
+# the WordPress-with-WooCommerce guides give. scripts/wp_ab_test.sh --set opcache.interned_strings_buffer=8 compares it with the old value on the live site, one go.
+wp_php_opcache_strings_mb: 16
 wp_php_opcache_validate: 1
 wp_php_opcache_revalidate_s: 2
 wp_php_realpath_ttl_s: 120

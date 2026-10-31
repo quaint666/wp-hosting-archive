@@ -135,8 +135,8 @@ class Parity(unittest.TestCase):
         pool, ini = render()
         for line in ("pm = ondemand", "pm.max_children = 4", "pm.process_idle_timeout = 20s", "pm.max_requests = 500", "request_terminate_timeout = 120s", "request_slowlog_timeout = 10s"):
             self.assertIn(line + "\n", pool, "the defaults are the values that ran before they were variables: " + line)
-        for line in ("opcache.max_accelerated_files = 4000", "opcache.interned_strings_buffer = 8", "opcache.validate_timestamps = 1", "opcache.revalidate_freq = 2", "realpath_cache_ttl = 120", "zend.assertions = 1"):
-            self.assertIn(line + "\n", ini, line)
+        for line in ("opcache.max_accelerated_files = 4000", "opcache.interned_strings_buffer = 16", "opcache.validate_timestamps = 1", "opcache.revalidate_freq = 2", "realpath_cache_ttl = 120", "zend.assertions = 1"):
+            self.assertIn(line + "\n", ini, line)      # interned strings: 16 since 2026-10-31 (the image's 8 MB buffer was measured full), every other line is what ran before
         self.assertNotIn("pm.start_servers", pool)
         pool, _ = render({"wp_fpm_pm": "dynamic"})
         for line in ("pm = dynamic", "pm.start_servers = 1", "pm.min_spare_servers = 1", "pm.max_spare_servers = 2"):
