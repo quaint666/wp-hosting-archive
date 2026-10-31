@@ -106,6 +106,59 @@ class Tokens(unittest.TestCase):
                 ap.mint(KEY, *args, 60)
 
 
+class PluginTokens(unittest.TestCase):
+    def test_a_plugin_token_round_trips_and_has_its_own_prefix(self):
+        t, n = ap.mint_plugin(KEY, "wptest", "approve", SHA, 3600, now=1000)
+        self.assertTrue(t.startswith("p1.") and ap.PLUGIN_TOKEN_RE.fullmatch(t) and not ap.TOKEN_RE.fullmatch(t))
+        self.assertEqual(ap.verify_plugin(KEY, t, now=1000), {"s": "wptest", "a": "approve", "n": n, "e": 4600, "r": SHA})
+        self.assertLess(len(t), 400)
+
+    def test_neither_kind_passes_for_the_other(self):
+        imp_t, _ = ap.mint(KEY, "wptest", "approve", SHA, 3600, now=1000)
+        plug_t, _ = ap.mint_plugin(KEY, "wptest", "approve", SHA, 3600, now=1000)
+        with self.assertRaises(ap.ApprovalError):
+            ap.verify(KEY, plug_t, now=1000)
+        with self.assertRaises(ap.ApprovalError):
+            ap.verify_plugin(KEY, imp_t, now=1000)
+        # relabelling the prefix does not work: the plugin signature covers "p1." and the import one covers the payload alone
+        _, text, mac = imp_t.split(".")
+        with self.assertRaises(ap.ApprovalError) as cm:
+            ap.verify_plugin(KEY, "p1.%s.%s" % (text, mac), now=1000)
+        self.assertEqual(str(cm.exception), "the signature does not match")
+        _, text, mac = plug_t.split(".")
+        with self.assertRaises(ap.ApprovalError) as cm:
+            ap.verify(KEY, "v1.%s.%s" % (text, mac), now=1000)
+        self.assertEqual(str(cm.exception), "the signature does not match")
+
+    def test_every_part_is_signed_and_the_checks_are_the_import_tokens(self):
+        t, _ = ap.mint_plugin(KEY, "wptest", "deny", SHA, 60, now=1000)
+        head, payload, mac = t.split(".")
+        for i in range(0, len(payload), 9):
+            flipped = payload[:i] + ("A" if payload[i] != "A" else "B") + payload[i + 1:]
+            with self.assertRaises(ap.ApprovalError):
+                ap.verify_plugin(KEY, "%s.%s.%s" % (head, flipped, mac), now=1000)
+        with self.assertRaises(ap.ApprovalError):
+            ap.verify_plugin(b"j" * 40, t, now=1000)
+        with self.assertRaises(ap.ApprovalError) as cm:
+            ap.verify_plugin(KEY, t, now=1061)
+        self.assertEqual(str(cm.exception), "the token has expired")
+        self.assertEqual(ap.verify_plugin(KEY, t, now=1060)["a"], "deny")
+        for bad in ("", None, 5, "p1.a.b", t + "\n", "\n" + t, "v1" + t[2:], "p2" + t[2:]):
+            with self.assertRaises(ap.ApprovalError):
+                ap.verify_plugin(KEY, bad, now=1000)
+
+    def test_mint_refuses_what_it_should_never_sign(self):
+        for site, action, sha in (("../x", "approve", SHA), ("wptest", "go-live", SHA), ("wptest", "approve", "xyz"), ("Wp", "deny", SHA)):
+            with self.assertRaises(ap.ApprovalError):
+                ap.mint_plugin(KEY, site, action, sha, 60)
+
+    def test_the_message_can_carry_its_own_title_and_tags(self):
+        m = ap.build_message("https://n.example.org", "alerts", "wp-approvals", "Basic QQ==", "wptest", "body", {"deny": "D"}, title="Plugin request: wptest", tags=["jigsaw"])
+        self.assertEqual((m["title"], m["tags"]), ("Plugin request: wptest", ["jigsaw"]))
+        m = ap.build_message("https://n.example.org", "alerts", "wp-approvals", "Basic QQ==", "wptest", "body", {"deny": "D"})
+        self.assertEqual((m["title"], m["tags"]), ("Import ready: wptest", ["package"]), "an import's message is as it was")
+
+
 class Files(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -664,6 +717,37 @@ class Listening(unittest.TestCase):
         self.assertEqual(tool_kw["timeout"], 600, "a tool that hangs must be stopped")
         self.assertEqual(self.tells(), ["Phone decision done: wptest approved"])
         self.assertEqual([c[1] for c, _ in self.calls if c[0] == self.cfg["notify_cmd"]], ["homeserver"], "the result goes to the topic from the config")
+
+    PTOK = "p1." + "A" * 50 + "." + "0" * 64
+
+    def test_a_plugin_token_goes_to_the_plugin_tool_and_an_import_token_still_to_the_import_tool(self):
+        self.cfg["plugin_tool"] = "/opt/wp-plugin-requests"
+        l = self.listener()
+        self.streams = [FakeStream([event(id="a1", message=self.PTOK), event(id="a2", message=TOK)])]
+        l.serve(rounds=1)
+        self.assertEqual([c for c, _ in self.calls if c[0] in (self.cfg["tool"], "/opt/wp-plugin-requests")],
+                         [["/opt/wp-plugin-requests", "resolve", self.PTOK], [self.cfg["tool"], "resolve", TOK]])
+        self.assertEqual(self.tells(), ["Phone decision done: no output", "Phone decision done: wptest approved"])
+
+    def test_a_plugin_token_is_ignored_when_no_plugin_tool_is_configured(self):
+        self.streams = [FakeStream([event(message=self.PTOK)])]
+        self.listener().serve(rounds=1)
+        self.assertEqual([c for c, _ in self.calls if c[0] != self.cfg["notify_cmd"]], [])
+
+    def test_a_plugin_tool_that_hangs_or_is_missing_is_told_to_the_phone_by_kind(self):
+        self.cfg["plugin_tool"] = "/opt/wp-plugin-requests"
+        for exc, word in ((subprocess.TimeoutExpired("x", 1), "did not finish"), (OSError(2, "No such file"), "could not be run")):
+            self.calls.clear()
+            self.fake_run_exc = exc
+            def run(cmd, _exc=exc, **kw):
+                self.calls.append((cmd, kw))
+                if cmd[0] == "/opt/wp-plugin-requests":
+                    raise _exc
+                return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            l = self.lis.Listener(self.cfg, opener=self.opener, run=run, sleep=self.slept.append, clock=lambda: self.now, out=self.said.append)
+            self.streams = [FakeStream([event(message=self.PTOK)])]
+            l.serve(rounds=1)
+            self.assertTrue(any("plugin request" in t and word in t for t in self.tells()), (word, self.tells()))
 
     def test_the_request_is_a_read_only_stream_with_the_listeners_login(self):
         self.streams = [FakeStream([])]

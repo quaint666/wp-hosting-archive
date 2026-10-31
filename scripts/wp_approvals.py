@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"v1\.[A-Za-z0-9_-]{40,700}\.[0-9a-f]{64}")      # fullmatch
+PLUGIN_TOKEN_RE = re.compile(r"p1\.[A-Za-z0-9_-]{40,700}\.[0-9a-f]{64}")   # fullmatch; a plugin request's token: another prefix, and the signature covers the prefix, so neither kind can be passed off as the other
 SITE_RE = re.compile(r"[a-z][a-z0-9-]{1,23}")                            # fullmatch
 ACTIONS = ("approve", "deny")
 MIN_KEY = 32
@@ -64,6 +65,17 @@ def mint(key, site, action, report_sha, ttl_s, now=None, nonce=None):
     return "v1.%s.%s" % (text, sign(key, text)), nonce
 
 
+def check_payload(d, now):
+    """The shape every token's payload has, and its expiry; ApprovalError when either is wrong."""
+    if (not isinstance(d, dict) or set(d) != {"s", "a", "n", "e", "r"} or not isinstance(d["s"], str) or not SITE_RE.fullmatch(d["s"]) or d["a"] not in ACTIONS
+            or not isinstance(d["n"], str) or not re.fullmatch(r"[0-9a-f]{32}", d["n"]) or not isinstance(d["e"], int) or isinstance(d["e"], bool)
+            or not isinstance(d["r"], str) or not re.fullmatch(r"[0-9a-f]{64}", d["r"])):
+        raise ApprovalError("the payload has the wrong shape")
+    if (now if now is not None else time.time()) > d["e"]:
+        raise ApprovalError("the token has expired")
+    return d
+
+
 def verify(key, token, now=None):
     """The payload of a valid, unexpired token, or ApprovalError saying which check failed (the message is for the log and the operator, never for the sender)."""
     if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
@@ -75,13 +87,31 @@ def verify(key, token, now=None):
         d = json.loads(unb64(text))
     except (ValueError, UnicodeDecodeError):
         raise ApprovalError("the payload is not readable")
-    if (not isinstance(d, dict) or set(d) != {"s", "a", "n", "e", "r"} or not isinstance(d["s"], str) or not SITE_RE.fullmatch(d["s"]) or d["a"] not in ACTIONS
-            or not isinstance(d["n"], str) or not re.fullmatch(r"[0-9a-f]{32}", d["n"]) or not isinstance(d["e"], int) or isinstance(d["e"], bool)
-            or not isinstance(d["r"], str) or not re.fullmatch(r"[0-9a-f]{64}", d["r"])):
-        raise ApprovalError("the payload has the wrong shape")
-    if (now if now is not None else time.time()) > d["e"]:
-        raise ApprovalError("the token has expired")
-    return d
+    return check_payload(d, now)
+
+
+def mint_plugin(key, site, action, request_sha, ttl_s, now=None, nonce=None):
+    """(token, nonce) for one action on one plugin request. The payload has the import token's shape, `r` being the sha256 of the request's own identity; the prefix is p1 and the signature covers it."""
+    if action not in ACTIONS or not SITE_RE.fullmatch(site) or not re.fullmatch(r"[0-9a-f]{64}", request_sha):
+        raise ApprovalError("cannot mint a token for %r %r" % (site, action))
+    nonce = nonce or secrets.token_hex(16)
+    payload = {"s": site, "a": action, "n": nonce, "e": int(now if now is not None else time.time()) + int(ttl_s), "r": request_sha}
+    text = b64(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+    return "p1.%s.%s" % (text, sign(key, "p1." + text)), nonce
+
+
+def verify_plugin(key, token, now=None):
+    """verify() for a plugin request's token."""
+    if not isinstance(token, str) or not PLUGIN_TOKEN_RE.fullmatch(token):
+        raise ApprovalError("not a plugin request token")
+    _, text, mac = token.split(".")
+    if not hmac.compare_digest(sign(key, "p1." + text), mac):
+        raise ApprovalError("the signature does not match")
+    try:
+        d = json.loads(unb64(text))
+    except (ValueError, UnicodeDecodeError):
+        raise ApprovalError("the payload is not readable")
+    return check_payload(d, now)
 
 
 def read_conf(path):
@@ -127,12 +157,13 @@ def approver_auth(path):
     return basic(login, password)
 
 
-def build_message(url, ask_topic, reply_topic, approver_header, site, body, tokens):
-    """The JSON that ntfy publishes: the summary and one http button per token. A button needs no reply from the server; clear=true removes the notification when tapped."""
+def build_message(url, ask_topic, reply_topic, approver_header, site, body, tokens, title=None, tags=None):
+    """The JSON that ntfy publishes: the summary and one http button per token. A button needs no reply from the server; clear=true removes the notification when tapped. The title and tags
+    default to an import's."""
     labels = {"approve": "Approve", "deny": "Deny"}
     actions = [{"action": "http", "label": labels[a], "url": "%s/%s" % (url, reply_topic), "method": "POST", "headers": {"Authorization": approver_header}, "body": t, "clear": True}
                for a, t in tokens.items()]
-    return {"topic": ask_topic, "title": "Import ready: %s" % site, "message": body[:BODY_MAX], "priority": 4, "tags": ["package"], "actions": actions}
+    return {"topic": ask_topic, "title": title or "Import ready: %s" % site, "message": body[:BODY_MAX], "priority": 4, "tags": tags or ["package"], "actions": actions}
 
 
 def post_json(url, auth_header, payload, timeout=15):

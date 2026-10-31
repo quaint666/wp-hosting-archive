@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """wp-approval-listener: follows the reply topic on the independent ntfy and hands each token to `wp-site-import resolve`. Runs on dellwp as root under systemd (templates/wp/wp_approval_listener.*.j2).
 
-It decides nothing. A message is acted on only if its whole body is a token-shaped string (wp_approvals.TOKEN_RE, fullmatch); the string is passed as ONE argument of a command list (no shell) to the
-tool, which verifies the signature, the expiry, the import it was issued for and its report, and consumes it. What the tool printed (its last line, with every control character replaced) goes to the
+It decides nothing. A message is acted on only if its whole body is a token-shaped string (wp_approvals.TOKEN_RE for an import, PLUGIN_TOKEN_RE for a plugin request, fullmatch; the prefix picks the
+tool); the string is passed as ONE argument of a command list (no shell) to the tool, which verifies the signature, the expiry, the import it was issued for and its report, and consumes it. What the tool printed (its last line, with every control character replaced) goes to the
 phone through ntfy-notify. Nothing from a message is ever logged in full, run, or written anywhere else. The listener is a reader with a read-only user: it cannot publish to the reply topic.
 
 Robustness: it reconnects with a growing pause, remembers the id of the last message it handled (so a restart does not replay), ignores anything that is not a message event, handles at most
@@ -64,7 +64,10 @@ class Listener:
         if msg_id is not None and msg_id == self.last_id:
             return "ignored (already handled)"
         body = msg.get("message")
-        if not isinstance(body, str) or not ap.TOKEN_RE.fullmatch(body):
+        kind = None
+        if isinstance(body, str):
+            kind = "import" if ap.TOKEN_RE.fullmatch(body) else "plugin request" if self.cfg.get("plugin_tool") and ap.PLUGIN_TOKEN_RE.fullmatch(body) else None
+        if kind is None:
             self.save_id(msg_id)
             self.out("ignored a message that is not a token")
             return "ignored (not a token)"
@@ -78,12 +81,12 @@ class Listener:
         self.save_id(msg_id)
         self.out("resolving token %s..." % body[:10])
         try:
-            p = self.run([self.cfg["tool"], "resolve", body], capture_output=True, text=True, timeout=int(self.cfg["resolve_timeout_s"]), stdin=subprocess.DEVNULL)
+            p = self.run([self.cfg["tool"] if kind == "import" else self.cfg["plugin_tool"], "resolve", body], capture_output=True, text=True, timeout=int(self.cfg["resolve_timeout_s"]), stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
-            self.tell("An import decision from the phone did not finish in time. Check the import at the control page.")
+            self.tell("A %s decision from the phone did not finish in time. Check it at the control page." % kind)
             return "timeout"
         except OSError as e:
-            self.tell("An import decision from the phone could not be run: %s" % w.printable(e, limit=80))
+            self.tell("A %s decision from the phone could not be run: %s" % (kind, w.printable(e, limit=80)))
             return "error"
         lines = [l for l in ((p.stdout or "") + "\n" + (p.stderr or "")).splitlines() if l.strip()]
         last = w.printable(lines[-1], limit=200) if lines else "no output"
