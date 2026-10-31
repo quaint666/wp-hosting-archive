@@ -2407,8 +2407,8 @@ class Wrapper(unittest.TestCase):
             stand_in.chmod(0o755)
             text, _ = self.render(wp_tools_bin=str(d / "bin"), wp_tools_lib=str(lib), wp_data_mount=str(d / "data"), wp_intake_dir=str(intake))
             deployed = [i for t in yaml.safe_load((ROOT / "tasks/wp_tools_common.yml").read_text()) if t.get("name") == "Stage the Python modules of wp-site-import" for i in t["loop"]]
-            self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_ctl.py", "wp_site_import.py", "wp_site_model.py", "wp_site_provision.py", "wp_site_renderer.py", "wp_vulnfeed.py", "wp_wpress.py"],
-                         "the play must copy every module the tool imports (wp_vulnfeed.py is wp-vulnfeed's, wp_ctl.py is wp-ctl's, and wp_site_model.py, wp_site_renderer.py and wp_site_provision.py are wp-site-provision's, not its)")
+            self.assertEqual(sorted(deployed), ["wp_approvals.py", "wp_ctl.py", "wp_plugin_requests.py", "wp_site_import.py", "wp_site_model.py", "wp_site_provision.py", "wp_site_renderer.py", "wp_vulnfeed.py", "wp_wpress.py"],
+                         "the play must copy every module the tool imports (wp_vulnfeed.py is wp-vulnfeed's, wp_plugin_requests.py is wp-plugin-requests', wp_ctl.py is wp-ctl's, and wp_site_model.py, wp_site_renderer.py and wp_site_provision.py are wp-site-provision's, not its)")
             for m in deployed:
                 (lib / m).write_text((ROOT / "scripts" / m).read_text())
             tool = d / "wp-site-import"

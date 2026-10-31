@@ -4,7 +4,7 @@
 # the checks hold. It never changes anything on dellwp itself: it only calls read-only commands (wp-ctl show / list / import-list, wp-site-cli reads, grep, test).
 #   bash scripts/wp_checklist_dellwp.sh [--name SITE] [--out FILE] [--host NAME] [--loopback-http]
 # Steps: 0 pre-flight, 1 create, 2 install WordPress, 3 move to live (and, with --loopback-http, the page cache: MISS, HIT, BYPASS), 4 the 2FA page and its QR code, 5 authenticator set-up, 6 mail log/send (with or without the Resend key), 7 the three
-# switches (XML-RPC, application passwords, user enumeration) each on and off, 7b the mini-cart refresh cache, 8 import a .wpress (optional), 9 stop and delete.
+# switches (XML-RPC, application passwords, user enumeration) each on and off, 7b the mini-cart refresh cache, 7c plugin requests (Install in wp-admin becomes a request you approve), 8 import a .wpress (optional), 9 stop and delete.
 # The results (one PASS / FAIL / SKIP line per check, and what the machine said) go to FILE (default ~/.local/state/wp-perf/wp_checklist_<UTC stamp>.txt, mode 0600). They hold no secret: wp-config.php
 # is only counted for lines, never printed; the password you type into the panel never touches this script. Exit status is 1 when any check failed.
 # --loopback-http adds curl requests to nginx on dellwp's loopback (the page cache answers MISS, then HIT, and BYPASS for login and search; the QR script comes back 200; /xmlrpc.php and ?author=1 answer as the switches say), inside the ssh session. Without it the script
@@ -169,6 +169,27 @@ fi
 manual "the mini-cart still works" "On a site WITH WooCommerce (not this throwaway one: press s here): open the shop in a browser, add a product to the cart; the header cart must show it, and show it empty again after you remove it." "Did the mini-cart update?"
 manual "cart_fragments = normal" "Panel > $NAME > Settings > Mini-cart refresh: choose normal, Set." "Did it finish without an error?"
 expect "the mini-cart location is gone again" "$(count "$conf" 'location = /__wph_fragments')" 0
+
+say ""; say "== 7c plugin requests (Install in the site's wp-admin becomes a request)"
+expect "the hosting plugin for requests is deployed" "$(remote "sudo test -f $MU/50-wp-hosting-plugin-requests.php && echo yes")" yes
+expect "wp-config.php allows requests (a limit above 0)" "$(count "$cfg" "define( 'WP_HOSTING_PLUGIN_REQUESTS_MAX', [1-9]")" 1
+expect "the tool is installed" "$(remote 'sudo test -x /usr/local/sbin/wp-plugin-requests && echo yes')" yes
+expect "the collection timer is active" "$(remote 'systemctl is-active wp-plugin-requests.timer')" active
+expect "the approval listener knows the tool" "$(remote "sudo grep -c 'wp-plugin-requests' /usr/local/sbin/wp-approval-listener")" 1
+expect "the tool answers with its one JSON line" "$(jget "$(remote 'sudo /usr/local/sbin/wp-ctl plugin-requests')" ok)" true
+manual "ask for a plugin" "Log in to $NAME's wp-admin as the administrator. Plugins now has Add New. Search for 'classic editor', press the button on Classic Editor: it should say Requested (not Installed), and the page should list the request as waiting. There must be no Upload Plugin button." "Did Install turn into a request?"
+manual "refresh and read the request" "Panel > Requests > Refresh. The request should be listed as waiting for $NAME, with checks 'none known'. Your phone should get a notification with Approve and Deny buttons (it can take a moment)." "Is it listed, and did the phone get the notification?"
+waiting=$(printf '%s' "$(remote 'sudo /usr/local/sbin/wp-ctl plugin-requests')" | python3 -I -c 'import json, sys
+d = json.load(sys.stdin)
+print(sum(1 for r in d.get("requests", []) if r.get("site") == sys.argv[1] and r.get("state") == "pending" and r.get("slug") == "classic-editor"))' "$NAME" 2>/dev/null || echo "?")
+expect "dellwp remembers one waiting request for classic-editor" "$waiting" 1
+expect "nothing was installed by the press" "$(remote "sudo test -d $SITES/$NAME/html/wp-content/plugins/classic-editor && echo yes || echo no")" no
+manual "approve it" "Approve it on the phone (or Panel > Requests > Approve)." "Did the decision finish without an error?"
+expect "the plugin is installed and inactive" "$(printf '%s' "$(remote "sudo /usr/local/sbin/wp-ctl plugins site=$NAME")" | python3 -I -c 'import json, sys
+d = json.load(sys.stdin)
+print(",".join(sorted(p["status"] for p in d.get("plugins", []) if p["name"] == "classic-editor")))' 2>/dev/null || echo "?")" inactive
+manual "the administrator sees the answer" "Reload $NAME's wp-admin Plugins page: the notice should say classic-editor was installed and to activate it." "Did the notice say so?"
+manual "clean up" "Panel > $NAME > Plugins > Delete classic-editor (it is inactive; type its name)." "Is it gone from the list?"
 
 say ""; say "== 8 import a .wpress (optional: press s to skip)"
 manual "import into $NAME" "Panel > Import > pick a .wpress (one is already on dellwp if you uploaded one) > 'Replace the data of a site that has some' (not 'Load it into an existing empty site': step 2 put WordPress in this one, and that mode refuses a site with tables) > type $NAME > run, then read the report page." "Did the report appear and read sensibly?"
