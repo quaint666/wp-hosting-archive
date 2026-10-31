@@ -60,7 +60,7 @@ SYSTEMD_RUN = "#!/bin/bash\n{ printf 'systemd-run'; for a in \"$@\"; do printf '
 LOGGER = "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> '%(dir)s/journal'\nexit \"$(cat '%(dir)s/logger_rc' 2>/dev/null || echo 0)\"\n"
 LIMITS = {"default": {"timeout_s": 30, "memory_mb": 512, "tasks": 256}, "password": {"timeout_s": 30}, "backup": {"timeout_s": 600}, "delete": {"timeout_s": 600, "memory_mb": 384},
           "create": {"timeout_s": 700}, "apply": {"timeout_s": 710}, "update-check": {"timeout_s": 750}, "update-apply": {"timeout_s": 760, "memory_mb": 1024}, "import-new": {"timeout_s": 770, "memory_mb": 1024}, "set": {"timeout_s": 720}, "ensure-state": {"timeout_s": 730}, "install": {"timeout_s": 40},
-          "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}, "import-rescan": {"timeout_s": 810, "memory_mb": 1024}}
+          "import-receive": {"timeout_s": 60}, "import-run": {"timeout_s": 900, "memory_mb": 1024}, "import-approve": {"timeout_s": 700, "memory_mb": 1024}, "import-reset": {"timeout_s": 800, "memory_mb": 1024, "tasks": 64}, "restore": {"timeout_s": 820, "memory_mb": 1024}, "import-rescan": {"timeout_s": 810, "memory_mb": 1024}}
 HOSTILE_SITES = ["../x", "Site", "a;id", "x y", "", "a" * 25, "-a", "a-", "wp test", "wptest\n", "wptest/../held", "*", "wptest\x00", "WPTEST", "a", "nosuch", "wptest ", "$(id)"]
 
 
@@ -82,7 +82,7 @@ class Base(unittest.TestCase):
         self.script("logger", LOGGER)
         self.t = time.time()
         self.audit_file = self.tmp / "log" / "audit.jsonl"
-        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tools_bin": str(self.bin), "page_cache_dir": str(self.tmp / "pagecache"), "path": "/usr/bin:/bin",
+        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "backup_dir": str(self.tmp / "backups"), "tools_bin": str(self.bin), "page_cache_dir": str(self.tmp / "pagecache"), "path": "/usr/bin:/bin",
                     "logger": str(self.bin / "logger"), "systemd_run": str(self.bin / "systemd-run"), "panel_user": "wpctl", "job_keep_days": 14, "max_request_bytes": 65536,
                     "limits": LIMITS, "reserved_names": ["hub", "mail", "bloomy"]}
         self.env = {"SUDO_USER": "wpctl", "LEAK_ME": "must-not-reach-the-tools", "SUDO_COMMAND": "/usr/local/sbin/wp-ctl"}
@@ -257,6 +257,7 @@ class Argv(Base):
                  [b + "/wp-site-import", "approve", "wptest", "--reject", "a,b-c", "--accept-failures"], None),
                 ("rescan", {"verb": "import-rescan", "site": "wptest"}, [b + "/wp-site-import", "rescan", "wptest"], None),
                 ("reset", {"verb": "import-reset", "site": "wptest", "confirm_name": "wptest"}, [b + "/wp-site-import", "reset", "wptest"], "wptest\n"),
+                ("restore", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z", "confirm_name": "wptest"}, [b + "/wp-site-recover", "wptest", "20261031T020000Z"], "wptest\n"),
                 ("update, check", {"verb": "update-check", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--check"], None),
                 ("update, apply", {"verb": "update-apply", "site": "wptest"}, [b + "/wp-site-update", "wptest", "--apply"], None),
                 ("import into a new site", {"verb": "import-new", "name": "newshop", "file": "f.wpress"},
@@ -749,7 +750,7 @@ class Limits(Base):
         base = dict(LIMITS)
         for label, limits in (("no default", {k: v for k, v in base.items() if k != "default"}), ("default without tasks", dict(base, default={"timeout_s": 30, "memory_mb": 512})),
                               ("default with a stray key", dict(base, default={"timeout_s": 30, "memory_mb": 512, "tasks": 256, "cpu": 1})),
-                              ("a verb that does not exist", dict(base, **{"backups": {"timeout_s": 5}})), ("a stray key", dict(base, backup={"timeout_s": 5, "ram": 5})),
+                              ("a verb that does not exist", dict(base, **{"no-such-verb": {"timeout_s": 5}})), ("a stray key", dict(base, backup={"timeout_s": 5, "ram": 5})),
                               ("zero", dict(base, backup={"timeout_s": 0})), ("negative", dict(base, backup={"timeout_s": -5})), ("a bool", dict(base, backup={"timeout_s": True})),
                               ("a number as text", dict(base, backup={"timeout_s": "600"})), ("a float", dict(base, backup={"timeout_s": 5.5})), ("not a table", dict(base, backup=600)),
                               ("a job without a timeout of its own", {k: v for k, v in base.items() if k != "import-run"}), ("the upload without a timeout of its own", {k: v for k, v in base.items() if k != "import-receive"}),
@@ -1057,6 +1058,77 @@ class Plugins(Base):
         self.assertIsNone(wp_ctl.purge_page_cache({k: v for k, v in self.cfg.items() if k != "page_cache_dir"}))
 
 
+class Backups(Base):
+    """The snapshots of a site as the restore page lists them, and the restore itself: the site's name is the confirmation, the undo is always kept, and nothing but a stamp reaches the tool."""
+
+    def snapshot(self, site, stamp, manifest="site=%s\nstamp=%s\ncore=7.1.4\nkbytes=2048\n", complete=True):
+        d = Path(self.cfg["backup_dir"]) / site / stamp
+        d.mkdir(parents=True)
+        if complete:
+            (d / "db.sql.gz").write_bytes(b"x")
+            (d / "files").mkdir()
+            (d / "MANIFEST").write_text(manifest % (site, stamp) if "%s" in manifest else manifest)
+        return d
+
+    def listed(self, site="wptest"):
+        rc, reply = self.call({"verb": "backups", "site": site})
+        self.assertEqual((rc, reply["ok"]), (0, True), reply)
+        return reply["backups"]
+
+    def test_the_snapshots_come_newest_first_with_their_tag_version_and_size(self):
+        self.snapshot("wptest", "20261029T020000Z")
+        self.snapshot("wptest", "20261031T020000Z", "site=wptest\ncore=7.1.4\ntag=pre-update\nkbytes=4096\n")
+        self.snapshot("wptest", "20261030T020000Z", "site=wptest\ncore=7.1.3\nempty=yes\n")
+        rows = self.listed()
+        self.assertEqual([r["stamp"] for r in rows], ["20261031T020000Z", "20261030T020000Z", "20261029T020000Z"])
+        self.assertEqual((rows[0]["tag"], rows[0]["core"], rows[0]["kbytes"], rows[0]["empty"]), ("pre-update", "7.1.4", 4096, False))
+        self.assertEqual((rows[1]["tag"], rows[1]["kbytes"], rows[1]["empty"]), ("", None, True))
+        self.assertEqual(rows[2]["tag"], "")
+        self.assertEqual(self.calls(), [], "a read runs no tool")
+
+    def test_what_is_not_a_complete_snapshot_is_left_out_and_a_manifest_is_not_trusted(self):
+        self.snapshot("wptest", "20261031T020000Z", complete=False)                       # a half-made one has no files in it
+        d = self.snapshot("wptest", "20261030T020000Z", "tag=surprise\ncore=" + "9" * 100 + "\nkbytes=-5\nfoo=bar\n")
+        (Path(self.cfg["backup_dir"]) / "wptest" / "not-a-stamp").mkdir()
+        (Path(self.cfg["backup_dir"]) / "wptest" / ".partial-20261031T030000Z").mkdir()
+        (Path(self.cfg["backup_dir"]) / "wptest" / "20261029T020000Z").symlink_to(d)
+        rows = self.listed()
+        self.assertEqual([r["stamp"] for r in rows], ["20261030T020000Z"])
+        self.assertEqual((rows[0]["tag"], len(rows[0]["core"]), rows[0]["kbytes"]), ("", 20, None), "an unknown tag, a long version and a negative size are not passed on")
+
+    def test_a_site_without_snapshots_has_an_empty_list_and_an_unknown_site_is_refused(self):
+        self.assertEqual(self.listed(), [])
+        rc, reply = self.call({"verb": "backups", "site": "nosuchsite"})
+        self.assertEqual((rc, reply["ok"]), (2, False))
+
+    def test_the_list_is_cut_at_sixty(self):
+        for i in range(70):
+            self.snapshot("wptest", "202610%02dT%06dZ" % (i % 28 + 1, i))
+        self.assertLessEqual(len(self.listed()), 60)
+
+    def test_a_restore_needs_a_stamp_and_the_sites_name_and_asks_the_tool_for_nothing_else(self):
+        for label, req, why in (("no name", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z"}, "missing_argument"),
+                                ("another name", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z", "confirm_name": "held"}, "confirm_mismatch"),
+                                ("latest", {"verb": "restore", "site": "wptest", "stamp": "latest", "confirm_name": "wptest"}, "bad_value"),
+                                ("a path", {"verb": "restore", "site": "wptest", "stamp": "../20261031T020000Z", "confirm_name": "wptest"}, "bad_value"),
+                                ("a trailing newline", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z\n", "confirm_name": "wptest"}, "bad_value"),
+                                ("a flag", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z", "confirm_name": "wptest", "yes": True}, "unknown_argument"),
+                                ("no undo", {"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z", "confirm_name": "wptest", "no_undo": True}, "unknown_argument"),
+                                ("an unknown site", {"verb": "restore", "site": "nosuchsite", "stamp": "20261031T020000Z", "confirm_name": "nosuchsite"}, None)):
+            with self.subTest(label):
+                rc, reply = self.call(req)
+                self.assertEqual((rc, reply["ok"]), (2, False), reply)
+                if why:
+                    self.assertEqual(reply["error"], why)
+        self.assert_nothing_happened("a refused restore")
+
+    def test_a_restore_is_a_job_that_runs_the_recover_tool_with_the_name_typed_for_it(self):
+        rc, reply = self.call({"verb": "restore", "site": "wptest", "stamp": "20261031T020000Z", "confirm_name": "wptest"})
+        self.assertEqual((rc, reply["ok"]), (0, True), reply)
+        self.assertEqual((self.state / "jobs" / reply["job"] / "tty").read_text(), "wptest\n")
+        self.assertEqual(self.audit()[0]["verb"], "restore")
+
+
 class PluginRequests(Base):
     ROWS = [{"site": "wptest", "id": "aabbccdd0011", "slug": "akismet", "user": "owner", "t": 1800000000, "first_seen": 1800000001, "state": "pending", "note": "", "name": "Akismet", "version": "5.3",
              "installs": 5000000, "rating": 90, "updated": "2026-10-01", "found": True, "vuln": "clean", "vuln_line": "none known", "notified": True}]
@@ -1148,7 +1220,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "plugins", "plugin-set", "plugin-requests", "plugin-requests-collect", "plugin-request-decide", "import-new", "update-check", "update-apply", "import-rescan"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "plugins", "plugin-set", "plugin-requests", "plugin-requests-collect", "plugin-request-decide", "import-new", "update-check", "update-apply", "import-rescan", "backups", "restore"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)
@@ -1484,7 +1556,7 @@ class Wrapper(Base):
             self.assertEqual(cfg[key], v[var], key)
         wp_ctl.check_limits(cfg, wp_ctl.VERBS)       # the repo's own table passes the dispatcher's check: every verb named exists and every job and the upload have a timeout of their own
         self.assertEqual(cfg["data_dir"], v["wp_data_mount"] + "/sites")
-        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tools_bin", "page_cache_dir", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
+        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "backup_dir", "tools_bin", "page_cache_dir", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
                   "reserved_names"}
         self.assertEqual(set(cfg), needed, "every key the dispatcher reads, and no stray one")
 

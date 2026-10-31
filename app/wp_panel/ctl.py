@@ -33,6 +33,7 @@ REQUEST_ID_RE = re.compile(r"^[a-f0-9]{8,24}$")                                #
 REQUEST_DECISIONS = ("approve", "deny")                                        # wp-ctl's REQUEST_DECISIONS
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")                                  # wp-ctl's SLUG_RE (a wordpress.org plugin name)
 REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")      # wp-ctl's REJECT_RE: plugin and theme slugs, comma separated
+STAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")                                  # wp-ctl's STAMP_RE: a snapshot of wp-site-backup
 FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")                                # wp-ctl's IMPORT_FILE_RE
 FILE_MAX = 100
 UPLOAD_MAX = 3072 * 1024 * 1024                                              # the intake quota (wp_intake_quota_mb): nothing larger could be kept
@@ -68,6 +69,7 @@ READ_VERBS = {
     "vuln-check": {"site": (True, _site)},
     "users": {"site": (True, _site)},
     "plugins": {"site": (True, _site)},
+    "backups": {"site": (True, _site)},
     "plugin-requests": {},
     "jobs": {},
     "job-status": {"job": (True, _job)},
@@ -114,6 +116,7 @@ ACTION_VERBS.update({
     "update-check": {"site": (True, _site)},
     "update-apply": {"site": (True, _site)},
     "import-reset": {"site": (True, _site), "confirm_name": (True, _site)},
+    "restore": {"site": (True, _site), "stamp": (True, _text(16, STAMP_RE)), "confirm_name": (True, _site)},
     "import-discard": {"file": (True, _file), "if_present": (False, _bool)},
 })
 STREAM_VERBS = {"import-receive": {"file": (True, _file)}}
@@ -146,6 +149,8 @@ def _rules(verb, args):
         raise CtlError("not_allowed", "only an approval is confirmed by the plugin's name")
     if verb == "import-reset" and args.get("confirm_name") != args.get("site"):
         raise CtlError("not_allowed", "a reset needs the site's name typed exactly")
+    if verb == "restore" and args.get("confirm_name") != args.get("site"):
+        raise CtlError("not_allowed", "a restore needs the site's name typed exactly")
     if verb == "import-run":
         if args.get("replace") is True and args.get("confirm_name") != args.get("site"):
             raise CtlError("not_allowed", "replacing a site's data needs the site's name typed exactly")

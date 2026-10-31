@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Backups · {{ name }}{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('site', name=name) }}">{{ name | clip(40) }}</a></p>
+<div class="page-head"><div><h1>Backups</h1>
+  <p class="small">Each snapshot is the site's database and wp-content at that moment, taken every night, before an update and before an import. Restoring one replaces the site's database and wp-content with it. A copy of what is there now is kept to undo with.</p></div></div>
+
+{% if state == 'stopped' %}<p class="notice">This site is stopped. Move it to hold first: a stopped site has no containers to restore into.</p>{% endif %}
+{% if problem %}<p class="error" role="alert">{{ problem | clip(400) }}</p>{% endif %}
+
+<section class="card">
+{% if rows %}
+<div class="table-wrap flat stack">
+<table>
+  <thead><tr><th>Taken (UTC)</th><th>Kind</th><th>WordPress</th><th>Size</th><th>Do</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+  <tr>
+    <td data-label="Taken (UTC)">{{ r.stamp[0:4] }}-{{ r.stamp[4:6] }}-{{ r.stamp[6:8] }} {{ r.stamp[9:11] }}:{{ r.stamp[11:13] }}</td>
+    <td data-label="Kind">{% if r.tag == 'pre-update' %}before an update{% elif r.tag == 'pre-import' %}before an import{% elif r.tag == 'final' %}last before stopping{% else %}nightly{% endif %}{% if r.empty %} <span class="badge warn">empty site</span>{% endif %}</td>
+    <td data-label="WordPress">{{ (r.core or '?') | clip(20) }}</td>
+    <td data-label="Size">{% if r.kbytes is not none %}{{ (r.kbytes / 1024) | round(1) }} MB{% else %}?{% endif %}</td>
+    <td data-label="Do">
+      {% if state != 'stopped' %}<a class="button secondary" href="{{ url_for('restore_confirm', name=name, stamp=r.stamp) }}">Restore…</a>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% elif not problem %}<p>This site has no backups yet.</p>{% endif %}
+</section>
+{% endblock %}

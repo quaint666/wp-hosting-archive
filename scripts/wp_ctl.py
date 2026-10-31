@@ -38,6 +38,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")                         # w
 LABEL_RE = re.compile(r"^[^\s].{0,98}[^\s]$|^[^\s]$")                          # a site's label: 1 to 100 characters, no leading or trailing space (the registry's rule; control characters are refused before this)
 IMPORT_FILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.wpress")           # what wp-site-import accepts in the intake directory
 REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*")
+STAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")                                  # a snapshot of wp-site-backup, named by its UTC time
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -851,6 +852,46 @@ def h_import_rescan(call):
     return call.job([call.ctl.tool("wp-site-import"), "rescan", call.args["site"]])
 
 
+BACKUPS_MAX = 60                                                              # the most snapshots one reply lists (retention keeps far fewer)
+
+
+def h_backups(call):
+    """The snapshots of one site, newest first: stamp, tag, WordPress version, size, and whether it is the empty kind. They are the site's own directory under the backup root, read here and not trusted:
+    only a directory named like a stamp counts, only the MANIFEST lines this program knows are read, and a snapshot that is not complete is left out (wp-site-recover would refuse it)."""
+    site = call.args["site"]
+    root = Path(call.ctl.cfg["backup_dir"]) / site
+    rows = []
+    try:
+        names = sorted((n for n in os.listdir(root) if STAMP_RE.fullmatch(n)), reverse=True)
+    except OSError:
+        names = []
+    for stamp in names:
+        snap = root / stamp
+        if snap.is_symlink() or not (snap / "db.sql.gz").is_file() or not (snap / "MANIFEST").is_file() or not (snap / "files").is_dir():
+            continue
+        fields = {}
+        try:
+            for line in (snap / "MANIFEST").read_text(errors="replace").splitlines()[:40]:
+                k, eq, v = line.partition("=")
+                if eq and k in ("core", "tag", "kbytes", "empty"):
+                    fields[k] = v
+        except OSError:
+            continue
+        kbytes = fields.get("kbytes", "")
+        rows.append({"stamp": stamp, "tag": fields.get("tag", "") if fields.get("tag", "") in BACKUP_TAGS else "", "core": plain(fields.get("core", ""), 20), "kbytes": int(kbytes) if kbytes.isdigit() else None,
+                     "empty": fields.get("empty") == "yes"})
+        if len(rows) >= BACKUPS_MAX:
+            break
+    return {"ok": True, "site": site, "backups": rows}
+
+
+def h_restore(call):
+    """Put a site back to one of its snapshots, in place (wp-site-recover): the site's database and wp-content are replaced, a dump of the current state is kept to undo with, and the site is offline for the
+    minutes it takes. Confirmed by the site's name; the tool asks for it at its terminal and gets the same name. There is no way here to skip the undo: that is for the operator at a shell."""
+    a = call.args
+    return call.job([call.ctl.tool("wp-site-recover"), a["site"], a["stamp"]], tty=[a["confirm_name"]])
+
+
 def h_import_reset(call):
     return call.job([call.ctl.tool("wp-site-import"), "reset", call.args["site"]], tty=[call.args["site"]])
 
@@ -893,6 +934,8 @@ VERBS = {
     "update-check": Verb("job", {"site": SITE}, h_update_check),
     "update-apply": Verb("job", {"site": SITE}, h_update_apply),
     "import-reset": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site")}, h_import_reset),
+    "backups": Verb("read", {"site": SITE}, h_backups),
+    "restore": Verb("job", {"site": SITE, "stamp": Arg("text", rx=STAMP_RE), "confirm_name": Arg("text", rx=NAME_RE, same="site")}, h_restore),
 }
 
 

@@ -63,7 +63,7 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply", "plugin-set", "plugin-requests-collect", "plugin-request-decide"},
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply", "plugin-set", "plugin-requests-collect", "plugin-request-decide", "restore"},
                          "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
@@ -755,6 +755,17 @@ class Imports(unittest.TestCase):
         for typed in ("", "bravo", "Alpha", "alpha ", None):
             self.refused("import-reset", site="alpha", confirm_name=typed)
         self.refused("import-reset", site="alpha")
+
+    def test_a_restore_needs_the_name_typed_exactly_and_a_real_stamp(self):
+        stamp = "20261031T020000Z"
+        self.assertEqual(self.line("restore", site="alpha", stamp=stamp, confirm_name="alpha"), {"verb": "restore", "site": "alpha", "stamp": stamp, "confirm_name": "alpha"})
+        for typed in ("", "bravo", "Alpha", "alpha ", None):
+            self.refused("restore", site="alpha", stamp=stamp, confirm_name=typed)
+        for bad in ("", "latest", "../" + stamp, stamp + "\n", stamp + "x", "2026-10-31", None, 20261031):
+            self.refused("restore", site="alpha", stamp=bad, confirm_name="alpha")
+        self.refused("restore", site="alpha", confirm_name="alpha")
+        self.refused("restore", site="alpha", stamp=stamp, confirm_name="alpha", yes=True)
+        self.refused("restore", site="alpha", stamp=stamp, confirm_name="alpha", no_undo=True)
 
     def test_flags_are_booleans_and_nothing_else(self):
         for flag in ("true", 1, 0, None, "yes", [True]):
