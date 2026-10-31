@@ -39,6 +39,7 @@ class Fake:
     def __init__(self):
         self.calls, self.requests, self.results, self.posted, self.journal = [], {}, {}, [], []
         self.search = {"akismet": [row()], "jetpack": [row("jetpack", "Jetpack", "13.0")], "hello-dolly": [row("hello-dolly", "Hello Dolly", "1.7.2")]}
+        self.apply_rc = 0
         self.themes = {"astra": [{"slug": "astra", "name": "Astra", "version": "4.8.0", "rating": 98}]}
         self.search_rc, self.vuln, self.ext_rc, self.ext_text, self.down, self.on_ext, self.update_rc = 0, {}, 0, "Success: Installed 1 of 1 plugins.", set(), None, 0
 
@@ -52,6 +53,8 @@ class Fake:
         if tool == "wp-vulnfeed":
             rc, line = self.vuln.get(cmd[2], (0, "plugin %s %s checked against 2 records; none known" % (cmd[2], cmd[3])))
             return done(rc, line + "\n")
+        if tool == "wp-site-provision":
+            return done(self.apply_rc, "applied\n" if not self.apply_rc else "", "" if not self.apply_rc else "Error: boom\n")
         if tool == "wp-site-ext":
             if self.on_ext:
                 self.on_ext()
@@ -478,6 +481,42 @@ class Themes(Base):
         s[self.key()]["kind"] = "theme"
         pr.save(self.cfg, s)
         self.assertEqual(json.loads(self.go("list")[1])["requests"][0]["kind"], "theme")
+
+
+class ApplyAfter(Base):
+    """All-in-One WP Migration's storage mount waits for its directory, so approving that plugin applies the site; no other plugin does."""
+
+    def approve(self, slug, kind=None):
+        self.fake.search[slug] = self.fake.search.get(slug) or [row(slug, slug, "1.0")]
+        self.fake.themes[slug] = [{"slug": slug, "name": slug, "version": "1.0", "rating": 90}]
+        self.fake.requests["alpha"] = [entry(RID1, slug, kind=kind)]
+        self.go("collect")
+        return self.go("decide", "alpha", RID1, "approve")
+
+    def test_approving_the_migration_plugin_applies_the_site_after_the_install(self):
+        rc, text = self.approve("all-in-one-wp-migration")
+        self.assertEqual(rc, 0, text)
+        calls = [c for c in self.fake.calls if os.path.basename(c[0]) in ("wp-site-ext", "wp-site-provision")]
+        self.assertEqual([c[1:] for c in calls], [["alpha", "plugin", "install", "all-in-one-wp-migration"], ["apply", "alpha"]], "the install first")
+        self.assertIn("applied alpha", text)
+
+    def test_other_plugins_and_a_theme_of_that_name_do_not(self):
+        self.approve("akismet")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+        self.approve("all-in-one-wp-migration", kind="theme")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+
+    def test_a_failed_install_applies_nothing_and_a_failed_apply_does_not_undo_the_install(self):
+        self.fake.ext_rc = 1
+        self.approve("all-in-one-wp-migration")
+        self.assertNotIn("wp-site-provision", self.fake.tools())
+        self.fake.ext_rc, self.fake.apply_rc = 0, 1
+        self.setUp()
+        self.fake.apply_rc = 1
+        rc, text = self.approve("all-in-one-wp-migration")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("applying alpha failed (status 1): Error: boom", text)
+        self.assertEqual(self.store()[self.key()]["state"], "installed")
 
 
 class Tokens(Base):

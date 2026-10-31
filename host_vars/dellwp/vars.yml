@@ -99,7 +99,7 @@ wp_site_defaults:
   allow_user_enum: false
   mail_mode: log
   cart_fragments: normal
-  ai1wm_export: false
+  ai1wm_export: true
   php_allow_functions: []
 # The sites are not listed here: a site is a record in the registry on dellwp (/srv/wp/sites/<name>/site.json), made by wp-ctl create. What stays here is the FLOOR of numbers: the ports and
 # quota project ids of the sites of the old engine, which are all closed and gone. wp-site-provision never gives a new site a number at or below these (it takes the next one above everything ever

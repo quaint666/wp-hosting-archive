@@ -39,6 +39,7 @@ DAY = 86400
 PENDING, INSTALLING, INSTALLED, FAILED, DENIED, EXPIRED = "pending", "installing", "installed", "failed", "denied", "expired"
 KEEP_FINISHED_DAYS = 60
 KINDS = ("plugin", "theme")
+APPLY_AFTER = ("all-in-one-wp-migration",)      # plugins whose directory a site mounts something into (templates/wp/site_compose.yml.j2, ai1wm_export): the site is applied once they are installed
 RESULTS_KEEP = 50
 
 
@@ -338,6 +339,16 @@ def cmd_list(cfg, out):
 
 # ---- deciding
 
+def apply_site(cfg, run, site):
+    """Apply a site's record so a mount that waited for a plugin is made (wp-site-provision restarts the stack: about ten seconds). A failure is said, never raised: the install stands."""
+    try:
+        p = run([os.path.join(cfg["tools_bin"], "wp-site-provision"), "apply", site], capture_output=True, text=True, timeout=cfg["install_timeout_s"], stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as err:
+        return "the site could not be applied (%s): run wp-site-provision apply %s" % (w.printable(err, limit=60), site)
+    lines = [l for l in ((p.stdout or "") + (p.stderr or "")).splitlines() if l.strip()]
+    return "applied %s" % site if p.returncode == 0 else "applying %s failed (status %d): %s" % (site, p.returncode, w.printable(lines[-1], limit=120) if lines else "no output")
+
+
 def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
     """Approve or deny one waiting request. `by` is 'panel' or 'phone' (for the journal). Returns the exit status."""
     if not SITE_RE.fullmatch(site or "") or not ID_RE.fullmatch(rid or "") or decision not in ("approve", "deny"):
@@ -378,6 +389,8 @@ def decide(cfg, site, rid, decision, by, accept_slug, out, run, clock):
         cleared = wp_ctl.purge_page_cache(cfg) if rc == 0 else None
         save(cfg, store)
         problem = write_result(cfg, run, site, rid, e["state"], e["note"])
+        if rc == 0 and kind == "plugin" and slug in APPLY_AFTER:
+            out(apply_site(cfg, run, site))
         out(("installed %s on %s, inactive" % (named(kind, slug), site) + (("; page cache: %d files cleared" % cleared) if cleared is not None else "")) if rc == 0 else "the install of %s on %s failed: %s" % (named(kind, slug), site, last))
         if problem:
             out(problem)

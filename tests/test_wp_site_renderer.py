@@ -177,7 +177,7 @@ class Parity(unittest.TestCase):
         def files(**site):
             out = rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], **site})
             return {f["path"].rsplit("/", 1)[1]: f["content"] for f in out}
-        off, on = files(), files(ai1wm_export=True)
+        off, on = files(ai1wm_export=False), files(ai1wm_export=True)
         self.assertNotIn("all-in-one-wp-migration", off["compose.yml"] + off["wp_site_alpha.conf"])
         self.assertIn("./html/wp-content/plugins/all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage", on["compose.yml"])
         self.assertNotIn(":ro", [ln for ln in on["compose.yml"].splitlines() if "all-in-one-wp-migration/storage" in ln and not ln.lstrip().startswith("#")][0])

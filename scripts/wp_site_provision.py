@@ -102,11 +102,13 @@ class Provisioner:
     def ai1wm_dir(self, name):
         return self.site_dir(name) / "html/wp-content/plugins/all-in-one-wp-migration"
 
-    def require_ai1wm(self, name):
-        """ai1wm_export puts a writable mount inside the plugin's own directory. Docker makes a missing mount point as a root-owned directory, which the plugin's install would then refuse, so the
-        switch is impossible until the plugin is there (installed through a plugin request)."""
-        if not self.ai1wm_dir(name).is_dir():
-            raise model.Refuse("ai1wm_export needs All-in-One WP Migration installed on %s first (%s is missing): have the site request the plugin and approve it, then set this" % (name, self.ai1wm_dir(name)))
+    def effective(self, site):
+        """The site as it is rendered. ai1wm_export (on by default) puts a writable mount inside the plugin's own directory, and Docker makes a missing mount point as a root-owned directory, which the
+        plugin's install would then refuse: so the switch counts only while the plugin's directory exists. Before the plugin is installed (and after it is removed) nothing is mounted; approving the
+        plugin's request applies the site (wp-plugin-requests) and the mount appears."""
+        if site.get("ai1wm_export") and not self.ai1wm_dir(site["name"]).is_dir():
+            return {**site, "ai1wm_export": False}
+        return site
 
     def secrets(self):
         try:
@@ -121,7 +123,7 @@ class Provisioner:
         """The rendered files of a site (merged over the defaults), or Failed with the reason: no secret file, a value the platform lacks, a field a template reads that the site does not have."""
         master, resend = self.secrets()
         try:
-            return renderer.Renderer(self.cfg["template_dir"], self.platform, master, resend).files(site)
+            return renderer.Renderer(self.cfg["template_dir"], self.platform, master, resend).files(self.effective(site))
         except renderer.RenderError as e:
             raise Failed(str(e))
 
@@ -162,8 +164,6 @@ class Provisioner:
 
     def create(self, name, sets=()):
         values = self.parse_sets(sets)
-        if values.get("ai1wm_export"):
-            raise model.Refuse("ai1wm_export needs the plugin installed, which a new site cannot have: create the site, install the plugin, then set it")
         with self.lock("registry"), self.lock("site-" + name):
             try:
                 everything = model.everything(self.registry, self.floor)
@@ -235,7 +235,7 @@ class Provisioner:
         values = self.parse_sets(sets)
         if not values:
             raise model.Refuse("give at least one key=value")
-        return self.change(name, values, check=(lambda rec: self.require_ai1wm(name)) if values.get("ai1wm_export") else None)
+        return self.change(name, values)
 
     def state(self, name, target):
         """Move a site to hold, live or stopped (model.plan_state says which moves exist). Before it stops, the final backup is taken, and a failed backup stops everything: the record is not changed."""
@@ -344,11 +344,7 @@ class Provisioner:
                      SEED_SCRIPT.format(php=p["wp_php_uid"]), timeout=300)
             note("seeded WordPress core from the image")
         (d / "html/wp-config-docker.php").unlink(missing_ok=True)
-        if site["ai1wm_export"]:
-            try:
-                self.require_ai1wm(name)
-            except model.Refuse as e:
-                raise Failed(str(e))
+        if self.effective(site)["ai1wm_export"]:
             self.ensure_dir(self.ai1wm_dir(name) / "storage", p["wp_php_uid"], p["wp_php_uid"], 0o755)
 
         wrote = {fname: self.put(by[fname]) for fname in (".env", "wp-config.php", "php.ini", "fpm-pool.conf", "compose.yml")}

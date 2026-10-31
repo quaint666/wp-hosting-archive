@@ -162,8 +162,8 @@ class WpConfigAndCompose(unittest.TestCase):
         self.assertEqual((d["allow_xmlrpc"], d["allow_app_passwords"], d["allow_user_enum"], d["mail_mode"]), (False, False, False, "log"))
 
     def test_the_ai1wm_backups_path_is_set_only_when_the_export_switch_is_on(self):
-        self.assertNotIn("AI1WM_", self.cfg())
-        self.assertFalse(self.v["wp_site_defaults"]["ai1wm_export"])
+        self.assertNotIn("AI1WM_", self.cfg(ai1wm_export=False))
+        self.assertTrue(self.v["wp_site_defaults"]["ai1wm_export"], "on by default; the provisioning tool mounts it only once the plugin is installed")
         t = self.cfg(ai1wm_export=True)
         self.assertIn("define( 'AI1WM_DEFAULT_BACKUPS_PATH', __DIR__ . '/wp-content/uploads/ai1wm-backups' );", t)
         self.assertNotIn("WP_CONTENT_DIR .", t.split("wp-settings.php")[0].replace("// __DIR__, not WP_CONTENT_DIR", ""), "WP_CONTENT_DIR is defined by wp-settings.php: before it, the constant is undefined and PHP 8 stops with a fatal error")
@@ -186,7 +186,11 @@ class WpConfigAndCompose(unittest.TestCase):
         self.assertIn("%s:%s:ro" % (self.v["wp_mu_dir"], self.v["wp_mu_mount"]), vols)
         self.assertEqual(len([x for x in vols if "wp-mu" in x]), 1)
         self.assertNotIn("wp-mu", " ".join(doc["services"]["db"].get("volumes", [])))
-        self.assertTrue(all(x.endswith(":ro") or "uploads" in x for x in vols), "the only writable mount stays uploads")
+        self.assertTrue(all(x.endswith(":ro") or "uploads" in x for x in vols if "all-in-one-wp-migration" not in x), "the only writable mount stays uploads")
+        on = yaml.safe_load(env().get_template("wp/site_compose.yml.j2").render(**dict(self.ctx, wp_s={**self.ctx["wp_s"], "ai1wm_export": True})))["services"]["php"]["volumes"]
+        off = yaml.safe_load(env().get_template("wp/site_compose.yml.j2").render(**dict(self.ctx, wp_s={**self.ctx["wp_s"], "ai1wm_export": False})))["services"]["php"]["volumes"]
+        self.assertEqual([x for x in on if x not in off], ["./html/wp-content/plugins/all-in-one-wp-migration/storage:/var/www/html/wp-content/plugins/all-in-one-wp-migration/storage"], "the switch adds exactly one writable mount")
+        self.assertTrue(all(x in on for x in off))
 
     def test_php_may_read_the_directory_wordpress_loads_the_plugins_from(self):
         # dellwp 2026-10-25: open_basedir was /var/www/html:/tmp, is_dir() on the mount said no, and WordPress loaded none of the must-use plugins without a word

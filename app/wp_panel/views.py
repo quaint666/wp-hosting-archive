@@ -67,7 +67,7 @@ SETTINGS = [
     ("allow_user_enum", "Allow user enumeration", "bool", ("true", "false"), "a reload"),
     ("mail_mode", "Mail", "choice", ("log", "send"), "send needs the Resend key in the vault"),
     ("cart_fragments", "Mini-cart refresh", "choice", ("normal", "cache"), "cache keeps WooCommerce's empty-cart answer for visitors with no cart; nginx reloads"),
-    ("ai1wm_export", "Allow All-in-One WP Migration export", "bool", ("true", "false"), "restarts the stack: about ten seconds offline; refused until the plugin is installed (approve its request first)"),
+    ("ai1wm_export", "Allow All-in-One WP Migration export", "bool", ("true", "false"), "restarts the stack: about ten seconds offline; on by default, and mounted only once All-in-One WP Migration is installed (approving its request applies it)"),
     ("label", "Label", "text", 100, "registry only: nothing is applied"),
     ("note", "Note", "text", 500, "registry only: nothing is applied"),
 ]
