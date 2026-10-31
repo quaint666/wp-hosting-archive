@@ -1084,6 +1084,12 @@ class PluginRequests(Base):
                 rc, reply = self.call({"verb": "plugin-requests"})
                 self.assertEqual((rc, reply["error"]), (2, "tool_output"))
 
+    def test_the_kind_of_a_request_is_passed_on(self):
+        rows = [dict(self.ROWS[0], kind="theme", slug="astra"), dict(self.ROWS[0], id="aabbccdd0022", kind="plugin")]
+        self.control("stdout.wp-plugin-requests", json.dumps({"ok": True, "requests": rows}) + "\n")
+        rc, reply = self.call({"verb": "plugin-requests"})
+        self.assertEqual([r["kind"] for r in reply["requests"]], ["theme", "plugin"])
+
     def test_plugin_requests_takes_no_argument(self):
         rc, reply = self.call({"verb": "plugin-requests", "site": "wptest"})
         self.assertEqual((rc, reply["error"]), (2, "unknown_argument"))

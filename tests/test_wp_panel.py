@@ -67,7 +67,8 @@ class FakeCtl:
                 {"site": "alpha", "id": "aabbccdd0022", "slug": "shady", "user": "owner", "first_seen": T0 - 300, "state": "pending", "note": "", "name": "Shady", "version": "1.0", "found": True, "vuln": "found",
                  "vuln_line": "plugin shady 1.0: Shady - RCE (CVE-2026-9)"},
                 {"site": "bravo", "id": "aabbccdd0033", "slug": "ghost", "user": "x", "first_seen": T0 - 100, "state": "pending", "note": "", "found": False, "vuln": "unchecked", "vuln_line": "not on wordpress.org"},
-                {"site": "alpha", "id": "aabbccdd0044", "slug": "jetpack", "user": "owner", "first_seen": T0 - 86400, "state": "installed", "note": ""}]},
+                {"site": "alpha", "id": "aabbccdd0044", "slug": "jetpack", "user": "owner", "first_seen": T0 - 86400, "state": "installed", "note": ""},
+                {"site": "alpha", "id": "aabbccdd0055", "kind": "theme", "slug": "astra", "user": "owner", "first_seen": T0 - 90000, "state": "installed", "note": ""}]},
             "plugin-requests-collect": {"ok": True, "rc": 0, "ran": True, "out": "alpha: 1 request read, 0 new\n3 requests waiting\n"},
             "plugin-request-decide": {"ok": True, "rc": 0, "ran": True, "out": "installed akismet on alpha, inactive\n"},
             "plugin-set": {"ok": True, "rc": 0, "ran": True, "out": "Success: done.\npage cache: 12 files cleared\n"},
@@ -940,6 +941,13 @@ class RequestsPage(Base):
         self.assertIn("known vulnerability", bad); self.assertIn("Approve…", bad); self.assertIn("RCE", bad)
         self.assertIn("not on wordpress.org", ghost); self.assertNotIn('value="approve"', ghost, "nothing to approve: wordpress.org does not have it"); self.assertIn('value="deny"', ghost)
         self.assertIn("Decided or expired", html); self.assertIn("jetpack", html)
+
+    def test_a_theme_request_says_it_is_a_theme_and_a_request_without_a_kind_a_plugin(self):
+        html = self.get("/requests").get_data(as_text=True)
+        done = html.split("Decided or expired")[1]
+        theme = next(r for r in re.findall(r"<tr>(.*?)</tr>", done, re.S) if "astra" in r)
+        plugin = next(r for r in re.findall(r"<tr>(.*?)</tr>", done, re.S) if "jetpack" in r)
+        self.assertIn(">theme</span>", theme); self.assertIn(">plugin</span>", plugin)
 
     def test_text_from_a_request_is_shown_as_text(self):
         html = self.get("/requests").get_data(as_text=True)

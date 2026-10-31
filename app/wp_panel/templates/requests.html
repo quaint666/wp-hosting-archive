@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Requests{% endblock %}
 {% block body %}
-<div class="page-head"><div><h1>Plugin requests</h1>
-  <p class="small">What a site's administrator asked for by pressing Install in wp-admin. Nothing is installed until you approve it, and an approved plugin is installed <strong>inactive</strong>: they activate it, or you do from the site's Plugins page. dellwp looks for new requests on a timer; Refresh looks now.</p></div>
+<div class="page-head"><div><h1>Plugin and theme requests</h1>
+  <p class="small">What a site's administrator asked for by pressing Install in wp-admin. Nothing is installed until you approve it, and an approved plugin or theme is installed <strong>inactive</strong>: they activate it, or you do from the site's Plugins page (a plugin) or in wp-admin (a theme). dellwp looks for new requests on a timer; Refresh looks now.</p></div>
   <form method="post" action="{{ url_for('requests_refresh') }}" class="inline">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
     <button type="submit" class="secondary">Refresh</button>
@@ -13,12 +13,12 @@
 {% if waiting %}
 <div class="table-wrap flat stack">
 <table>
-  <thead><tr><th>Site</th><th>Plugin</th><th>Asked</th><th>Checks</th><th>Do</th></tr></thead>
+  <thead><tr><th>Site</th><th>Plugin or theme</th><th>Asked</th><th>Checks</th><th>Do</th></tr></thead>
   <tbody>
   {% for r in waiting %}
   <tr>
     <td data-label="Site"><a href="{{ url_for('plugins_page', name=r.site) }}">{{ r.site | clip(40) }}</a><br><span class="small">{{ (r.user or 'someone') | clip(60) }}</span></td>
-    <td data-label="Plugin"><strong>{{ (r.name or r.slug) | clip(80) }}</strong>{% if r.version %} {{ r.version | clip(40) }}{% endif %}<br><span class="small"><code>{{ r.slug | clip(100) }}</code>{% if r.installs is not none and r.installs is defined and r.installs %} · {{ r.installs }}+ installs{% endif %}{% if r.updated %} · updated {{ r.updated | clip(30) }}{% endif %}</span></td>
+    <td data-label="Plugin or theme"><span class="badge">{{ (r.kind or 'plugin') | clip(10) }}</span> <strong>{{ (r.name or r.slug) | clip(80) }}</strong>{% if r.version %} {{ r.version | clip(40) }}{% endif %}<br><span class="small"><code>{{ r.slug | clip(100) }}</code>{% if r.installs is not none and r.installs is defined and r.installs %} · {{ r.installs }}+ installs{% endif %}{% if r.updated %} · updated {{ r.updated | clip(30) }}{% endif %}</span></td>
     <td data-label="Asked">{{ r.first_seen | ago }}</td>
     <td data-label="Checks">
       {% if r.found is none %}<span class="badge warn">not checked yet</span>
@@ -58,12 +58,12 @@
 <h2>Decided or expired</h2>
 <div class="table-wrap flat stack">
 <table>
-  <thead><tr><th>Site</th><th>Plugin</th><th>Asked</th><th>Result</th></tr></thead>
+  <thead><tr><th>Site</th><th>Plugin or theme</th><th>Asked</th><th>Result</th></tr></thead>
   <tbody>
   {% for r in finished %}
   <tr>
     <td data-label="Site">{{ r.site | clip(40) }}</td>
-    <td data-label="Plugin"><code>{{ r.slug | clip(100) }}</code></td>
+    <td data-label="Plugin or theme"><span class="badge">{{ (r.kind or 'plugin') | clip(10) }}</span> <code>{{ r.slug | clip(100) }}</code></td>
     <td data-label="Asked">{{ r.first_seen | ago }}</td>
     <td data-label="Result"><span class="badge {{ 'ok' if r.state == 'installed' else 'bad' if r.state == 'failed' else '' }}">{{ r.state | clip(20) }}</span>{% if r.note %} <span class="small">{{ r.note | clip(160) }}</span>{% endif %}</td>
   </tr>

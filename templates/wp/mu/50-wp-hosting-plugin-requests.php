@@ -2,7 +2,7 @@
 /**
  * Managed by Ansible (templates/wp/mu/50-wp-hosting-plugin-requests.php). A must-use plugin of the hosting service, loaded from WPMU_PLUGIN_DIR (root-owned, read-only to PHP).
  *
- * "Install" in wp-admin becomes a request to the operator. A site cannot install code (wp-config sets DISALLOW_FILE_MODS and the php container mounts the code read-only), so Plugins > Add New is
+ * "Install" in wp-admin becomes a request to the operator, for a plugin and for a theme (a request has a kind; an entry without one is a plugin). A site cannot install code (wp-config sets DISALLOW_FILE_MODS and the php container mounts the code read-only), so Plugins > Add New is
  * switched off by WordPress. This file switches the screen back on for administrators and catches the one thing the screen is for:
  *  - map_meta_cap gives administrators the install_plugins capability back, so the menu entry, the search, the featured list and the Install buttons appear;
  *  - an Install press (the button's ajax call, and the plain link the plugin details window uses) is answered here, BEFORE WordPress's own handler, by writing a request into the option
@@ -44,6 +44,7 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 			}
 			$out[] = array(
 				'id'   => $entry['id'],
+				'kind' => isset( $entry['kind'] ) && 'theme' === $entry['kind'] ? 'theme' : 'plugin',
 				'slug' => $entry['slug'],
 				'user' => isset( $entry['user'] ) && is_string( $entry['user'] ) ? substr( $entry['user'], 0, 60 ) : '',
 				't'    => $entry['t'],
@@ -74,8 +75,9 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		return $entry['t'] < time() - 7 * DAY_IN_SECONDS ? 'expired' : 'waiting';
 	}
 
-	/** File a request. Returns array( ok, message ). A request for a slug that already waits is a success and adds nothing. */
-	function wph_pr_file( $slug, $user ) {
+	/** File a request. Returns array( ok, message ). A request for a slug of the same kind that already waits is a success and adds nothing. */
+	function wph_pr_file( $slug, $user, $kind = 'plugin' ) {
+		$kind = 'theme' === $kind ? 'theme' : 'plugin';
 		if ( wph_pr_max() < 1 ) {
 			return array( false, 'Requesting plugins is not switched on for this site.' );
 		}
@@ -84,7 +86,7 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		$waiting = 0;
 		foreach ( $list as $entry ) {
 			if ( 'waiting' === wph_pr_state( $entry, $results ) ) {
-				if ( $entry['slug'] === $slug ) {
+				if ( $entry['slug'] === $slug && $entry['kind'] === $kind ) {
 					return array( true, 'Already requested.' );
 				}
 				$waiting++;
@@ -95,6 +97,7 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		}
 		$list[] = array(
 			'id'   => bin2hex( random_bytes( 6 ) ),
+			'kind' => $kind,
 			'slug' => $slug,
 			'user' => substr( (string) $user, 0, 60 ),
 			't'    => time(),
@@ -103,10 +106,13 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		return array( true, 'Requested.' );
 	}
 
-	/** Administrators get install_plugins back (WordPress takes it away with DISALLOW_FILE_MODS), so the Add New screen exists. Nothing else is given. */
+	/** Administrators get install_plugins and install_themes back (WordPress takes them away with DISALLOW_FILE_MODS), so the Add New screens exist. Nothing else is given. */
 	function wph_pr_caps( $caps, $cap, $user_id ) {
 		if ( 'install_plugins' === $cap && wph_pr_max() > 0 && array( 'do_not_allow' ) === $caps && $user_id > 0 && user_can( $user_id, 'activate_plugins' ) ) {
 			return array( 'activate_plugins' );
+		}
+		if ( 'install_themes' === $cap && wph_pr_max() > 0 && array( 'do_not_allow' ) === $caps && $user_id > 0 && user_can( $user_id, 'switch_themes' ) ) {
+			return array( 'switch_themes' );
 		}
 		return $caps;
 	}
@@ -131,6 +137,26 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		wp_send_json_success( array( 'slug' => $slug, 'pluginName' => $slug, 'wphRequested' => true ) );
 	}
 
+	/** The theme Install button's ajax call, answered the same way. */
+	function wph_pr_ajax_theme() {
+		if ( wph_pr_max() < 1 ) {
+			return;
+		}
+		check_ajax_referer( 'updates' );
+		$slug = wph_pr_slug( isset( $_POST['slug'] ) ? wp_unslash( $_POST['slug'] ) : '' );
+		if ( '' === $slug ) {
+			wp_send_json_error( array( 'slug' => '', 'errorCode' => 'wph_bad_slug', 'errorMessage' => 'That is not a theme name wordpress.org uses.' ) );
+		}
+		if ( ! current_user_can( 'install_themes' ) ) {
+			wp_send_json_error( array( 'slug' => $slug, 'errorCode' => 'wph_not_allowed', 'errorMessage' => 'You are not allowed to request themes.' ) );
+		}
+		$done = wph_pr_file( $slug, wp_get_current_user()->user_login, 'theme' );
+		if ( ! $done[0] ) {
+			wp_send_json_error( array( 'slug' => $slug, 'errorCode' => 'wph_refused', 'errorMessage' => $done[1] ) );
+		}
+		wp_send_json_success( array( 'slug' => $slug, 'themeName' => $slug, 'wphRequested' => true ) );
+	}
+
 	/** The plain-link install (the plugin details window) and the zip upload, both through wp-admin/update.php. */
 	function wph_pr_update_php() {
 		global $pagenow;
@@ -140,6 +166,25 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		$action = isset( $_REQUEST['action'] ) ? wp_unslash( $_REQUEST['action'] ) : '';
 		if ( 'upload-plugin' === $action ) {
 			wp_die( 'Uploading a plugin is not available here. Find it on the Add New page and press Install: that sends a request to the hosting operator.', 'Not available', array( 'response' => 403 ) );
+		}
+		if ( 'upload-theme' === $action ) {
+			wp_die( 'Uploading a theme is not available here. Find it on the Add New page and press Install: that sends a request to the hosting operator.', 'Not available', array( 'response' => 403 ) );
+		}
+		if ( 'install-theme' === $action ) {
+			$slug = wph_pr_slug( isset( $_REQUEST['theme'] ) ? wp_unslash( $_REQUEST['theme'] ) : '' );
+			if ( '' === $slug ) {
+				wp_die( 'That is not a theme name wordpress.org uses.', 'Not available', array( 'response' => 400 ) );
+			}
+			check_admin_referer( 'install-theme_' . $slug );
+			if ( ! current_user_can( 'install_themes' ) ) {
+				wp_die( 'You are not allowed to request themes.', 'Not available', array( 'response' => 403 ) );
+			}
+			$done = wph_pr_file( $slug, wp_get_current_user()->user_login, 'theme' );
+			if ( ! $done[0] ) {
+				wp_die( esc_html( $done[1] ), 'Not available', array( 'response' => 429 ) );
+			}
+			wp_safe_redirect( admin_url( 'theme-install.php' ) );
+			exit;
 		}
 		if ( 'install-plugin' !== $action ) {
 			return;
@@ -166,10 +211,30 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		if ( 'plugin-install.php' === $pagenow && 'default' === $domain && 'Install Now' === $text ) {
 			return 'Request install';
 		}
+		if ( 'theme-install.php' === $pagenow && 'default' === $domain && 'Install' === $text ) {
+			return 'Request install';
+		}
+		return $translation;
+	}
+
+	/** The same word for the theme cards, whose button is _x( 'Install', 'theme' ). */
+	function wph_pr_words_ctx( $translation, $text, $context, $domain = 'default' ) {
+		global $pagenow;
+		if ( 'theme-install.php' === $pagenow && 'default' === $domain && 'Install' === $text && 'theme' === $context ) {
+			return 'Request install';
+		}
 		return $translation;
 	}
 
 	function wph_pr_screen_assets( $hook ) {
+		if ( 'theme-install.php' === $hook && wph_pr_max() > 0 ) {
+			wp_add_inline_script(
+				'updates',
+				"if(window.wp&&wp.updates&&wp.updates.l10n){(function(l){l.installing='Requesting…';l.themeInstalling='Requesting %s…';l.installedMsg='Requested. The hosting operator will look at it.';})(wp.updates.l10n);}",
+				'after'
+			);
+			return;
+		}
 		if ( 'plugin-install.php' !== $hook || wph_pr_max() < 1 ) {
 			return;
 		}
@@ -186,12 +251,15 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		if ( 'plugin-install.php' === $pagenow && wph_pr_max() > 0 ) {
 			echo '<style>.upload-view-toggle,.upload-plugin,.wp-upload-form{display:none!important}</style>' . "\n";
 		}
+		if ( 'theme-install.php' === $pagenow && wph_pr_max() > 0 ) {
+			echo '<style>.upload-view-toggle,.upload-theme,.wp-upload-form{display:none!important}</style>' . "\n";
+		}
 	}
 
 	/** Each request and what became of it, on the Plugins pages. */
 	function wph_pr_notices() {
 		global $pagenow;
-		if ( ! in_array( $pagenow, array( 'plugin-install.php', 'plugins.php' ), true ) || wph_pr_max() < 1 || ! current_user_can( 'install_plugins' ) ) {
+		if ( ! in_array( $pagenow, array( 'plugin-install.php', 'plugins.php', 'theme-install.php', 'themes.php' ), true ) || wph_pr_max() < 1 || ( ! current_user_can( 'install_plugins' ) && ! current_user_can( 'install_themes' ) ) ) {
 			return;
 		}
 		$list = array_slice( array_reverse( wph_pr_requests() ), 0, 10 );
@@ -210,17 +278,23 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 		$seen  = array();
 		$files = array_keys( get_plugins() );
 		foreach ( $list as $entry ) {
-			if ( isset( $seen[ $entry['slug'] ] ) ) {
+			$seen_key = $entry['kind'] . ':' . $entry['slug'];
+			if ( isset( $seen[ $seen_key ] ) ) {
 				continue;
 			}
-			$seen[ $entry['slug'] ] = true;
-			$state                  = wph_pr_state( $entry, $results );
+			$seen[ $seen_key ] = true;
+			$state             = wph_pr_state( $entry, $results );
 			if ( 'installed' === $state ) {
-				// Said until the plugin is switched on (or gone): the line is there to say "activate it", and then it has nothing left to say.
+				// Said until the plugin or theme is switched on (or gone): the line is there to say "activate it", and then it has nothing left to say.
 				$inactive = false;
-				foreach ( $files as $file ) {
-					if ( 0 === strpos( $file, $entry['slug'] . '/' ) && ! is_plugin_active( $file ) ) {
-						$inactive = true;
+				if ( 'theme' === $entry['kind'] ) {
+					$themes   = wp_get_themes();
+					$inactive = isset( $themes[ $entry['slug'] ] ) && get_stylesheet() !== $entry['slug'] && get_template() !== $entry['slug'];
+				} else {
+					foreach ( $files as $file ) {
+						if ( 0 === strpos( $file, $entry['slug'] . '/' ) && ! is_plugin_active( $file ) ) {
+							$inactive = true;
+						}
 					}
 				}
 				if ( ! $inactive ) {
@@ -230,7 +304,8 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 				continue;
 			}
 			$note  = isset( $results[ $entry['id'] ] ) && '' !== $results[ $entry['id'] ]['note'] ? ' (' . $results[ $entry['id'] ]['note'] . ')' : '';
-			$rows .= '<li>' . esc_html( $entry['slug'] . ': ' . $words[ $state ] . $note ) . '</li>';
+			$said  = 'installed' === $state && 'theme' === $entry['kind'] ? 'installed. Activate it under Appearance, Themes' : $words[ $state ];
+			$rows .= '<li>' . esc_html( ( 'theme' === $entry['kind'] ? 'theme ' : '' ) . $entry['slug'] . ': ' . $said . $note ) . '</li>';
 		}
 		if ( '' !== $rows ) {
 			echo '<div class="notice notice-info"><p><strong>Plugin requests</strong></p><ul>' . $rows . '</ul></div>';
@@ -239,8 +314,10 @@ if ( ! function_exists( 'wph_pr_max' ) ) {
 
 	add_filter( 'map_meta_cap', 'wph_pr_caps', 99, 3 );
 	add_action( 'wp_ajax_install-plugin', 'wph_pr_ajax', 0 );
+	add_action( 'wp_ajax_install-theme', 'wph_pr_ajax_theme', 0 );
 	add_action( 'admin_init', 'wph_pr_update_php' );
 	add_filter( 'gettext', 'wph_pr_words', 10, 3 );
+	add_filter( 'gettext_with_context', 'wph_pr_words_ctx', 10, 4 );
 	add_action( 'admin_enqueue_scripts', 'wph_pr_screen_assets' );
 	add_action( 'admin_head', 'wph_pr_head' );
 	add_action( 'admin_notices', 'wph_pr_notices' );

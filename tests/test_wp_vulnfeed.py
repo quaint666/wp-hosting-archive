@@ -280,6 +280,17 @@ class Check(Base):
         self.assertEqual(self.go("check-plugin", "never-heard-of", "1.0")[0], 0)
         self.assertEqual(self.cli_calls, [], "it asks no site")
 
+    def test_a_theme_version_is_checked_the_same_way_and_a_plugin_record_is_not_a_theme_record(self):
+        rc, text = self.go("check-theme", "example", "1.1.0")
+        self.assertEqual(rc, 0, "the index has a plugin called example, not a theme")
+        self.assertIn("theme example 1.1.0 checked against 2 records; none known", text)
+        for slug, version in (("../x", "1.0"), ("Example", "1.0"), ("example", ""), ("example", "1.0\n")):
+            self.assertEqual(self.go("check-theme", slug, version)[0], 2, (slug, version))
+        self.assertEqual(self.go("check-theme", "example")[0], 2)
+        (self.tmp / "state/index.json").unlink()
+        rc, text = self.go("check-theme", "example", "1.1.0")
+        self.assertEqual(rc, 3); self.assertIn("NOT RUN", text)
+
     def test_check_plugin_refuses_a_slug_or_version_that_is_not_one_and_is_not_run_without_a_fresh_index(self):
         for slug, version in (("../x", "1.0"), ("Example", "1.0"), ("example", ""), ("example", "x1"), ("example", "1.0\n"), ("", "1.0"), ("a b", "1.0")):
             rc, text = self.go("check-plugin", slug, version)
