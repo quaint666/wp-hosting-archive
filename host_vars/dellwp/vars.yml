@@ -255,6 +255,17 @@ wp_approvals_max_per_minute: 20
 wp_approvals_read_timeout_s: 120
 wp_approvals_resolve_timeout_s: 7200
 wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
+# Plugin requests (scripts/wp_plugin_requests.py, templates/wp/mu/50-wp-hosting-plugin-requests.php): a friend's Install in wp-admin is a request, collected from each live site every
+# wp_plugin_requests_interval_min minutes by wp-plugin-requests.timer (the control page's Refresh button collects at once), remembered in wp_plugin_requests_state_dir, and sent to the phone like an import
+# (Approve and Deny, the same ntfy, the same signing key; a token is good for wp_approvals_ttl_s). A request nobody answers expires after wp_plugin_requests_expire_days. A site may have
+# wp_plugin_requests_max_pending_per_site waiting at once on this side (the site's own limit, wp_plugin_requests_max above, is lower); the limit here is for a site that does not play fair.
+# Every WP-CLI call is given wp_plugin_requests_cli_timeout_s, an install wp_plugin_requests_install_timeout_s.
+wp_plugin_requests_state_dir: /var/lib/wp-plugin-requests
+wp_plugin_requests_interval_min: 15
+wp_plugin_requests_expire_days: 7
+wp_plugin_requests_max_pending_per_site: 20
+wp_plugin_requests_cli_timeout_s: 120
+wp_plugin_requests_install_timeout_s: 600
 # The control dispatcher (scripts/wp_ctl.py, templates/wp/wp_ctl.py.j2, tasks/wp_ctl_common.yml; design in docs/wordpress_hosting_explained.md section 11): the one program the control app's ssh key may run, and the
 # operator's own `sudo wp-ctl`. wp_ctl_user is the account that key logs in as (its only sudoers entry is wp-ctl). wp_ctl_panel_keys are the public keys allowed to log in as it, each forced to wp-ctl;
 # the list is empty until the control app's key exists, and an empty list means nobody can log in as that account. wp_ctl_panel_from is the one address those keys may log in from: the control app's VM. wp_ctl_state_dir holds the jobs (one directory each: its request, its log, its exit code) and
@@ -296,6 +307,9 @@ wp_ctl_limits:
   users: { timeout_s: 60 }
   plugins: { timeout_s: 60 }
   plugin-set: { timeout_s: 300 }
+  plugin-requests: { timeout_s: 60 }
+  plugin-requests-collect: { timeout_s: 900 }
+  plugin-request-decide: { timeout_s: 1200 }
   import-list: { timeout_s: 60 }
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64

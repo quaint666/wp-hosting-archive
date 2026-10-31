@@ -4,6 +4,7 @@ a button on the phone carries. Every tool it calls (wp-site-cli, wp-vulnfeed, wp
 Run: python3 -I tests/test_wp_plugin_requests.py"""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -14,8 +15,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
+import yaml  # noqa: E402
 import wp_approvals as ap  # noqa: E402
 import wp_plugin_requests as pr  # noqa: E402
+from test_wp_sites_render import ROOT, base_vars, env as render_env  # noqa: E402
 
 NOW = 1_800_000_000
 KEY = "k" * 40
@@ -478,6 +481,75 @@ class CommandLine(Base):
         for argv in ((), ("nonsense",), ("collect", "a", "b"), ("list", "x"), ("decide",)):
             rc, text = self.go(*argv)
             self.assertEqual(rc, 2, argv); self.assertIn("usage", text)
+
+
+class Wiring(unittest.TestCase):
+    """The wrapper template, the units and the variables that put the tool on dellwp."""
+
+    def setUp(self):
+        self.v = base_vars()
+
+    def config(self):
+        text = render_env().get_template("wp/wp_plugin_requests.py.j2").render(**self.v)
+        # the wrapper imports the module by name from wp_tools_lib: run it with the repo's scripts directory in its place
+        ns = {}
+        code = text.replace("sys.exit(wp_plugin_requests.main(CONFIG, sys.argv[1:]))", "RESULT = CONFIG").replace('sys.path.insert(0, "%s")' % self.v["wp_tools_lib"], "sys.path.insert(0, %r)" % str(ROOT / "scripts"))
+        exec(compile(code, "wp_plugin_requests.py.j2", "exec"), ns)
+        return ns["RESULT"], text
+
+    def test_the_config_carries_the_repo_values_and_every_key_the_tool_reads(self):
+        cfg, text = self.config()
+        v = self.v
+        self.assertEqual((cfg["data_dir"], cfg["tools_bin"], cfg["state_dir"], cfg["page_cache_dir"]), (v["wp_data_mount"] + "/sites", v["wp_tools_bin"], v["wp_plugin_requests_state_dir"], v["wp_page_cache_path"]))
+        self.assertEqual((cfg["expire_days"], cfg["max_pending_per_site"], cfg["cli_timeout_s"], cfg["install_timeout_s"]),
+                         (v["wp_plugin_requests_expire_days"], v["wp_plugin_requests_max_pending_per_site"], v["wp_plugin_requests_cli_timeout_s"], v["wp_plugin_requests_install_timeout_s"]))
+        a = cfg["approvals"]
+        self.assertEqual((a["key_file"], a["approver_file"], a["ntfy_conf"], a["netrc"], a["reply_topic"], a["ttl_s"]),
+                         (v["wp_approvals_dir"] + "/key", v["wp_approvals_dir"] + "/approver", v["wp_ntfy_conf"], v["wp_ntfy_netrc"], v["wp_approvals_reply_topic"], v["wp_approvals_ttl_s"]),
+                         "the same files and topic the import tool uses")
+        src = (ROOT / "scripts/wp_plugin_requests.py").read_text()
+        read = set(re.findall(r'cfg\["(\w+)"\]', src)) | set(re.findall(r'cfg\.get\("(\w+)"\)', src)) | {"page_cache_dir"}      # the last is read by wp_ctl.purge_page_cache(cfg)
+        self.assertEqual(read - set(cfg), set(), "a key the tool reads that the wrapper does not carry")
+        self.assertEqual(set(cfg) - read, set(), "a key the wrapper carries that nothing reads")
+        self.assertTrue(text.startswith("#!/usr/bin/python3 -I"))
+
+    def test_the_tool_is_staged_with_its_module_and_the_listener_knows_it(self):
+        tasks = (ROOT / "tasks/wp_tools_common.yml").read_text()
+        self.assertIn("- wp_plugin_requests.py", tasks); self.assertIn("{ src: wp_plugin_requests.py.j2, dest: wp-plugin-requests }", tasks)
+        listener = render_env().get_template("wp/wp_approval_listener.py.j2").render(**self.v)
+        self.assertIn('"plugin_tool": "%s/wp-plugin-requests"' % self.v["wp_tools_bin"], listener)
+        self.assertIn('"tool": "%s/wp-site-import"' % self.v["wp_tools_bin"], listener)
+
+    def test_a_timer_collects_every_interval_and_is_enabled(self):
+        tasks = yaml.safe_load((ROOT / "tasks/wp_approvals_common.yml").read_text())
+        by = {t["name"]: t for t in tasks}
+        timer = by["Deploy the plugin request collection timer"]["ansible.builtin.copy"]
+        service = by["Deploy the plugin request collection service"]["ansible.builtin.copy"]
+        self.assertEqual((timer["dest"], service["dest"]), ("/etc/systemd/system/wp-plugin-requests.timer", "/etc/systemd/system/wp-plugin-requests.service"))
+        self.assertIn("OnUnitActiveSec={{ wp_plugin_requests_interval_min }}min", timer["content"])
+        self.assertIn("ExecStart={{ wp_tools_bin }}/wp-plugin-requests collect", service["content"])
+        self.assertIn("OnFailure=wp-job-failed@%N.service", service["content"])
+        self.assertIn("Type=oneshot", service["content"])
+        en = by["Enable the plugin request timer"]["ansible.builtin.systemd"]
+        self.assertEqual((en["name"], en["enabled"], en["state"]), ("wp-plugin-requests.timer", True, "started"))
+        self.assertIn("{{ wp_plugin_requests_state_dir }}", yaml.safe_dump(by["Make the directories (root only)"]))
+        needed = yaml.safe_dump(by["Look for the tools the listener needs"])
+        self.assertIn("wp-plugin-requests", needed); self.assertIn("wp_plugin_requests.py", needed)
+
+    def test_the_variables_are_sane(self):
+        v = self.v
+        self.assertGreaterEqual(v["wp_plugin_requests_interval_min"], 1)
+        self.assertGreaterEqual(v["wp_plugin_requests_max_pending_per_site"], v["wp_plugin_requests_max"], "the host's limit is not lower than what the site itself allows")
+        limits = v["wp_ctl_limits"]
+        self.assertGreater(limits["plugin-request-decide"]["timeout_s"], v["wp_plugin_requests_install_timeout_s"] + v["wp_plugin_requests_cli_timeout_s"], "the verb outlives the install and its follow-up calls")
+        self.assertGreater(limits["plugin-requests-collect"]["timeout_s"], v["wp_plugin_requests_cli_timeout_s"] * 4)
+
+    def test_the_tool_sees_the_same_rules_as_the_plugin_and_wp_ctl(self):
+        import wp_ctl
+        self.assertEqual(pr.ID_RE.pattern.rstrip("\\Z").lstrip("^"), wp_ctl.REQUEST_ID_RE.pattern.rstrip("$").lstrip("^"))
+        php = (ROOT / "templates/wp/mu/50-wp-hosting-plugin-requests.php").read_text()
+        self.assertIn("/^[a-f0-9]{8,24}\\z/", php); self.assertIn("/^[a-z0-9][a-z0-9-]{0,99}\\z/", php)
+        self.assertEqual(pr.SLUG_RE.pattern, r"^[a-z0-9][a-z0-9-]{0,99}\Z")
 
 
 if __name__ == "__main__":

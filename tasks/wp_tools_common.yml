@@ -88,6 +88,7 @@
     - wp_approvals.py
     - wp_site_import.py
     - wp_vulnfeed.py
+    - wp_plugin_requests.py
     - wp_ctl.py
     - wp_site_model.py
     - wp_site_renderer.py
@@ -123,6 +124,7 @@
     - { src: wp_clamscan.sh.j2, dest: wp-clamscan }
     - { src: wp_clamav_update.sh.j2, dest: wp-clamav-update }
     - { src: wp_vulnfeed.py.j2, dest: wp-vulnfeed }
+    - { src: wp_plugin_requests.py.j2, dest: wp-plugin-requests }
     - { src: wp_ctl.py.j2, dest: wp-ctl }
     - { src: wp_site_provision.py.j2, dest: wp-site-provision }
   loop_control:

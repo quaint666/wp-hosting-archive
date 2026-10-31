@@ -44,6 +44,9 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 PLUGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")                  # a plugin's name as WP-CLI lists it (its directory under wp-content/plugins)
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")                                 # what wp-site-ext accepts for a delete: a wordpress.org slug
 PLUGIN_ACTIONS = ("activate", "deactivate", "delete")
+REQUEST_ID_RE = re.compile(r"^[a-f0-9]{8,24}$")                               # the id a site's plugin gives a plugin request (scripts/wp_plugin_requests.py ID_RE)
+REQUEST_DECISIONS = ("approve", "deny")
+REQUEST_KEYS = ("site", "id", "slug", "user", "t", "first_seen", "state", "note", "name", "version", "installs", "rating", "updated", "found", "vuln", "vuln_line", "notified")
 PLUGIN_STATUSES = ("active", "inactive", "active-network", "must-use", "dropin", "parent")
 PLUGIN_MAX = 300                                                              # the most plugins one reply lists
 BACKUP_TAGS = ("pre-update", "final", "pre-import")
@@ -703,6 +706,41 @@ def h_plugin_set(call):
     return {"ok": rc == 0, "rc": rc, "ran": True, "out": text}
 
 
+def h_plugin_requests(call):
+    """What sites asked to have installed, as wp-plugin-requests remembers it: the tool's one JSON line, checked row by row and passed on (a row that is not a request is dropped; text is cut and has no control characters)."""
+    rc, text = call.run([call.ctl.tool("wp-plugin-requests"), "list"])
+    try:
+        data = json.loads(text.strip().splitlines()[-1])
+        rows = data["requests"]
+        if rc != 0 or not isinstance(rows, list):
+            raise ValueError
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise Refuse("tool_output", "wp-plugin-requests list did not answer with its one JSON line (status %d)" % rc)
+    clean = []
+    for r in rows:
+        if not (isinstance(r, dict) and isinstance(r.get("site"), str) and NAME_RE.fullmatch(r["site"]) and isinstance(r.get("id"), str) and REQUEST_ID_RE.fullmatch(r["id"])
+                and isinstance(r.get("slug"), str) and SLUG_RE.fullmatch(r["slug"]) and isinstance(r.get("state"), str)):
+            continue
+        row = {k: (plain(r[k], 200) if isinstance(r.get(k), str) else r.get(k) if isinstance(r.get(k), (int, float, bool)) or r.get(k) is None else None) for k in REQUEST_KEYS if k in r}
+        clean.append(row)
+    return {"ok": True, "requests": clean[:200]}
+
+
+def h_plugin_requests_collect(call):
+    """Ask every live site for its waiting requests now (the timer does it every few minutes), remember the new ones and tell the phone. The tool's lines are the answer."""
+    return call.reply([call.ctl.tool("wp-plugin-requests"), "collect"])
+
+
+def h_plugin_request_decide(call):
+    """Approve or deny one waiting request. An approve installs the plugin from wordpress.org by slug, inactive. A request with a known vulnerability, or one that could not be checked, is approved only with the plugin's
+    name typed (confirm_slug); the tool checks that name against the request's own slug and refuses anything else. The site's lock is held so no other change to the site runs meanwhile."""
+    a = call.args
+    if "confirm_slug" in a and a["decision"] != "approve":
+        raise Refuse("bad_value", "only an approval is confirmed by the plugin's name")
+    argv = [call.ctl.tool("wp-plugin-requests"), "decide", a["site"], a["id"], a["decision"]] + (["--accept-risk", a["confirm_slug"]] if "confirm_slug" in a else [])
+    return call.reply(argv)
+
+
 def h_vuln_check(call):
     """What a site runs against the vulnerability index. The tool's own statuses are answers, not failures: 0 nothing known, 1 something found, 3 not run (no key, no index, or one too old to trust)."""
     rc, text = call.run([call.ctl.tool("wp-vulnfeed"), "check", call.args["site"]])
@@ -831,6 +869,10 @@ VERBS = {
     "vuln-check": Verb("read", {"site": SITE}, h_vuln_check),
     "users": Verb("read", {"site": SITE}, h_users),
     "plugins": Verb("read", {"site": SITE}, h_plugins),
+    "plugin-requests": Verb("read", {}, h_plugin_requests),
+    "plugin-requests-collect": Verb("inline", {}, h_plugin_requests_collect),
+    "plugin-request-decide": Verb("inline", {"site": SITE, "id": Arg("text", rx=REQUEST_ID_RE), "decision": Arg("enum", values=REQUEST_DECISIONS), "confirm_slug": Arg("text", required=False, rx=SLUG_RE)},
+                                  h_plugin_request_decide, lock=True),
     "plugin-set": Verb("inline", {"site": SITE, "plugin": Arg("text", rx=PLUGIN_RE), "action": Arg("enum", values=PLUGIN_ACTIONS), "confirm_plugin": Arg("text", rx=PLUGIN_RE, same="plugin", when=("action", "delete"))}, h_plugin_set, lock=True),
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
     "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),

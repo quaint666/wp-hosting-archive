@@ -75,7 +75,7 @@ class Base(unittest.TestCase):
             (self.data / site).mkdir()
             (self.data / site / "site.json").write_text("{}")          # what makes a directory a site: a registry record
         self.shim = self.tmp / "seen"
-        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-site-cli", "wp-site-ext", "wp-ctl"):
+        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-site-cli", "wp-site-ext", "wp-plugin-requests", "wp-ctl"):
             self.script(name, TOOL)
         self.script("wp-sites-status", STATUS)
         self.script("systemd-run", SYSTEMD_RUN)
@@ -1057,6 +1057,80 @@ class Plugins(Base):
         self.assertIsNone(wp_ctl.purge_page_cache({k: v for k, v in self.cfg.items() if k != "page_cache_dir"}))
 
 
+class PluginRequests(Base):
+    ROWS = [{"site": "wptest", "id": "aabbccdd0011", "slug": "akismet", "user": "owner", "t": 1800000000, "first_seen": 1800000001, "state": "pending", "note": "", "name": "Akismet", "version": "5.3",
+             "installs": 5000000, "rating": 90, "updated": "2026-10-01", "found": True, "vuln": "clean", "vuln_line": "none known", "notified": True}]
+
+    def test_plugin_requests_passes_on_the_rows_the_tool_lists_and_audits_nothing(self):
+        self.control("stdout.wp-plugin-requests", "Notice: x\n" + json.dumps({"ok": True, "requests": self.ROWS}) + "\n")
+        rc, reply = self.call({"verb": "plugin-requests"})
+        self.assertEqual((rc, reply["ok"], reply["requests"]), (0, True, self.ROWS))
+        self.assertEqual(self.calls(), ["wp-plugin-requests [list]"])
+        self.assertEqual(self.audit(), [], "a read is not audited")
+
+    def test_rows_that_are_not_requests_are_dropped_and_text_is_made_safe(self):
+        junk = [dict(self.ROWS[0], site="../x"), dict(self.ROWS[0], id="zz"), dict(self.ROWS[0], slug="A b"), dict(self.ROWS[0], state=5), "str", {"site": "wptest"},
+                dict(self.ROWS[0], id="aabbccdd0022", slug="jetpack", name="Jet\x1b[31mpack" + "x" * 500, extra="never passed on")]
+        self.control("stdout.wp-plugin-requests", json.dumps({"ok": True, "requests": junk}) + "\n")
+        rc, reply = self.call({"verb": "plugin-requests"})
+        self.assertEqual([r["slug"] for r in reply["requests"]], ["jetpack"])
+        self.assertNotIn("extra", reply["requests"][0]); self.assertNotIn("\x1b", reply["requests"][0]["name"]); self.assertEqual(len(reply["requests"][0]["name"]), 200)
+
+    def test_an_answer_that_is_not_the_tools_json_is_refused(self):
+        for text, rc_ in (("not json\n", 0), ("", 0), ("{}\n", 0), ('{"requests": 5}\n', 0), (json.dumps({"requests": self.ROWS}) + "\n", 1)):
+            with self.subTest(text=text[:20], rc=rc_):
+                self.control("stdout.wp-plugin-requests", text)
+                self.control("rc", rc_)
+                rc, reply = self.call({"verb": "plugin-requests"})
+                self.assertEqual((rc, reply["error"]), (2, "tool_output"))
+
+    def test_plugin_requests_takes_no_argument(self):
+        rc, reply = self.call({"verb": "plugin-requests", "site": "wptest"})
+        self.assertEqual((rc, reply["error"]), (2, "unknown_argument"))
+
+    def test_collect_runs_the_tool_and_is_audited(self):
+        self.control("stdout.wp-plugin-requests", "alpha: 1 request read, 1 new\n1 request waiting\n")
+        rc, reply = self.call({"verb": "plugin-requests-collect"})
+        self.assertEqual((rc, reply["ok"]), (0, True)); self.assertIn("1 request waiting", reply["out"])
+        self.assertEqual(self.calls(), ["wp-plugin-requests [collect]"])
+        self.assertEqual([a["phase"] for a in self.audit()], ["intent", "result"])
+
+    def test_decide_passes_exactly_the_request_and_the_decision(self):
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual(self.calls(), ["wp-plugin-requests [decide] [wptest] [aabbccdd0011] [approve]"])
+        self.assertEqual(self.audit()[0]["args"], {"id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual(self.audit()[0]["site"], "wptest")
+
+    def test_a_typed_name_becomes_the_accept_risk_flag_of_an_approval_only(self):
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve", "confirm_slug": "akismet"})
+        self.assertEqual(self.calls(), ["wp-plugin-requests [decide] [wptest] [aabbccdd0011] [approve] [--accept-risk] [akismet]"])
+        self.assertEqual(self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "deny", "confirm_slug": "akismet"})[0], 2)
+        self.assertEqual(len(self.calls()), 1, "the deny with a name ran nothing")
+
+    def test_decide_refuses_odd_arguments_before_anything_runs(self):
+        base = {"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"}
+        for change in ({"site": "nosuch"}, {"site": "../x"}, {"id": "zz"}, {"id": "AABBCCDD0011"}, {"id": "aabbccdd0011\n"}, {"id": "../etc"}, {"decision": "install"}, {"decision": "Approve"}, {"confirm_slug": "A b"},
+                       {"confirm_slug": "--force"}, {"confirm_slug": "a;id"}, {"confirm_slug": ""}):
+            with self.subTest(change=change):
+                rc, reply = self.call(dict(base, **change))
+                self.assertEqual(rc, 2, change)
+        for key in ("site", "id", "decision"):
+            self.assertEqual(self.call({k: v for k, v in base.items() if k != key})[0], 2, key)
+        self.assert_nothing_happened()
+
+    def test_a_refusal_by_the_tool_is_a_failure_with_its_words(self):
+        self.control("stdout.wp-plugin-requests", "wp-plugin-requests: akismet has a known vulnerability (x): approve it only on purpose\n")
+        self.control("rc", 2)
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual((rc, reply["ok"], reply["ran"]), (1, False, True)); self.assertIn("known vulnerability", reply["out"])
+
+    def test_decide_holds_the_sites_lock(self):
+        self.assertTrue(wp_ctl.VERBS["plugin-request-decide"].lock)
+        self.assertEqual(wp_ctl.VERBS["plugin-request-decide"].kind, "inline")
+        self.assertFalse(wp_ctl.VERBS["plugin-requests-collect"].lock)
+
+
 class Handlers(Base):
     def test_every_verb_is_one_handler_taking_one_call(self):
         for name, verb in wp_ctl.VERBS.items():
@@ -1068,7 +1142,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "plugins", "plugin-set", "import-new", "update-check", "update-apply", "import-rescan"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "plugins", "plugin-set", "plugin-requests", "plugin-requests-collect", "plugin-request-decide", "import-new", "update-check", "update-apply", "import-rescan"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)

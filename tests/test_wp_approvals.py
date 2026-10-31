@@ -931,7 +931,7 @@ class Plumbing(unittest.TestCase):
         exec(text.split("import wp_approval_listener  # noqa: E402\n")[1].split("sys.exit(")[0], ns)
         c = ns["CONFIG"]
         self.assertEqual(c, {"ntfy_conf": v["wp_ntfy_conf"], "listener_file": v["wp_approvals_dir"] + "/listener", "reply_topic": v["wp_approvals_reply_topic"],
-                             "state_file": v["wp_approvals_state_dir"] + "/last-id", "tool": v["wp_tools_bin"] + "/wp-site-import", "notify_cmd": v["wp_ntfy_notify_cmd"],
+                             "state_file": v["wp_approvals_state_dir"] + "/last-id", "tool": v["wp_tools_bin"] + "/wp-site-import", "plugin_tool": v["wp_tools_bin"] + "/wp-plugin-requests", "notify_cmd": v["wp_ntfy_notify_cmd"],
                              "result_topic": v["wp_ntfy_topic"], "resolve_timeout_s": v["wp_approvals_resolve_timeout_s"], "max_per_minute": v["wp_approvals_max_per_minute"],
                              "read_timeout_s": v["wp_approvals_read_timeout_s"]})
         for k in ("resolve_timeout_s", "max_per_minute", "read_timeout_s"):
