@@ -9,7 +9,7 @@ there); an entry whose text is no longer in the file is reported as NOT APPLICAB
     python3 tests/mutate_wp_ctl.py 12 61 82   # only these entries, counted from 0 in the order of M
 
 Last full run 2026-10-28: 76 entries, all caught but two: 33 (the control-character check on text arguments, which every argument pattern already makes redundant: kept as defence in depth) and 61
-(the lock on the job table; the test now uses a slow clock to widen the race window and catches it). Entries added since were run on their own and caught. Not part of CI (it takes minutes).
+(the lock on the job table; the test now uses a slow clock to widen the race window and catches it). Entries added since were run on their own and caught. Not part of CI (it takes minutes). Each suite is run once WITHOUT a mutation first and the run stops if it fails (2026-10-31: the pin tool's mutants had been "killed" only because its tests could not find the CI workflows in the scratch copy).
 Entry 323 (the driver accepts an old TLS version) is an EQUIVALENT mutant: Python's own TLS client refuses anything older than 1.2 before the driver looks, so the check is defence in depth.
 Entries 202 onward are the control app's and need Flask: run the harness with the interpreter that has app/requirements.txt installed. 208 (a login code of any shape is looked at) is an EQUIVALENT mutant:
 a code of the wrong shape can never be the right code, so that check is defence in depth and no test can tell it is gone.
@@ -19,7 +19,9 @@ import shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp", "app", "opnsense", "hp705g4", "aopenvms"]
+# Everything the tests read, which is every directory of playbooks and their files, the CI workflows (tests/test_pin_consumers.py reads them) and the variables. NOT copied: .git, docs, terraform, postmortems
+# and the practice archive (large, and no test reads them). A suite that fails in the copy WITHOUT a mutation would "kill" every mutant, so the baseline of each suite is run first (below).
+KEEP = [d.name for d in sorted(REPO.iterdir()) if d.is_dir() and d.name not in (".git", "docs", "terraform", "postmortems", "wpress", "node_modules", "__pycache__")]
 W = "scripts/wp_ctl.py"
 M = [
  ("a site need not exist", W, 'if not NAME_RE.fullmatch(value) or value not in known_sites(ctl.cfg):', 'if not NAME_RE.fullmatch(value):'),
@@ -460,7 +462,25 @@ M = [
  ('pin_consumers forgets a deleted file', 'scripts/pin_consumers.py', '" (deleted)" if gone else ""', '""', 'tests/test_pin_consumers.py'),
  ('pin_consumers loses the old side of a removed variable', 'scripts/pin_consumers.py', '        for n in range(old_start, old_start + max(old_len, 1)):\n            names.add(owner(old_lines, n))\n', '', 'tests/test_pin_consumers.py'),
  ('pin_consumers leaves a stale comment when a playbook starts using a pin', 'scripts/pin_consumers.py', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)\n            if has:\n                continue', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ties every template to a play that names ../templates', 'scripts/pin_consumers.py', ' and d.as_posix() not in ROOT_DIRS:', ':', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores the directory a file sits in', 'scripts/pin_consumers.py', '        return {Path(rel)} | {d for d in Path(rel).parents if d in self.dirs}', '        return {Path(rel)}', 'tests/test_pin_consumers.py'),
+ ('the pins workflow can fail the run with its report', '.gitea/workflows/pins.yml', 'python3 -I scripts/pin_consumers.py --since "$SINCE" || true', 'python3 -I scripts/pin_consumers.py --since "$SINCE"', 'tests/test_pin_consumers.py'),
+ ('the pins workflow skips a playbook-only change', '.gitea/workflows/pins.yml', '      - "**/*.yml"\n      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', '      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', 'tests/test_pin_consumers.py'),
+ ('the pins workflow does not run the check', '.gitea/workflows/pins.yml', 'run: python3 -I scripts/pin_consumers.py --check', 'run: echo skipped', 'tests/test_pin_consumers.py'),
+ ('the pins workflow has too little history to diff', '.gitea/workflows/pins.yml', 'fetch-depth: 0', 'fetch-depth: 1', 'tests/test_pin_consumers.py'),
 ]
+# A suite that fails in the copy with nothing broken proves nothing about any mutant: stop and say which one.
+def baseline(root, suites):
+    bad = []
+    for suite in sorted(suites):
+        r = subprocess.run([sys.executable, "-I", str(root / suite)], capture_output=True, text=True, timeout=600, cwd=str(root))
+        print(("baseline ok   " if r.returncode == 0 else "BASELINE FAILS"), suite, flush=True)
+        if r.returncode != 0:
+            bad.append(suite)
+            print("   " + "\n   ".join((r.stdout + r.stderr).strip().splitlines()[-6:]), flush=True)
+    return bad
+
+
 only = sys.argv[1:]
 surv, ran = [], 0
 with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
@@ -469,6 +489,10 @@ with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
     for d in KEEP:
         shutil.copytree(REPO / d, root / d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy(REPO / "inventory.yml", root / "inventory.yml")
+    wanted = {(m[4] if len(m) > 4 else "tests/test_wp_ctl.py") for i, m in enumerate(M) if not only or str(i) in only}
+    if baseline(root, wanted):
+        print("\nthe suites above fail in the scratch copy with nothing broken: fix the copy (KEEP) or the suite first")
+        sys.exit(2)
     for i, (label, rel, old, new, *suite) in enumerate(M):
         if only and str(i) not in only:
             continue
