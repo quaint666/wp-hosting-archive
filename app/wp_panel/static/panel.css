@@ -39,6 +39,7 @@ code { background: hsl(var(--idle-soft)); padding: .1em .35em; border-radius: .3
 .bar nav a { color: hsl(var(--bar-fg) / .72); text-decoration: none; font-size: .88rem; font-weight: 600; padding: .4rem .8rem; border-radius: 999px; }
 .bar nav a:hover { color: hsl(var(--bar-fg)); background: hsl(var(--bar-fg) / .1); }
 .bar nav a[aria-current="page"] { color: hsl(var(--bar-fg)); background: hsl(var(--bar-fg) / .16); }
+.navtoggle, .menu-btn, .menu-away { display: none; }
 .logout { margin: 0; }
 .logout button { background: transparent; color: hsl(var(--bar-fg)); border: 1px solid hsl(var(--bar-fg) / .35); padding: .4rem 1rem; font-size: .82rem; }
 .logout button:hover { background: hsl(var(--bar-fg) / .12); }
@@ -138,10 +139,19 @@ pre.log { background: hsl(30 10% 8%); color: hsl(30 15% 88%); border-radius: .8r
 .auth-card button { width: 100%; }
 
 @media (max-width: 40rem) {
-  /* The bar on a phone: the name and Log out on the first row, the four pages as equal pills on the second. */
-  .bar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .55rem 1rem; padding: .7rem .8rem; }
-  .bar nav { grid-column: 1 / -1; grid-row: 2; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: .25rem; }
-  .bar nav a { text-align: center; padding: .5rem .25rem; }
+  /* The bar on a phone: the name, a Menu button and Log out on one row. The four pages sit behind the button (a checkbox and its labels, so no script is needed: the policy allows none here).
+     Pressing Menu again, or anywhere outside the list (the transparent .menu-away layer), closes it. */
+  .bar { position: relative; display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: .55rem .6rem; padding: .7rem .8rem; }
+  .navtoggle { display: block; position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; }
+  .menu-btn { display: inline-flex; align-items: center; gap: .55rem; position: relative; z-index: 30; padding: .4rem 1rem; font-size: .82rem; font-weight: 600; border: 1px solid hsl(var(--bar-fg) / .35); border-radius: 999px; cursor: pointer; user-select: none; }
+  .menu-btn:hover, .navtoggle:checked + .menu-btn { background: hsl(var(--bar-fg) / .12); }
+  .navtoggle:focus-visible + .menu-btn { outline: 2px solid hsl(var(--bar-fg)); outline-offset: 2px; }
+  .chev { width: .45rem; height: .45rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-2px) rotate(45deg); transition: transform .15s ease; }
+  .navtoggle:checked + .menu-btn .chev { transform: translateY(1px) rotate(225deg); }
+  .navtoggle:checked ~ .menu-away { display: block; position: fixed; inset: 0; z-index: 10; }
+  .bar nav { display: none; position: absolute; z-index: 20; top: calc(100% + .35rem); left: .8rem; right: .8rem; flex-direction: column; gap: .15rem; padding: .5rem; background: hsl(var(--bar)); border: 1px solid hsl(var(--bar-fg) / .25); border-radius: var(--radius); box-shadow: 0 12px 32px hsl(0 0% 0% / .25); }
+  .navtoggle:checked ~ nav { display: flex; }
+  .bar nav a { padding: .7rem 1rem; font-size: .95rem; }
   /* A short table with buttons in it (the import lists) becomes one block per row: the buttons must not wait off-screen to the right. */
   .table-wrap.stack > table:not(.kv) { min-width: 0; }
   .table-wrap.stack thead { display: none; }

@@ -304,6 +304,14 @@ class Access(Base):
             marked = re.findall(r'<a href="[^"]+" aria-current="page">([^<]+)</a>', html)
             self.assertEqual(marked, [label], path)
 
+    def test_the_phone_menu_is_one_button_that_needs_no_script(self):
+        c = self.logged_in()
+        html = self.get("/sites", c).get_data(as_text=True)
+        self.assertIn('<input type="checkbox" id="navtoggle"', html)
+        self.assertEqual(len(re.findall(r'<label for="navtoggle"', html)), 2, "the button and the click-away layer")
+        self.assertLess(html.index('id="navtoggle"'), html.index("<nav>"), "the sibling selectors need the checkbox before the nav")
+        self.assertNotIn("<script", html)
+
     def test_no_page_has_an_inline_script_an_inline_style_or_an_outside_link(self):
         c = self.logged_in()
         for path in PAGES + ["/login"]:
@@ -461,7 +469,7 @@ class Pages(Base):
         for label in ('data-label="File"', 'data-label="Size"', 'data-label="Used by"'):
             self.assertIn(label, imp)
         css = self.get("/static/panel.css").get_data(as_text=True)
-        for rule in (".table-wrap.stack td[data-label]::before", ".bar nav { grid-column: 1 / -1;", ".table-wrap.sticky-first > table th:first-child"):
+        for rule in (".table-wrap.stack td[data-label]::before", ".navtoggle:checked ~ nav { display: flex; }", ".navtoggle:checked ~ .menu-away", ".table-wrap.sticky-first > table th:first-child"):
             self.assertIn(rule, css)
 
     def test_a_record_dellwp_could_not_read_is_said_so(self):
