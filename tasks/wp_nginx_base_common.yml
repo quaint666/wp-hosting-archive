@@ -19,6 +19,8 @@
 #   redefines the same name with another key is refused ([emerg], the old config keeps running, `nginx -t` still passes, `systemctl reload` still says ok; seen on
 #   dellwp 2026-10-24). Change a zone's key or size and you change its name.
 # - $wp_https ("on" when the tunnel forwarded an https request), for the sites' `fastcgi_param HTTPS`.
+# - The page cache zone and the maps that say when a request must skip it ($wp_skip_cache). A vhost whose site is not stopped uses it (templates/wp/site_nginx.conf.j2); deploy this
+#   base BEFORE the vhosts, or `nginx -t` fails on the unknown zone and the sites play keeps the old vhost.
 # - Upload cap 64 MB. (server_tokens is already set in the distribution's nginx.conf: a second directive fails nginx -t, seen on dellwp 2026-10-23.)
 #
 # The write is validated like tasks/bloomy_nginx_loopback_common.yml: if nginx -t fails the previous file is restored and the play fails before nginx is
@@ -26,6 +28,15 @@
 
 - name: Deploy and validate the nginx base for the WordPress sites
   block:
+    # nginx makes the cache directory itself (and gives it to its worker user) but only one level deep: with no /var/cache/nginx, `nginx -t` fails on mkdir (seen on dellwp 2026-10-30).
+    - name: Make the parent of the page cache directory
+      ansible.builtin.file:
+        path: "{{ wp_page_cache_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
     - name: Deploy the nginx base (settings and catch-all)
       ansible.builtin.copy:
         dest: /etc/nginx/conf.d/wp_base.conf
@@ -57,6 +68,47 @@
           map $server_port $wp_probe {
               default 0;
               {{ wp_nginx_probe_port }} 1;
+          }
+
+          # The combined access log format with three fields appended: how long the request took in all (rt, seconds), how long the php upstream took (urt; "-" when php was not asked, a list after
+          # an internal redirect) and what the page cache did (HIT, MISS, BYPASS, EXPIRED, STALE, UPDATING; "-" where the cache is not in play). The combined part is unchanged, so anything that
+          # reads the first nine fields keeps working; scripts/wp_perf_measure.sh reads the rest. A vhost opts in with `access_log <file> wp_timed;`.
+          log_format wp_timed '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time urt=$upstream_response_time cache=$upstream_cache_status';
+
+          # The page cache for anonymous visitors (host_vars/dellwp/vars.yml wp_page_cache_*; a vhost opts in with fastcgi_cache). Keyed on the host, so one site never sees another's pages.
+          fastcgi_cache_path {{ wp_page_cache_path }} levels=1:2 keys_zone={{ wp_page_cache_zone }}:{{ wp_page_cache_keys_mb }}m max_size={{ wp_page_cache_max_mb }}m inactive=60m use_temp_path=off;
+
+          # What must never be served from, or stored in, the cache. 1 = skip. A login, comment, post-password or cart cookie; WordPress's own endpoints, the REST API, search, previews,
+          # WooCommerce's ajax and API calls; any request that names a .php file (only WordPress's pretty URLs are cached); an Authorization header; and the probe port, so the update job's
+          # health check sees the site as it is now, not a page cached before the update.
+          map $http_cookie $wp_cache_cookie {
+              default 0;
+              "~*(wordpress_logged_in_|wordpress_sec_|wp-postpass_|comment_author_|woocommerce_items_in_cart|woocommerce_cart_hash|wp_woocommerce_session_)" 1;
+              # a language or currency the visitor chose changes the page and the mini-cart: never one shared copy
+              "~*(wp-wpml|pll_language|woocs|aelia_cs|currency)" 1;
+          }
+          map $request_uri $wp_cache_uri {
+              default 0;
+              "~*^/(wp-admin|wp-login\.php|wp-json|wp-cron\.php|xmlrpc\.php|wp-comments-post\.php|wp-mu|wp-content/plugins)" 1;
+              "~*^/(cart|basket|checkout|my-account|wc-api)(/|$|\?)" 1;
+              "~*\.php" 1;
+              "~*[?&](preview|s|add-to-cart|wc-ajax|wc-api|doing_wp_cron|customize_changeset_uuid)=" 1;
+          }
+          map "$wp_cache_cookie$wp_cache_uri$http_authorization$wp_probe" $wp_skip_cache {
+              default 1;
+              "000" 0;
+          }
+
+          # WooCommerce's mini-cart refresh, exactly as the browser sends it. A vhost whose site has cart_fragments cache sends this request to its own location (templates/wp/site_nginx.conf.j2),
+          # which keeps the answer for a visitor with no cart, login, language or currency cookie (the answer is the same "empty cart" for all of them). The URL rules of $wp_skip_cache do not
+          # apply to it (they skip every wc-ajax call), so it has its own: the cookies, an Authorization header, and the probe port.
+          map "$request_method $request_uri" $wph_fragments {
+              default 0;
+              "POST /?wc-ajax=get_refreshed_fragments" 1;
+          }
+          map "$wp_cache_cookie$http_authorization$wp_probe" $wph_frag_skip {
+              default 1;
+              "00" 0;
           }
 
           server {

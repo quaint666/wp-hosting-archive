@@ -75,14 +75,14 @@ class Base(unittest.TestCase):
             (self.data / site).mkdir()
             (self.data / site / "site.json").write_text("{}")          # what makes a directory a site: a registry record
         self.shim = self.tmp / "seen"
-        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-site-cli", "wp-ctl"):
+        for name in ("wp-site-backup", "wp-site-delete", "wp-site-password", "wp-site-import", "wp-site-provision", "wp-site-install", "wp-site-update", "wp-vulnfeed", "wp-site-cli", "wp-site-ext", "wp-plugin-requests", "wp-ctl"):
             self.script(name, TOOL)
         self.script("wp-sites-status", STATUS)
         self.script("systemd-run", SYSTEMD_RUN)
         self.script("logger", LOGGER)
         self.t = time.time()
         self.audit_file = self.tmp / "log" / "audit.jsonl"
-        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tools_bin": str(self.bin), "path": "/usr/bin:/bin",
+        self.cfg = {"state_dir": str(self.state), "run_dir": str(self.run), "audit_file": str(self.audit_file), "data_dir": str(self.data), "tools_bin": str(self.bin), "page_cache_dir": str(self.tmp / "pagecache"), "path": "/usr/bin:/bin",
                     "logger": str(self.bin / "logger"), "systemd_run": str(self.bin / "systemd-run"), "panel_user": "wpctl", "job_keep_days": 14, "max_request_bytes": 65536,
                     "limits": LIMITS, "reserved_names": ["hub", "mail", "bloomy"]}
         self.env = {"SUDO_USER": "wpctl", "LEAK_ME": "must-not-reach-the-tools", "SUDO_COMMAND": "/usr/local/sbin/wp-ctl"}
@@ -928,6 +928,209 @@ class Intake(Base):
         self.assertEqual((rc, other["error"]), (2, "req_reused"))
 
 
+PLUGIN_LIST = [{"name": "woocommerce", "title": "WooCommerce", "status": "active", "update": "none", "version": "9.3.3"},
+               {"name": "old-thing", "title": "Old Thing", "status": "inactive", "update": "available", "version": "1.0"},
+               {"name": "Odd_Name", "title": "Odd", "status": "inactive", "update": "none", "version": "2"},
+               {"name": "hosting-mail", "title": "Hosting mail", "status": "must-use", "update": "none", "version": "1"}]
+# a stand-in for wp-site-cli that lists plugins, activates and deactivates; a deactivation that loads the other plugins fails while the file `plugin_fails` exists
+CLI = """#!/bin/bash
+D='%(dir)s'
+{ printf 'wp-site-cli'; for a in "$@"; do printf ' [%%s]' "$a"; done; printf '\\n'; } >> "$D/calls.log"
+case " $* " in
+  *" plugin list "*) cat "$D/plugin_list"; exit "$(cat "$D/list_rc" 2>/dev/null || echo 0)" ;;
+  *" plugin deactivate "*) if [ -f "$D/deactivate_needs_skip" ] && [[ " $* " != *" --skip-plugins "* ]]; then echo "PHP Fatal error in a plugin"; exit 1; fi ;;
+esac
+[ -f "$D/action_rc" ] && { echo "tool failed"; exit "$(cat "$D/action_rc")"; }
+echo "Success: done."
+"""
+
+
+class Plugins(Base):
+    def setUp(self):
+        super().setUp()
+        self.script("wp-site-cli", CLI)
+        self.control("plugin_list", "Notice: a plugin said something\n" + json.dumps(PLUGIN_LIST) + "\n")
+        self.cache = self.tmp / "pagecache"
+        (self.cache / "a" / "bc").mkdir(parents=True)
+        for f in ("a/bc/one", "a/two", "three"):
+            (self.cache / f).write_text("page")
+
+    def cache_files(self):
+        return sorted(str(p.relative_to(self.cache)) for p in self.cache.rglob("*") if p.is_file())
+
+    def test_plugins_lists_the_rows_the_tool_reports_with_no_plugin_code_and_audits_nothing(self):
+        rc, reply = self.call({"verb": "plugins", "site": "wptest"})
+        self.assertEqual(rc, 0)
+        self.assertEqual([(r["name"], r["status"], r["update"]) for r in reply["plugins"]], [("woocommerce", "active", False), ("old-thing", "inactive", True), ("Odd_Name", "inactive", False), ("hosting-mail", "must-use", False)])
+        self.assertEqual(self.calls(), ["wp-site-cli [wptest] [plugin] [list] [--fields=name,title,status,update,version] [--format=json] [--skip-plugins] [--skip-themes]"])
+        self.assertEqual(self.audit(), [], "a read is not audited")
+
+    def test_plugins_drops_odd_rows_and_refuses_what_is_not_the_tools_json(self):
+        junk = [{"name": "../x", "status": "active"}, {"name": "ok", "status": "weird"}, {"status": "active"}, "str", {"name": "fine", "status": "active", "title": "A\x1bB", "version": 5}]
+        self.control("plugin_list", json.dumps(junk) + "\n")
+        rc, reply = self.call({"verb": "plugins", "site": "wptest"})
+        self.assertEqual(reply["plugins"], [{"name": "fine", "title": "A B", "status": "active", "version": "", "update": False}])
+        for text, rc_ in (("not json\n", 0), ("{}\n", 0), (json.dumps(PLUGIN_LIST) + "\n", 1), ("Error: stopped\n", 1)):
+            with self.subTest(text=text[:12], rc=rc_):
+                self.control("plugin_list", text)
+                self.control("list_rc", rc_)
+                rc, reply = self.call({"verb": "plugins", "site": "wptest"})
+                self.assertEqual((rc, reply["error"]), (2, "tool_output"))
+
+    def test_plugins_needs_an_existing_site(self):
+        for site in HOSTILE_SITES:
+            self.assertEqual(self.call({"verb": "plugins", "site": site})[0], 2, site)
+        self.assert_nothing_happened()
+
+    def test_activate_runs_the_tool_as_the_web_apps_identity_audits_and_clears_the_page_cache(self):
+        rc, reply = self.call({"verb": "plugin-set", "site": "wptest", "plugin": "old-thing", "action": "activate"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual(self.calls()[-1], "wp-site-cli [wptest] [plugin] [activate] [old-thing]")
+        self.assertIn("3 files cleared", reply["out"])
+        self.assertEqual(self.cache_files(), [])
+        self.assertTrue(self.cache.is_dir(), "the directory stays: nginx keeps using it")
+        self.assertEqual([a["phase"] for a in self.audit()], ["intent", "result"])
+        self.assertEqual(self.audit()[0]["args"], {"plugin": "old-thing", "action": "activate"})
+
+    def test_deactivate_is_tried_again_without_the_other_plugins_when_the_first_try_fails(self):
+        self.control("deactivate_needs_skip", "1")
+        rc, reply = self.call({"verb": "plugin-set", "site": "wptest", "plugin": "woocommerce", "action": "deactivate"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual(self.calls()[-2:], ["wp-site-cli [wptest] [plugin] [deactivate] [woocommerce]", "wp-site-cli [wptest] [plugin] [deactivate] [woocommerce] [--skip-plugins] [--skip-themes]"])
+        self.assertEqual(self.cache_files(), [])
+
+    def test_a_delete_goes_to_wp_site_ext_after_the_name_is_typed_and_clears_the_cache(self):
+        rc, reply = self.call({"verb": "plugin-set", "site": "wptest", "plugin": "old-thing", "action": "delete", "confirm_plugin": "old-thing"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual(self.calls()[-1], "wp-site-ext [wptest] [plugin] [delete] [old-thing]")
+        self.assertEqual(self.cache_files(), [])
+
+    def test_a_delete_without_the_exact_name_is_refused_before_anything_runs(self):
+        for extra in ({}, {"confirm_plugin": "old"}, {"confirm_plugin": "OLD-THING"}):
+            with self.subTest(extra=extra):
+                rc, reply = self.call(dict({"verb": "plugin-set", "site": "wptest", "plugin": "old-thing", "action": "delete"}, **extra))
+                self.assertEqual(rc, 2)
+        self.assert_nothing_happened()
+        self.assertEqual(len(self.cache_files()), 3)
+
+    def test_the_state_rules_and_the_hostings_own_plugins(self):
+        for plugin, action, code in (("woocommerce", "activate", "wrong_state"), ("old-thing", "deactivate", "wrong_state"), ("woocommerce", "delete", "wrong_state"),
+                                     ("hosting-mail", "deactivate", "wrong_state"), ("hosting-mail", "activate", "wrong_state"), ("nope", "activate", "unknown_plugin"), ("Odd_Name", "delete", "not_deletable")):
+            with self.subTest(plugin=plugin, action=action):
+                req = {"verb": "plugin-set", "site": "wptest", "plugin": plugin, "action": action}
+                if action == "delete":
+                    req["confirm_plugin"] = plugin
+                rc, reply = self.call(req)
+                self.assertEqual((rc, reply["error"]), (2, code))
+        self.assertEqual([c for c in self.calls() if "plugin list" not in c and "[list]" not in c], [], "only listings ran")
+        self.assertEqual(len(self.cache_files()), 3, "a refusal clears nothing")
+
+    def test_a_tool_that_fails_is_a_failure_and_the_cache_is_kept(self):
+        self.control("action_rc", 1)
+        rc, reply = self.call({"verb": "plugin-set", "site": "wptest", "plugin": "old-thing", "action": "activate"})
+        self.assertEqual((rc, reply["ok"]), (1, False))
+        self.assertEqual(len(self.cache_files()), 3)
+
+    def test_hostile_plugin_names_and_actions_are_refused(self):
+        for plugin in ("../x", "a b", "-x", "a;id", "", "x" * 101, "a\nb"):
+            rc, _ = self.call({"verb": "plugin-set", "site": "wptest", "plugin": plugin, "action": "activate"})
+            self.assertEqual(rc, 2, repr(plugin))
+        for action in ("install", "update", "Activate", "", None):
+            rc, _ = self.call({"verb": "plugin-set", "site": "wptest", "plugin": "old-thing", "action": action})
+            self.assertEqual(rc, 2, repr(action))
+        self.assert_nothing_happened()
+
+    def test_the_purge_removes_files_only_and_follows_no_link(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (outside / "keep").write_text("x")
+        (self.cache / "link").symlink_to(outside)
+        (self.cache / "lnk-file").symlink_to(outside / "keep")
+        self.assertEqual(wp_ctl.purge_page_cache(self.cfg), 4)           # three files and the link to a file; the link to a directory is not entered
+        self.assertTrue((outside / "keep").exists())
+        self.assertTrue((self.cache / "link").is_symlink())
+        linked = self.tmp / "linked-cache"
+        linked.symlink_to(outside)
+        self.assertIsNone(wp_ctl.purge_page_cache(dict(self.cfg, page_cache_dir=str(linked))), "a cache directory that is itself a link is not entered")
+        self.assertTrue((outside / "keep").exists())
+        self.assertIsNone(wp_ctl.purge_page_cache(dict(self.cfg, page_cache_dir=str(self.tmp / "absent"))))
+        self.assertIsNone(wp_ctl.purge_page_cache({k: v for k, v in self.cfg.items() if k != "page_cache_dir"}))
+
+
+class PluginRequests(Base):
+    ROWS = [{"site": "wptest", "id": "aabbccdd0011", "slug": "akismet", "user": "owner", "t": 1800000000, "first_seen": 1800000001, "state": "pending", "note": "", "name": "Akismet", "version": "5.3",
+             "installs": 5000000, "rating": 90, "updated": "2026-10-01", "found": True, "vuln": "clean", "vuln_line": "none known", "notified": True}]
+
+    def test_plugin_requests_passes_on_the_rows_the_tool_lists_and_audits_nothing(self):
+        self.control("stdout.wp-plugin-requests", "Notice: x\n" + json.dumps({"ok": True, "requests": self.ROWS}) + "\n")
+        rc, reply = self.call({"verb": "plugin-requests"})
+        self.assertEqual((rc, reply["ok"], reply["requests"]), (0, True, self.ROWS))
+        self.assertEqual(self.calls(), ["wp-plugin-requests [list]"])
+        self.assertEqual(self.audit(), [], "a read is not audited")
+
+    def test_rows_that_are_not_requests_are_dropped_and_text_is_made_safe(self):
+        junk = [dict(self.ROWS[0], site="../x"), dict(self.ROWS[0], id="zz"), dict(self.ROWS[0], slug="A b"), dict(self.ROWS[0], state=5), "str", {"site": "wptest"},
+                dict(self.ROWS[0], id="aabbccdd0022", slug="jetpack", name="Jet\x1b[31mpack" + "x" * 500, extra="never passed on")]
+        self.control("stdout.wp-plugin-requests", json.dumps({"ok": True, "requests": junk}) + "\n")
+        rc, reply = self.call({"verb": "plugin-requests"})
+        self.assertEqual([r["slug"] for r in reply["requests"]], ["jetpack"])
+        self.assertNotIn("extra", reply["requests"][0]); self.assertNotIn("\x1b", reply["requests"][0]["name"]); self.assertEqual(len(reply["requests"][0]["name"]), 200)
+
+    def test_an_answer_that_is_not_the_tools_json_is_refused(self):
+        for text, rc_ in (("not json\n", 0), ("", 0), ("{}\n", 0), ('{"requests": 5}\n', 0), (json.dumps({"requests": self.ROWS}) + "\n", 1)):
+            with self.subTest(text=text[:20], rc=rc_):
+                self.control("stdout.wp-plugin-requests", text)
+                self.control("rc", rc_)
+                rc, reply = self.call({"verb": "plugin-requests"})
+                self.assertEqual((rc, reply["error"]), (2, "tool_output"))
+
+    def test_plugin_requests_takes_no_argument(self):
+        rc, reply = self.call({"verb": "plugin-requests", "site": "wptest"})
+        self.assertEqual((rc, reply["error"]), (2, "unknown_argument"))
+
+    def test_collect_runs_the_tool_and_is_audited(self):
+        self.control("stdout.wp-plugin-requests", "alpha: 1 request read, 1 new\n1 request waiting\n")
+        rc, reply = self.call({"verb": "plugin-requests-collect"})
+        self.assertEqual((rc, reply["ok"]), (0, True)); self.assertIn("1 request waiting", reply["out"])
+        self.assertEqual(self.calls(), ["wp-plugin-requests [collect]"])
+        self.assertEqual([a["phase"] for a in self.audit()], ["intent", "result"])
+
+    def test_decide_passes_exactly_the_request_and_the_decision(self):
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual((rc, reply["ok"]), (0, True))
+        self.assertEqual(self.calls(), ["wp-plugin-requests [decide] [wptest] [aabbccdd0011] [approve]"])
+        self.assertEqual(self.audit()[0]["args"], {"id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual(self.audit()[0]["site"], "wptest")
+
+    def test_a_typed_name_becomes_the_accept_risk_flag_of_an_approval_only(self):
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve", "confirm_slug": "akismet"})
+        self.assertEqual(self.calls(), ["wp-plugin-requests [decide] [wptest] [aabbccdd0011] [approve] [--accept-risk] [akismet]"])
+        self.assertEqual(self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "deny", "confirm_slug": "akismet"})[0], 2)
+        self.assertEqual(len(self.calls()), 1, "the deny with a name ran nothing")
+
+    def test_decide_refuses_odd_arguments_before_anything_runs(self):
+        base = {"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"}
+        for change in ({"site": "nosuch"}, {"site": "../x"}, {"id": "zz"}, {"id": "AABBCCDD0011"}, {"id": "aabbccdd0011\n"}, {"id": "../etc"}, {"decision": "install"}, {"decision": "Approve"}, {"confirm_slug": "A b"},
+                       {"confirm_slug": "--force"}, {"confirm_slug": "a;id"}, {"confirm_slug": ""}):
+            with self.subTest(change=change):
+                rc, reply = self.call(dict(base, **change))
+                self.assertEqual(rc, 2, change)
+        for key in ("site", "id", "decision"):
+            self.assertEqual(self.call({k: v for k, v in base.items() if k != key})[0], 2, key)
+        self.assert_nothing_happened()
+
+    def test_a_refusal_by_the_tool_is_a_failure_with_its_words(self):
+        self.control("stdout.wp-plugin-requests", "wp-plugin-requests: akismet has a known vulnerability (x): approve it only on purpose\n")
+        self.control("rc", 2)
+        rc, reply = self.call({"verb": "plugin-request-decide", "site": "wptest", "id": "aabbccdd0011", "decision": "approve"})
+        self.assertEqual((rc, reply["ok"], reply["ran"]), (1, False, True)); self.assertIn("known vulnerability", reply["out"])
+
+    def test_decide_holds_the_sites_lock(self):
+        self.assertTrue(wp_ctl.VERBS["plugin-request-decide"].lock)
+        self.assertEqual(wp_ctl.VERBS["plugin-request-decide"].kind, "inline")
+        self.assertFalse(wp_ctl.VERBS["plugin-requests-collect"].lock)
+
+
 class Handlers(Base):
     def test_every_verb_is_one_handler_taking_one_call(self):
         for name, verb in wp_ctl.VERBS.items():
@@ -939,7 +1142,7 @@ class Handlers(Base):
                 self.assertTrue(all(isinstance(a, wp_ctl.Arg) for a in verb.args.values()))
                 self.assertRegex(name, r"^[a-z]+(-[a-z]+)*$")
         self.assertEqual(set(wp_ctl.VERBS), {"list", "show", "check-name", "jobs", "job-status", "job-log", "audit-tail", "import-report", "backup", "delete", "password", "import-receive", "import-discard", "import-run",
-                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "import-new", "update-check", "update-apply", "import-rescan"})
+                                             "import-approve", "import-reset", "create", "apply", "set", "ensure-state", "install", "import-list", "vuln-check", "users", "plugins", "plugin-set", "plugin-requests", "plugin-requests-collect", "plugin-request-decide", "import-new", "update-check", "update-apply", "import-rescan"})
 
     def test_every_job_and_stream_verb_has_a_limit_of_its_own_in_the_tests_table_and_no_limit_names_a_missing_verb(self):
         wp_ctl.check_limits(self.cfg, wp_ctl.VERBS)
@@ -1270,12 +1473,12 @@ class Wrapper(Base):
         self.assertNotIn("sites", cfg, "the sites are the registry's: no list is baked in")
         self.assertNotIn("closed_sites", cfg, "a closed site's name may be used again: the dispatcher does not keep the list")
         self.assertEqual(cfg["reserved_names"], v["wp_reserved_names"])
-        for key, var in (("state_dir", "wp_ctl_state_dir"), ("run_dir", "wp_ctl_run_dir"), ("audit_file", "wp_ctl_audit_file"), ("tools_bin", "wp_tools_bin"), ("panel_user", "wp_ctl_user"), ("job_keep_days", "wp_ctl_job_keep_days"),
+        for key, var in (("state_dir", "wp_ctl_state_dir"), ("run_dir", "wp_ctl_run_dir"), ("audit_file", "wp_ctl_audit_file"), ("tools_bin", "wp_tools_bin"), ("page_cache_dir", "wp_page_cache_path"), ("panel_user", "wp_ctl_user"), ("job_keep_days", "wp_ctl_job_keep_days"),
                          ("max_request_bytes", "wp_ctl_max_request_bytes"), ("limits", "wp_ctl_limits")):
             self.assertEqual(cfg[key], v[var], key)
         wp_ctl.check_limits(cfg, wp_ctl.VERBS)       # the repo's own table passes the dispatcher's check: every verb named exists and every job and the upload have a timeout of their own
         self.assertEqual(cfg["data_dir"], v["wp_data_mount"] + "/sites")
-        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tools_bin", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
+        needed = {"state_dir", "run_dir", "audit_file", "data_dir", "tools_bin", "page_cache_dir", "path", "logger", "systemd_run", "panel_user", "job_keep_days", "max_request_bytes", "limits",
                   "reserved_names"}
         self.assertEqual(set(cfg), needed, "every key the dispatcher reads, and no stray one")
 

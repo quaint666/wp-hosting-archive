@@ -10,7 +10,7 @@ from flask import abort, current_app, jsonify, redirect, render_template, reques
 
 from werkzeug.exceptions import ClientDisconnected
 
-from .ctl import CHUNK, FILE_RE, JOB_RE, SET_KEYS, UPLOAD_MAX, CtlError
+from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, REQUEST_DECISIONS, REQUEST_ID_RE, SET_KEYS, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -66,6 +66,7 @@ SETTINGS = [
     ("allow_app_passwords", "Allow application passwords", "bool", ("true", "false"), "a reload"),
     ("allow_user_enum", "Allow user enumeration", "bool", ("true", "false"), "a reload"),
     ("mail_mode", "Mail", "choice", ("log", "send"), "send needs the Resend key in the vault"),
+    ("cart_fragments", "Mini-cart refresh", "choice", ("normal", "cache"), "cache keeps WooCommerce's empty-cart answer for visitors with no cart; nginx reloads"),
     ("label", "Label", "text", 100, "registry only: nothing is applied"),
     ("note", "Note", "text", 500, "registry only: nothing is applied"),
 ]
@@ -324,6 +325,75 @@ def register(app):
     @action
     def import_reset(name):
         return started(ask("import-reset", site=name, confirm_name=field("confirm_name", 60), req=field("req", 80)))
+
+    @app.get("/sites/<name>/plugins")
+    @page
+    def plugins_page(name):
+        """The site's plugins with what can be done to each. WordPress is asked through WP-CLI without loading any plugin, so a plugin that breaks the site is still listed (and can be switched off). When the list cannot be had the
+        page says why instead of an error page: the site's other pages are still there."""
+        reply = ask("show", site=name)                          # an unknown site is a 404 here
+        state = (reply.get("status") or {}).get("deployed") or (reply.get("registry") or {}).get("state")
+        try:
+            rows, problem = [p for p in ask("plugins", site=name).get("plugins", []) if isinstance(p, dict) and isinstance(p.get("name"), str)], ""
+        except CtlError as e:
+            if e.kind not in ("failed", "refused"):
+                raise
+            rows, problem = [], str(e)
+        return render_template("plugins.html", name=name, state=state, rows=rows, problem=problem)
+
+    @app.post("/sites/<name>/plugins")
+    @action
+    def plugin_change(name):
+        """Activate or deactivate at once; a delete is two steps like a site's: the first press opens the page that says what will go, the second (with the name typed) asks wp-ctl. wp-ctl re-reads the
+        site's own list, so a name or a state that is not true now is refused there."""
+        plugin, what, typed = field("plugin", 120), field("action", 20), field("confirm_plugin", 120)
+        if what not in PLUGIN_ACTIONS or not PLUGIN_RE.fullmatch(plugin):
+            return render_template("error.html", status=400, title="The form was not accepted", message="That is not a plugin action. Nothing was changed."), 400
+        if what == "delete" and not typed:
+            ask("show", site=name)
+            return render_template("plugin_delete.html", name=name, plugin=plugin)
+        args = {"site": name, "plugin": plugin, "action": what}
+        if what == "delete":
+            args["confirm_plugin"] = typed
+        reply = ask("plugin-set", **args)
+        titles = {"activate": "Plugin activated", "deactivate": "Plugin deactivated", "delete": "Plugin deleted"}
+        return done(titles[what], name, reply.get("out"), back="plugins")
+
+    def request_rows():
+        return [r for r in ask("plugin-requests").get("requests", []) if isinstance(r, dict) and isinstance(r.get("site"), str) and isinstance(r.get("id"), str)]
+
+    @app.get("/requests")
+    @page
+    def requests_page():
+        """What the sites ask to have installed (Install in a site's wp-admin), waiting ones first. The list is what dellwp last collected: the Refresh button asks every site now."""
+        rows = request_rows()
+        waiting = [r for r in rows if r.get("state") == "pending"]
+        return render_template("requests.html", waiting=waiting, finished=[r for r in rows if r.get("state") != "pending"][:30])
+
+    @app.post("/requests/refresh")
+    @action
+    def requests_refresh():
+        reply = ask("plugin-requests-collect")
+        return done("Requests collected", "", reply.get("out"), back="requests_page")
+
+    @app.post("/requests/decide")
+    @action
+    def request_decide():
+        """Approve or deny one request. A request that is clean is decided at once. One with a known vulnerability, or that could not be checked, is approved only on purpose: the first press opens a page that says why, and
+        the plugin's name has to be typed. wp-ctl and the tool check the same thing again, so this page is only where the person is asked."""
+        site, rid, what, typed = field("site", 40), field("id", 40), field("decision", 20), field("confirm_slug", 120)
+        if what not in REQUEST_DECISIONS or not REQUEST_ID_RE.fullmatch(rid):
+            return render_template("error.html", status=400, title="The form was not accepted", message="That is not a request decision. Nothing was changed."), 400
+        mine = next((r for r in request_rows() if r["site"] == site and r["id"] == rid), None)
+        if mine is None:
+            return render_template("error.html", status=404, title="Not found", message="dellwp does not remember that request: it may have expired. Nothing was changed."), 404
+        if what == "approve" and not (mine.get("found") and mine.get("vuln") == "clean") and not typed:
+            return render_template("request_confirm.html", r=mine)
+        args = {"site": site, "id": rid, "decision": what}
+        if typed:
+            args["confirm_slug"] = typed
+        reply = ask("plugin-request-decide", **args)
+        return done("Request approved" if what == "approve" else "Request denied", site, reply.get("out"), back="requests_page")
 
     @app.get("/sites/<name>/security")
     @page

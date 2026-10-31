@@ -38,6 +38,8 @@ define( 'WP_HOSTING_ALLOW_XMLRPC', {{ 'true' if wp_s.allow_xmlrpc else 'false' }
 define( 'WP_HOSTING_ALLOW_APP_PASSWORDS', {{ 'true' if wp_s.allow_app_passwords else 'false' }} );
 define( 'WP_HOSTING_ALLOW_USER_ENUM', {{ 'true' if wp_s.allow_user_enum else 'false' }} );
 define( 'WP_HOSTING_2FA_ROLES', '{{ wp_2fa_roles }}' );
+define( 'WP_HOSTING_TIMING', {{ wp_php_timing | int }} );
+define( 'WP_HOSTING_PLUGIN_REQUESTS_MAX', {{ wp_plugin_requests_max | int }} );
 define( 'WP_HOSTING_MAIL_MODE', '{{ wp_s.mail_mode }}' );
 define( 'WP_HOSTING_MAIL_FROM', '{{ wp_s.name }} <{{ wp_s.name }}@{{ wp_mail_sender_domain }}>' );
 define( 'WP_HOSTING_MAIL_PER_HOUR', {{ wp_mail_per_hour | int }} );

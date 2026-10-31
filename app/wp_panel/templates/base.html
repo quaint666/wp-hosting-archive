@@ -13,9 +13,13 @@
 {% set ep = request.endpoint or '' %}
 <header class="bar">
   <strong class="brand">dellwp</strong>
+  <input type="checkbox" id="navtoggle" class="navtoggle" aria-label="Menu">
+  <label for="navtoggle" class="menu-btn">Menu <span class="chev" aria-hidden="true"></span></label>
+  <label for="navtoggle" class="menu-away" aria-hidden="true"></label>
   <nav>
     <a href="{{ url_for('sites') }}"{% if ep in ('sites', 'site', 'new_site', 'password_form', 'install_form') %} aria-current="page"{% endif %}>Sites</a>
     <a href="{{ url_for('import_hub') }}"{% if ep.startswith('import') %} aria-current="page"{% endif %}>Import</a>
+    <a href="{{ url_for('requests_page') }}"{% if ep in ('requests_page', 'request_decide') %} aria-current="page"{% endif %}>Requests</a>
     <a href="{{ url_for('jobs') }}"{% if ep in ('jobs', 'job') %} aria-current="page"{% endif %}>Jobs</a>
     <a href="{{ url_for('audit') }}"{% if ep == 'audit' %} aria-current="page"{% endif %}>Audit</a>
   </nav>

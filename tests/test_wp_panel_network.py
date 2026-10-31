@@ -66,6 +66,7 @@ def resolve(value, ctx=None):
 PANEL_IP = HOSTS["aopenpanel"]["overlay_ip"]
 WP_IP = HOSTS["dellwp"]["overlay_ip"]
 CONTROL_IP = resolve("{{ wg_control_node_overlay_ip }}")
+PHONE_IP = resolve("{{ wg_phone_overlay_ip }}")
 AOPEN = HOSTS["aopen"]
 DELL = HOSTS["delloptiplex3040"]
 
@@ -161,7 +162,7 @@ class Ssh(unittest.TestCase):
 
 
 class Https(unittest.TestCase):
-    """The page: reachable from the control node on 443 and from nobody else."""
+    """The page: reachable from the control node and from the phone on 443, and from nobody else."""
 
     def test_the_aopens_forward_rules_let_the_control_node_reach_443_on_the_vm_bridge(self):
         entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == CONTROL_IP]
@@ -170,15 +171,22 @@ class Https(unittest.TestCase):
         self.assertIn(22, entries[0]["ports"])
         self.assertEqual(entries[0]["bridges"], ["vmbr1"])
 
+    def test_the_aopens_forward_rules_let_the_phone_reach_443_and_nothing_else(self):
+        entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == PHONE_IP]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["ports"], [443])
+        self.assertEqual(entries[0]["bridges"], ["vmbr1"])
+
     def test_no_wider_source_reaches_443_on_the_aopens_vms(self):
         for e in resolve(AOPEN["proxmox_overlay_to_vm"]):
             if 443 in e["ports"]:
-                self.assertEqual(e["src"], CONTROL_IP, "only the control node")
+                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP), "only the control node and the phone")
 
-    def test_the_vm_lets_in_443_from_the_control_node_alone(self):
+    def test_the_vm_lets_in_443_from_the_control_node_and_the_phone_alone(self):
         extra = resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"])
-        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443])])
+        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443])])
         self.assertEqual(CONTROL_IP, "10.8.0.8")
+        self.assertEqual(PHONE_IP, "10.8.0.4")
 
     def test_the_inside_layer_is_the_same_as_the_group_default_for_ssh_and_scraping(self):
         guests = load("group_vars/proxmox_guests/vars.yml")

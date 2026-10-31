@@ -89,6 +89,111 @@ class Parity(unittest.TestCase):
         self.assertNotEqual(files("secret rev")[".env"], base[".env"])
         self.assertEqual(files("info only"), base, "label and note are registry-only: no file changes")
 
+    def test_the_vhost_serves_the_must_use_directory_and_gates_the_author_rule_on_the_setting(self):
+        def vhost(label):
+            return next(f["content"] for f in self.renderer.files({**self.v["wp_site_defaults"], **SHAPES[label]}) if f["path"].endswith("wp_site_alpha.conf"))
+        for label in ("defaults", "live", "switches"):
+            self.assertIn("location ^~ /wp-mu/ {\n        alias %s/;" % self.v["wp_mu_dir"], vhost(label), label)
+            self.assertRegex(vhost(label), r"location \^~ /wp-mu/ \{[^}]*\n        location ~ \\\.php\$ \{\n            return 403;", label)       # plugin PHP is never served as text
+        self.assertIn('author=[0-9]', vhost("live"))
+        self.assertNotIn('author=[0-9]', vhost("switches"), "allow_user_enum true must open ?author=N")
+        self.assertNotIn("/wp-mu/", vhost("stopped"), "a stopped site serves nothing")
+
+    def test_static_files_compression_and_the_page_cache_in_the_vhost(self):
+        def vhost(label, **extra):
+            site = {**self.v["wp_site_defaults"], **SHAPES[label]}
+            r_ = r.Renderer(TEMPLATES, {**platform(), **extra}, MASTER, RESEND)
+            return next(f["content"] for f in r_.files(site) if f["path"].endswith("wp_site_alpha.conf"))
+        live = vhost("live")
+        # static files never reach PHP: a missing one is a 404, a found one has a long lifetime, and .ico (WordPress's own /favicon.ico) is not in the list
+        self.assertRegex(live, r"location ~\* \\\.\(\?:css\|js[^)]*\)\$ \{\n        try_files \$uri =404;\n        expires 30d;")
+        self.assertNotIn("ico|", live.split("location ~* \\.(?:css")[1].split("{")[0])
+        # the static location comes after the deny rules (an upload named x.php.js must not slip past them) and before the catch-all
+        self.assertLess(live.index("wp-content/(uploads|upgrade)"), live.index("location ~* \\.(?:css"))
+        self.assertLess(live.index("location ~* \\.(?:css"), live.index("location / {"))
+        for needle in ("gzip on;", "gzip_vary on;", "gzip_proxied any;", "application/javascript", "image/svg+xml"):
+            self.assertIn(needle, live)
+        self.assertNotIn("text/html", live.split("gzip_types")[1].split(";")[0], "text/html is always compressed; listing it only warns")
+        # the cache: in the PHP location only, named by the platform's zone, skipping on the base's map, and the headers the location's own add_header would drop are repeated
+        before, _, php = live.rpartition("location ~ \\.php$ {")        # the last one: /wp-mu/ has a nested one that refuses PHP
+        zone = self.v["wp_page_cache_zone"]
+        for needle in ("fastcgi_cache %s;" % zone, "fastcgi_cache_bypass $wp_skip_cache;", "fastcgi_no_cache $wp_skip_cache;", "fastcgi_cache_lock on;", "X-Cache-Status $upstream_cache_status",
+                       "X-Content-Type-Options nosniff", "fastcgi_cache_valid 200 301 302 %ds;" % int(self.v["wp_page_cache_s"])):
+            self.assertIn(needle, php)
+        self.assertNotIn("fastcgi_cache", before, "only the PHP location caches")
+        # off means off, and the PHP location then has no add_header of its own (the server's headers are inherited)
+        off = vhost("live", wp_page_cache_s=0)
+        self.assertNotIn("fastcgi_cache", off)
+        self.assertNotIn("add_header", off.rpartition("location ~ \\.php$ {")[2])
+        self.assertNotIn("fastcgi_cache", vhost("stopped"), "a stopped site serves a 503 and nothing else")
+
+    def test_the_php_and_fpm_variables_default_to_what_ran_before_and_each_mode_renders_what_php_fpm_accepts(self):
+        def render(extra=None, **site):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            files = {f["path"].rsplit("/", 1)[1]: f["content"] for f in rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], **site})}
+            return files["fpm-pool.conf"], files["php.ini"]
+        pool, ini = render()
+        for line in ("pm = ondemand", "pm.max_children = 4", "pm.process_idle_timeout = 20s", "pm.max_requests = 500", "request_terminate_timeout = 120s", "request_slowlog_timeout = 10s"):
+            self.assertIn(line + "\n", pool, "the defaults are the values that ran before they were variables: " + line)
+        for line in ("opcache.max_accelerated_files = 4000", "opcache.interned_strings_buffer = 16", "opcache.validate_timestamps = 1", "opcache.revalidate_freq = 2", "realpath_cache_ttl = 120", "zend.assertions = 1"):
+            self.assertIn(line + "\n", ini, line)      # interned strings: 16 since 2026-10-31 (the image's 8 MB buffer was measured full), every other line is what ran before
+        self.assertNotIn("pm.start_servers", pool)
+        pool, _ = render({"wp_fpm_pm": "dynamic"})
+        for line in ("pm = dynamic", "pm.start_servers = 1", "pm.min_spare_servers = 1", "pm.max_spare_servers = 2"):
+            self.assertIn(line + "\n", pool)
+        self.assertNotIn("process_idle_timeout", pool, "an ondemand setting has no place in a dynamic pool")
+        pool, _ = render({"wp_fpm_pm": "dynamic", "wp_fpm_start_servers": 9, "wp_fpm_min_spare_servers": 9, "wp_fpm_max_spare_servers": 9}, fpm_max_children=2)
+        for key in ("start_servers", "min_spare_servers", "max_spare_servers"):
+            self.assertIn("pm.%s = 2\n" % key, pool, "php-fpm refuses to start when a spare count is above pm.max_children: it is cut down")
+        pool, _ = render({"wp_fpm_pm": "static"})
+        self.assertIn("pm = static\n", pool)
+        for gone in ("process_idle_timeout", "spare_servers", "start_servers"):
+            self.assertNotIn(gone, pool)
+        with self.assertRaises(r.RenderError) as cm:
+            render({"wp_fpm_pm": "fast"})
+        self.assertIn("must be ondemand, dynamic or static", str(cm.exception))
+        pool, ini = render({"wp_fpm_slowlog_s": 1, "wp_php_assertions": -1, "wp_php_opcache_files": 20000, "wp_php_opcache_strings_mb": 16, "wp_php_opcache_validate": 0})
+        for line in ("request_slowlog_timeout = 1s",):
+            self.assertIn(line + "\n", pool)
+        for line in ("zend.assertions = -1", "opcache.max_accelerated_files = 20000", "opcache.interned_strings_buffer = 16", "opcache.validate_timestamps = 0"):
+            self.assertIn(line + "\n", ini)
+
+    def test_the_timing_level_and_open_basedir_follow_their_variables(self):
+        def files(extra=None):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            out = {f["path"].rsplit("/", 1)[1]: f["content"] for f in rr.files({**self.v["wp_site_defaults"], **SHAPES["live"]})}
+            return out["wp-config.php"], out["php.ini"]
+        cfg, ini = files()
+        self.assertIn("define( 'WP_HOSTING_TIMING', 0 );", cfg, "off by default: the diagnostic is opt-in")
+        self.assertRegex(ini, r"(?m)^open_basedir = /var/www/html:/var/www/wp-mu:/tmp$")
+        cfg, ini = files({"wp_php_timing": 2, "wp_php_open_basedir": 0})
+        self.assertIn("define( 'WP_HOSTING_TIMING', 2 );", cfg)
+        self.assertNotIn("open_basedir", ini, "off means the line is not there, not an empty value")
+        self.assertIn("opcache.memory_consumption", ini, "the lines after it are still there")
+
+    def test_cart_fragments_cache_is_its_own_location_and_only_when_asked(self):
+        def vhost(state="live", extra=None, **site):
+            rr = r.Renderer(TEMPLATES, {**platform(), **(extra or {})}, MASTER, RESEND)
+            files = rr.files({**self.v["wp_site_defaults"], **SHAPES["live"], "state": state, **site})
+            return next(f["content"] for f in files if f["path"].endswith("wp_site_alpha.conf"))
+        self.assertEqual(self.v["wp_site_defaults"]["cart_fragments"], "normal", "the default changes nothing for a site")
+        for conf in (vhost(), vhost(cart_fragments="normal"), vhost(state="stopped", cart_fragments="cache"), vhost(extra={"wp_page_cache_s": 0}, cart_fragments="cache")):
+            self.assertNotIn("__wph_fragments", conf)
+        on = vhost(cart_fragments="cache")
+        loc = on.split("location = /__wph_fragments {")[1].split("\n    }\n")[0]
+        for needle in ("internal;", "fastcgi_cache %s;" % self.v["wp_page_cache_zone"], "fastcgi_cache_methods POST;", 'fastcgi_cache_key "$wp_https$host$request_uri";', "fastcgi_ignore_headers Cache-Control Expires;",
+                       "fastcgi_cache_bypass $wph_frag_skip;", "fastcgi_no_cache $wph_frag_skip;", "fastcgi_cache_valid 200 %ds;" % int(self.v["wp_page_cache_s"]), "fastcgi_pass 127.0.0.1:9101;",
+                       "fastcgi_param SCRIPT_FILENAME /var/www/html/index.php;", "fastcgi_param SCRIPT_NAME /index.php;", "X-Cache-Status $upstream_cache_status"):
+            self.assertIn(needle, loc)
+        self.assertNotIn("Set-Cookie", loc, "a Set-Cookie is not in the list of headers ignored: nginx then never stores such an answer")
+        # the header-ignoring is confined to that one location (the ordinary PHP location keeps obeying no-store and no-cache)
+        self.assertEqual(on.count("fastcgi_ignore_headers"), 1)
+        self.assertNotIn("fastcgi_ignore_headers", on.rpartition("location ~ \\.php$ {")[2])
+        # the redirect to it comes after the maintenance 503 and the author rule, so those still win, and sends only what the base's map says is the mini-cart request
+        self.assertLess(on.index("return 503;"), on.index("if ($wph_fragments) {"))
+        self.assertLess(on.index("if ($wph_fragments) {"), on.index("location = /__wph_fragments {"))
+        self.assertIn("rewrite ^ /__wph_fragments last;", on)
+
     def test_rendering_twice_gives_the_same_bytes(self):
         site = {**self.v["wp_site_defaults"], **SHAPES["functions"]}
         first = self.renderer.files(site)
@@ -123,6 +228,7 @@ class Platform(unittest.TestCase):
         with self.assertRaises(r.RenderError) as cm:
             r.Renderer(TEMPLATES, platform(), MASTER).files(site)
         self.assertIn("dellwp_wp_resend_key", str(cm.exception))
+        self.assertIn("wp_provider_key.sh resend", str(cm.exception), "the refusal says what to run")
         r.Renderer(TEMPLATES, platform(), MASTER).files({**v["wp_site_defaults"], **SHAPES["defaults"]})      # hold and log: no key needed
 
     def test_a_site_missing_a_field_a_template_reads_fails_by_name(self):

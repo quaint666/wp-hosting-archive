@@ -34,7 +34,7 @@ def record(name="alpha", port=9101, quota_id=1001, state="hold", **more):
 
 class Fields(unittest.TestCase):
     def test_every_editable_field_has_a_rule_and_a_range_the_page_can_rely_on(self):
-        self.assertEqual(set(m.EDITABLE), {"update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "label", "note"})
+        self.assertEqual(set(m.EDITABLE), {"update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note"})
         self.assertNotIn("state", m.EDITABLE)
 
     def test_the_boundaries_of_every_number_and_the_values_that_are_not_numbers(self):
@@ -50,7 +50,7 @@ class Fields(unittest.TestCase):
             self.assertEqual(m.validate_value(key, "%d\n" % lo), (lo, None), "and a newline too")
 
     def test_choices_and_switches_take_only_their_own_words(self):
-        for key, good, bad in (("update_policy", "freeze", "always"), ("mail_mode", "send", "smtp")):
+        for key, good, bad in (("update_policy", "freeze", "always"), ("mail_mode", "send", "smtp"), ("cart_fragments", "cache", "always")):
             self.assertEqual(m.validate_value(key, good), (good, None))
             self.assertIsNotNone(m.validate_value(key, bad)[1])
             self.assertIsNotNone(m.validate_value(key, "")[1])

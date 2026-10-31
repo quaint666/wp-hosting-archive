@@ -4,6 +4,7 @@ run through the root-only wrapper templates/wp/wp_vulnfeed.py.j2 (tests/test_wp_
 
     wp-vulnfeed update                 download the production feed (a free API key, sent as a Bearer token) and reduce it to a compact index
     wp-vulnfeed check <site>           what the site runs against the index; the lines it prints are the answer
+    wp-vulnfeed check-plugin <slug> <version>   one plugin that no site runs yet (a request to install it) against the index; the same exit codes
     wp-vulnfeed check-all              every site that is up and has WordPress; a NEW hit goes to the phone through ntfy-notify, a known one is not told again
 
 Exit codes (the same convention as wp-clamscan, which wp-site-import reads): 0 nothing known, 1 something found, 3 NOT RUN (no key, no index yet, or an index too old to trust: a state, never a pass),
@@ -284,6 +285,19 @@ def cmd_check(cfg, site, out, run, clock):
     return 1 if hits else 0
 
 
+def cmd_check_plugin(cfg, slug, version, out, clock):
+    """One plugin version against the index, before it is installed anywhere. The slug and version are checked for their shape first: they come from a request."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug or "") or not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]{0,39}", version or ""):
+        raise FeedError("'%s' '%s' is not a plugin slug and version" % (printable(slug, 40), printable(version, 40)))
+    index = load_index(cfg["index_file"], cfg["max_age_days"], clock)
+    hits = matches(index, "plugin", slug, version)
+    for e in hits:
+        out(describe("plugin", slug, version, e))
+    if not hits:
+        out("plugin %s %s checked against %d records; none known" % (slug, version, index.get("records", 0)))
+    return 1 if hits else 0
+
+
 def cmd_check_all(cfg, out, run, clock, notify):
     with_sites(cfg, run)
     index = load_index(cfg["index_file"], cfg["max_age_days"], clock)
@@ -315,7 +329,7 @@ def cmd_check_all(cfg, out, run, clock, notify):
     return rc
 
 
-USAGE = "usage: wp-vulnfeed update | check <site> | check-all"
+USAGE = "usage: wp-vulnfeed update | check <site> | check-plugin <slug> <version> | check-all"
 
 
 def main(cfg, argv, out=print, run=subprocess.run, opener=urllib.request.urlopen, clock=time.time, notify=None):
@@ -330,6 +344,8 @@ def main(cfg, argv, out=print, run=subprocess.run, opener=urllib.request.urlopen
             return cmd_update(cfg, out, opener, clock)
         if len(argv) == 2 and argv[0] == "check":
             return cmd_check(cfg, argv[1], out, run, clock)
+        if len(argv) == 3 and argv[0] == "check-plugin":
+            return cmd_check_plugin(cfg, argv[1], argv[2], out, clock)
         if argv == ["check-all"]:
             return cmd_check_all(cfg, out, run, clock, notify)
         out(USAGE)

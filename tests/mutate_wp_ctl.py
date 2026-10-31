@@ -9,16 +9,19 @@ there); an entry whose text is no longer in the file is reported as NOT APPLICAB
     python3 tests/mutate_wp_ctl.py 12 61 82   # only these entries, counted from 0 in the order of M
 
 Last full run 2026-10-28: 76 entries, all caught but two: 33 (the control-character check on text arguments, which every argument pattern already makes redundant: kept as defence in depth) and 61
-(the lock on the job table; the test now uses a slow clock to widen the race window and catches it). Entries added since were run on their own and caught. Not part of CI (it takes minutes).
+(the lock on the job table; the test now uses a slow clock to widen the race window and catches it). Entries added since were run on their own and caught. Not part of CI (it takes minutes). Each suite is run once WITHOUT a mutation first and the run stops if it fails (2026-10-31: the pin tool's mutants had been "killed" only because its tests could not find the CI workflows in the scratch copy).
 Entry 323 (the driver accepts an old TLS version) is an EQUIVALENT mutant: Python's own TLS client refuses anything older than 1.2 before the driver looks, so the check is defence in depth.
 Entries 202 onward are the control app's and need Flask: run the harness with the interpreter that has app/requirements.txt installed. 208 (a login code of any shape is looked at) is an EQUIVALENT mutant:
 a code of the wrong shape can never be the right code, so that check is defence in depth and no test can tell it is gone.
+Entries 383 onward are the plugin requests'. 389 (a plugin request's token is cleared before it acts) is an EQUIVALENT mutant: decide() clears the same tokens on every path that goes on, so the early clear is defence in depth.
 """
 import shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-KEEP = ["tests", "scripts", "templates", "tasks", "vars", "host_vars", "group_vars", "dellwp", "app", "opnsense", "hp705g4", "aopenvms"]
+# Everything the tests read, which is every directory of playbooks and their files, the CI workflows (tests/test_pin_consumers.py reads them) and the variables. NOT copied: .git, docs, terraform, postmortems
+# and the practice archive (large, and no test reads them). A suite that fails in the copy WITHOUT a mutation would "kill" every mutant, so the baseline of each suite is run first (below).
+KEEP = [d.name for d in sorted(REPO.iterdir()) if d.is_dir() and d.name not in (".git", "docs", "terraform", "postmortems", "wpress", "node_modules", "__pycache__")]
 W = "scripts/wp_ctl.py"
 M = [
  ("a site need not exist", W, 'if not NAME_RE.fullmatch(value) or value not in known_sites(ctl.cfg):', 'if not NAME_RE.fullmatch(value):'),
@@ -315,6 +318,7 @@ M = [
  ('the control node cannot reach the page at the host', 'host_vars/aopen/vars.yml', 'ports: [22, 443, "{{ ports.pbs }}"]', 'ports: [22, "{{ ports.pbs }}"]', 'tests/test_wp_panel_network.py'),
  ("the HP may reach 443 on the AOpen's VMs", 'host_vars/aopen/vars.yml', 'ports: [22, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'ports: [22, 443, "{{ ports.node_exporter }}"], bridges: [vmbr1] }', 'tests/test_wp_panel_network.py'),
  ('the whole overlay may open the page', 'host_vars/aopenpanel/vars.yml', 'src: "{{ wg_control_node_overlay_ip }}", ports: [443]', 'src: "{{ overlay_cidr }}", ports: [443]', 'tests/test_wp_panel_network.py'),
+ ('the phone may reach more than the page on the AOpen VMs', 'host_vars/aopen/vars.yml', '{ src: "{{ wg_phone_overlay_ip }}", proto: tcp, ports: [443]', '{ src: "{{ wg_phone_overlay_ip }}", proto: tcp, ports: [22, 443]', 'tests/test_wp_panel_network.py'),
  ("the page's name is another service's", 'group_vars/all/services.yml', 'lab_domain: "wp-panel.lab.example.com"', 'lab_domain: "grafana.lab.example.com"', 'tests/test_wp_panel_network.py'),
  ('the renewal hook skips the panel', 'hp705g4/certbot_timer_setup_hp705g4.yml', '      - "{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"\n', '', 'tests/test_wp_panel_network.py'),
  ('the private key is world readable', 'aopenvms/deploy_le_cert_aopenpanel.yml', 'mode: "0640"', 'mode: "0644"', 'tests/test_wp_panel_network.py'),
@@ -394,7 +398,89 @@ M = [
  ("the panel's rescan form is shown for an unfinished import too", 'app/wp_panel/templates/import_site.html', "{% if pending and pending.get('stage') == 'reported' %}\n<section class=\"card\">\n<h2>Scan again", "{% if pending %}\n<section class=\"card\">\n<h2>Scan again", 'tests/test_wp_panel.py'),
  ("the panel's rescan is sent without the request id", 'app/wp_panel/views.py', 'ask("import-rescan", site=name, req=field("req", 80))', 'ask("import-rescan", site=name)', 'tests/test_wp_panel.py'),
  ("the security page forgets the waiting import", 'app/wp_panel/templates/security.html', "{% if pending and pending.get('stage') == 'reported' %}", "{% if False %}", 'tests/test_wp_panel.py'),
+ ("a plugin may be acted on in any state", W, '    if row["status"] != needs:', '    if False:'),
+ ("a delete skips the slug rule", W, '        if not SLUG_RE.fullmatch(name):\n            raise Refuse("not_deletable"', '        if False:\n            raise Refuse("not_deletable"'),
+ ("a plugin the site does not list is acted on", W, '    if row is None:\n        raise Refuse("unknown_plugin"', '    if False:\n        raise Refuse("unknown_plugin"'),
+ ("the page cache is not cleared after a change", W, '        gone = purge_page_cache(call.ctl.cfg)', '        gone = 0'),
+ ("the page cache is cleared even when the tool failed", W, '    if rc == 0:\n        gone = purge_page_cache', '    if True:\n        gone = purge_page_cache'),
+ ("the purge follows links", W, 'os.walk(root, followlinks=False)', 'os.walk(root, followlinks=True)'),
+ ("the purge enters a linked cache directory", W, 'or os.path.islink(root):', ':'),
+ ("a failed deactivation is not tried again", W, '        if rc != 0:\n            rc, text = call.run([cli, site, "plugin", "deactivate", name, "--skip-plugins"', '        if False:\n            rc, text = call.run([cli, site, "plugin", "deactivate", name, "--skip-plugins"'),
+ ("the plugin list runs plugin code", W, '"--format=json", "--skip-plugins", "--skip-themes"])\n    try:\n        data = json.loads(text.strip().splitlines()[-1])\n        if rc != 0 or not isinstance(data, list):\n            raise ValueError\n    except (ValueError, IndexError):\n        raise Refuse("tool_output", "the plugins', '"--format=json"])\n    try:\n        data = json.loads(text.strip().splitlines()[-1])\n        if rc != 0 or not isinstance(data, list):\n            raise ValueError\n    except (ValueError, IndexError):\n        raise Refuse("tool_output", "the plugins'),
+ ("must-use plugins are listed as ordinary rows of any status", W, 'PLUGIN_STATUSES = ("active", "inactive", "active-network", "must-use", "dropin", "parent")', 'PLUGIN_STATUSES = ("active", "inactive")'),
+ ("the panel deletes a plugin on the first press", 'app/wp_panel/views.py', '        if what == "delete" and not typed:', '        if False:', 'tests/test_wp_panel.py'),
+ ("the panel client lets a delete go without the typed name", 'app/wp_panel/ctl.py', 'args.get("action") == "delete" and args.get("confirm_plugin") != args.get("plugin")', 'False', 'tests/test_wp_panel.py'),
+ ("the plugin page offers delete on an active plugin", 'app/wp_panel/templates/plugins.html', "{% if p.status == 'inactive' %}\n        <form", "{% if p.status in ('active', 'inactive') %}\n        <form", 'tests/test_wp_panel.py'),
+ ('a vulnerable plugin gets an Approve button', 'scripts/wp_plugin_requests.py', 'return bool(entry.get("found")) and entry.get("vuln") == "clean"', 'return bool(entry.get("found"))', 'tests/test_wp_plugin_requests.py'),
+ ('a risk is approved without typing the name', 'scripts/wp_plugin_requests.py', 'if by != "panel" or accept_slug != slug:', 'if False:', 'tests/test_wp_plugin_requests.py'),
+ ('a request is decided twice', 'scripts/wp_plugin_requests.py', '        if e["state"] != PENDING:\n            raise Refuse("this request is', '        if False:\n            raise Refuse("this request is', 'tests/test_wp_plugin_requests.py'),
+ ('the install is not marked before it starts', 'scripts/wp_plugin_requests.py', '        save(cfg, store)                                   # saved before the install starts', '        pass', 'tests/test_wp_plugin_requests.py'),
+ ('the page cache is not cleared after an install', 'scripts/wp_plugin_requests.py', 'cleared = wp_ctl.purge_page_cache(cfg) if rc == 0 else None', 'cleared = None', 'tests/test_wp_plugin_requests.py'),
+ ('an approved plugin is activated', 'scripts/wp_plugin_requests.py', '"wp-site-ext"), site, "plugin", "install", slug]', '"wp-site-ext"), site, "plugin", "install", slug, "--activate"]', 'tests/test_wp_plugin_requests.py'),
+ ('a token survives its use', 'scripts/wp_plugin_requests.py', '        e["tokens"] = {}                                   # one use: consumed before anything runs', '        pass', 'tests/test_wp_plugin_requests.py'),
+ ('a token need not have been issued', 'scripts/wp_plugin_requests.py', 'e["tokens"].get(d["n"]) != d["a"]', 'False', 'tests/test_wp_plugin_requests.py'),
+ ('a token is not bound to its request', 'scripts/wp_plugin_requests.py', 'identity_sha(e["site"], e["slug"], e["id"]) == d["r"]]', 'True]', 'tests/test_wp_plugin_requests.py'),
+ ('a phone approve on an unclean request', 'scripts/wp_plugin_requests.py', 'if d["a"] == "approve" and not can_approve_by_phone(e):', 'if False:', 'tests/test_wp_plugin_requests.py'),
+ ('a similar plugin name counts as the plugin', 'scripts/wp_plugin_requests.py', 'if isinstance(r, dict) and r.get("slug") == slug:', 'if isinstance(r, dict) and slug in str(r.get("slug")):', 'tests/test_wp_plugin_requests.py'),
+ ('old requests are accepted', 'scripts/wp_plugin_requests.py', 'if key in store or now - raw["t"] > cfg["expire_days"] * DAY or raw["t"] > now + DAY:', 'if key in store:', 'tests/test_wp_plugin_requests.py'),
+ ('a site may have any number waiting', 'scripts/wp_plugin_requests.py', 'or waiting >= cfg["max_pending_per_site"]:', ':', 'tests/test_wp_plugin_requests.py'),
+ ('a time that is not a whole number is accepted', 'scripts/wp_plugin_requests.py', 'isinstance(t, int) and not isinstance(t, bool) and t > 0', 'True', 'tests/test_wp_plugin_requests.py'),
+ ('a user name is not cleaned', 'scripts/wp_plugin_requests.py', 'USER_RE.sub("", user)[:60]', 'user[:60]', 'tests/test_wp_plugin_requests.py'),
+ ('a notification is marked sent even when it failed', 'scripts/wp_plugin_requests.py', 'e["notified"] = not why', 'e["notified"] = True', 'tests/test_wp_plugin_requests.py'),
+ ('a plugin wordpress.org does not have can be approved', 'scripts/wp_plugin_requests.py', '        if not e.get("found"):\n            raise Refuse("%s is not on wordpress.org', '        if False:\n            raise Refuse("%s is not on wordpress.org', 'tests/test_wp_plugin_requests.py'),
+ ('a deny is not told to the site', 'scripts/wp_plugin_requests.py', 'problem = write_result(cfg, run, site, rid, DENIED, "")', 'problem = ""', 'tests/test_wp_plugin_requests.py'),
+ ('a stopped site is asked', 'scripts/wp_plugin_requests.py', 'if state in ("live", "hold"):', 'if True:', 'tests/test_wp_plugin_requests.py'),
+ ('the tokens are issued even for the unchecked', 'scripts/wp_plugin_requests.py', '(("approve",) if can_approve_by_phone(entry) else ())', '("approve",)', 'tests/test_wp_plugin_requests.py'),
+ ('the plugin token signature does not cover its prefix', 'scripts/wp_approvals.py', 'return "p1.%s.%s" % (text, sign(key, "p1." + text)), nonce', 'return "p1.%s.%s" % (text, sign(key, text)), nonce', 'tests/test_wp_approvals.py'),
+ ('a plugin token goes to the import tool', 'scripts/wp_approval_listener.py', 'self.cfg["tool"] if kind == "import" else self.cfg["plugin_tool"]', 'self.cfg["tool"]', 'tests/test_wp_approvals.py'),
+ ('check-plugin accepts any slug', 'scripts/wp_vulnfeed.py', 're.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug or "")', 'True', 'tests/test_wp_vulnfeed.py'),
+ ('the panel approves a risky request on the first press', 'app/wp_panel/views.py', 'if what == "approve" and not (mine.get("found") and mine.get("vuln") == "clean") and not typed:', 'if False:', 'tests/test_wp_panel.py'),
+ ('the panel offers Approve for a plugin wordpress.org does not have', 'app/wp_panel/templates/requests.html', '        {% if r.found %}\n        <form', '        {% if True %}\n        <form', 'tests/test_wp_panel.py'),
+ ('the panel client lets a typed name ride on a deny', 'app/wp_panel/ctl.py', 'if verb == "plugin-request-decide" and "confirm_slug" in args and args.get("decision") != "approve":', 'if False:', 'tests/test_wp_panel.py'),
+ ('wp-ctl lets a typed name ride on a deny', 'scripts/wp_ctl.py', 'if "confirm_slug" in a and a["decision"] != "approve":', 'if False:', 'tests/test_wp_ctl.py'),
+ ('wp-ctl does not check the request id', 'scripts/wp_ctl.py', '"id": Arg("text", rx=REQUEST_ID_RE)', '"id": Arg("text", rx=ANY_RE)', 'tests/test_wp_ctl.py'),
+ ('the A/B test does not put php.ini back', 'scripts/wp_ab_test.py', '            site.write_ini(original)\n            site.restart()\n            out("  restored', '            pass\n            site.restart()\n            out("  restored', 'tests/test_wp_ab_test.py'),
+ ('the A/B test ignores the signals', 'scripts/wp_ab_test.py', 'handlers[s] = signal.signal(s, stop)', 'handlers[s] = signal.getsignal(s)', 'tests/test_wp_ab_test.py'),
+ ('the A/B test calls any difference real', 'scripts/wp_ab_test.py', 'NOISE_FACTOR = 2.0', 'NOISE_FACTOR = 0.0', 'tests/test_wp_ab_test.py'),
+ ('the A/B test calls a 1 % difference real', 'scripts/wp_ab_test.py', 'MIN_REAL_CHANGE = 0.03', 'MIN_REAL_CHANGE = 0.0', 'tests/test_wp_ab_test.py'),
+ ('the A/B test reports faster as slower', 'scripts/wp_ab_test.py', '"slower" if change > 0 else "faster"', '"faster" if change > 0 else "slower"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test keeps the page cache between phases', 'scripts/wp_ab_test.py', '        self.flush_cache()\n        take("cold"', '        take("cold"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test runs B first', 'scripts/wp_ab_test.py', 'phases += [("A%d" % (r + 1), "A"), ("B%d" % (r + 1), "B")]', 'phases += [("B%d" % (r + 1), "B"), ("A%d" % (r + 1), "A")]', 'tests/test_wp_ab_test.py'),
+ ('the A/B test accepts a setting equal to the present one', 'scripts/wp_ab_test.py', 'if m.group(2) == val:', 'if False:', 'tests/test_wp_ab_test.py'),
+ ('the A/B test ignores a held lock', 'scripts/wp_ab_test.py', 'raise SystemExit("another change to', 'print("another change to', 'tests/test_wp_ab_test.py'),
+ ('the A/B test sends the mini-cart POST without a cart cookie', 'scripts/wp_ab_test.py', '"Cookie": "woocommerce_items_in_cart=1; woocommerce_cart_hash=ab"', '"X-A": "b"', 'tests/test_wp_ab_test.py'),
+ ('the A/B test does not ask whether php.ini is back', 'scripts/wp_ab_test.py', 'ok = line.split()[:1] == ["same"]', 'ok = True', 'tests/test_wp_ab_test.py'),
+ ('the A/B test writes php.ini to a new file', 'scripts/wp_ab_test.py', 'with open(self.ini, "r+") as f:', 'with open(self.ini + ".new", "w") as f:', 'tests/test_wp_ab_test.py'),
+ ("pin_consumers follows names and paths in comments", 'scripts/pin_consumers.py', '            return "\\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))', '            return text', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores which host a host_vars file belongs to', 'scripts/pin_consumers.py', '            return {parts[1]}', '            return None', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores which group a group_vars file belongs to', 'scripts/pin_consumers.py', '            return self.groups.get(parts[1], {parts[1]})', '            return None', 'tests/test_pin_consumers.py'),
+ ('pin_consumers does not follow variables defined from the pin', 'scripts/pin_consumers.py', '        names = self.aliases(names)', '        names = set(names)', 'tests/test_pin_consumers.py'),
+ ('pin_consumers reports a comment-only edit', 'scripts/pin_consumers.py', 'if all(not c or c.startswith("#") for c in changed):', 'if False:', 'tests/test_pin_consumers.py'),
+ ("pin_consumers misses an indented src:", 'scripts/pin_consumers.py', '(?:^\\s*|[{,]\\s*)(?:-\\s+)?(?:src|script):', '(?:^|[{,]\\s*)(?:-\\s+)?(?:src|script):', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores pins in task files', 'scripts/pin_consumers.py', 'r.parts[0] not in ("vars", "tasks")', 'r.parts[0] not in ("vars",)', 'tests/test_pin_consumers.py'),
+ ('pin_consumers rewrites an up-to-date comment', 'scripts/pin_consumers.py', '            if has and lines[i - 1] == want:\n                continue', '            if False:\n                continue', 'tests/test_pin_consumers.py'),
+ ('pin_consumers forgets a deleted file', 'scripts/pin_consumers.py', '" (deleted)" if gone else ""', '""', 'tests/test_pin_consumers.py'),
+ ('pin_consumers loses the old side of a removed variable', 'scripts/pin_consumers.py', '        for n in range(old_start, old_start + max(old_len, 1)):\n            names.add(owner(old_lines, n))\n', '', 'tests/test_pin_consumers.py'),
+ ('pin_consumers leaves a stale comment when a playbook starts using a pin', 'scripts/pin_consumers.py', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)\n            if has:\n                continue', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ties every template to a play that names ../templates', 'scripts/pin_consumers.py', ' and d.as_posix() not in ROOT_DIRS:', ':', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores the directory a file sits in', 'scripts/pin_consumers.py', '        return {Path(rel)} | {d for d in Path(rel).parents if d in self.dirs}', '        return {Path(rel)}', 'tests/test_pin_consumers.py'),
+ ('the pins workflow can fail the run with its report', '.gitea/workflows/pins.yml', 'python3 -I scripts/pin_consumers.py --since "$SINCE" || true', 'python3 -I scripts/pin_consumers.py --since "$SINCE"', 'tests/test_pin_consumers.py'),
+ ('the pins workflow skips a playbook-only change', '.gitea/workflows/pins.yml', '      - "**/*.yml"\n      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', '      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', 'tests/test_pin_consumers.py'),
+ ('the pins workflow does not run the check', '.gitea/workflows/pins.yml', 'run: python3 -I scripts/pin_consumers.py --check', 'run: echo skipped', 'tests/test_pin_consumers.py'),
+ ('the pins workflow has too little history to diff', '.gitea/workflows/pins.yml', 'fetch-depth: 0', 'fetch-depth: 1', 'tests/test_pin_consumers.py'),
 ]
+# A suite that fails in the copy with nothing broken proves nothing about any mutant: stop and say which one.
+def baseline(root, suites):
+    bad = []
+    for suite in sorted(suites):
+        r = subprocess.run([sys.executable, "-I", str(root / suite)], capture_output=True, text=True, timeout=600, cwd=str(root))
+        print(("baseline ok   " if r.returncode == 0 else "BASELINE FAILS"), suite, flush=True)
+        if r.returncode != 0:
+            bad.append(suite)
+            print("   " + "\n   ".join((r.stdout + r.stderr).strip().splitlines()[-6:]), flush=True)
+    return bad
+
+
 only = sys.argv[1:]
 surv, ran = [], 0
 with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
@@ -403,6 +489,10 @@ with tempfile.TemporaryDirectory(prefix="wpctl-mut-") as td:
     for d in KEEP:
         shutil.copytree(REPO / d, root / d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy(REPO / "inventory.yml", root / "inventory.yml")
+    wanted = {(m[4] if len(m) > 4 else "tests/test_wp_ctl.py") for i, m in enumerate(M) if not only or str(i) in only}
+    if baseline(root, wanted):
+        print("\nthe suites above fail in the scratch copy with nothing broken: fix the copy (KEEP) or the suite first")
+        sys.exit(2)
     for i, (label, rel, old, new, *suite) in enumerate(M):
         if only and str(i) not in only:
             continue

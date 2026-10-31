@@ -3,17 +3,21 @@
 # image manager reads the anchor comment directly above each line. The php-fpm tag is `<WordPress>-php<minor>-fpm`: the WordPress part only seeds a NEW site's
 # core (the entrypoint never upgrades an existing one), the PHP minor is the real pin. PHP moves one minor at a time after the operator's canary, never by a
 # merged PR alone. The task files have no default on purpose: a play that forgets to load this file fails on the undefined variable.
+# used by: dellwp/wp_sites_dellwp.yml
 # renovate: depName=wordpress
 wp_image_php: "wordpress:7.1.3-php8.5-fpm"
+# used by: dellwp/wp_sites_dellwp.yml
 # renovate: depName=mariadb
 wp_image_db: "mariadb:12.3.3"
 # ClamAV runs in one-shot containers too (templates/wp/wp_clamscan.sh.j2 scans, wp_clamav_update.sh.j2 refreshes the signatures): the image carries the engine and freshclam, the signatures live on the VM
 # (wp_clamav_dir) so a scan needs no network.
+# used by: dellwp/wp_scans_dellwp.yml, dellwp/wp_sites_dellwp.yml
 # renovate: depName=clamav/clamav
 wp_image_clamav: "clamav/clamav:1.5.4"
 # WP-CLI runs in a one-shot container of the official image with the same PHP minor as the sites (wordpress:cli-<version>-php<minor>). Renovate cannot read that tag
 # shape, so the tag is built from two lines it can: this version (custom manager in renovate.json, like vars/docker.yml) and the php minor of wp_image_php above.
 # The cli image is Alpine-based and the site image Debian-based: same PHP, different libc. The tools (templates/wp/wp_site_cli.sh.j2) bypass its entrypoint.
+# used by: dellwp/wp_sites_dellwp.yml
 # renovate: datasource=github-releases depName=wp-cli/wp-cli
 wp_cli_version: "2.12.0"
 wp_image_cli: "wordpress:cli-{{ wp_cli_version }}-{{ wp_image_php | regex_search('php[0-9]+[.][0-9]+') }}"

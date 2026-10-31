@@ -10,14 +10,14 @@
 <section class="card">
 <h2>Waiting for you</h2>
 <p class="small">An import that has finished its run waits for your decision; the site stays on hold until you approve. One that stopped half-way must be reset.</p>
-<div class="table-wrap flat"><table>
+<div class="table-wrap flat stack"><table>
   <thead><tr><th>Site</th><th>File</th><th>State</th><th></th></tr></thead>
   <tbody>
   {% for i in imports %}
   <tr>
-    <td>{{ i.get('site', '') | clip(40) }}</td>
-    <td>{{ i.get('file') or '-' | clip(100) }}</td>
-    <td>{% if i.get('stage') == 'reported' %}{% if i.get('problems') %}<span class="badge bad">not clean</span> <span class="small">{{ (i.get('problems') or [''])[0] | clip(120) }}</span>{% else %}<span class="badge ok">clean</span>{% endif %}
+    <td data-label="Site">{{ i.get('site', '') | clip(40) }}</td>
+    <td data-label="File">{{ i.get('file') or '-' | clip(100) }}</td>
+    <td data-label="State">{% if i.get('stage') == 'reported' %}{% if i.get('problems') %}<span class="badge bad">not clean</span> <span class="small">{{ (i.get('problems') or [''])[0] | clip(120) }}</span>{% else %}<span class="badge ok">clean</span>{% endif %}
         {% else %}<span class="badge warn">unfinished</span>{% endif %}</td>
     <td><a class="button secondary" href="{{ url_for('import_site', name=i.get('site', '')) }}">{% if i.get('stage') == 'reported' %}Read the report and decide{% else %}Open{% endif %}</a></td>
   </tr>
@@ -30,15 +30,15 @@
 <section class="card">
 <h2>1. Files on dellwp</h2>
 {% if files %}
-<div class="table-wrap flat"><table>
+<div class="table-wrap flat stack"><table>
   <thead><tr><th>File</th><th>Size</th><th>Added</th><th>Used by</th><th></th></tr></thead>
   <tbody>
   {% for f in files %}
   <tr>
-    <td>{{ f.get('name', '') | clip(100) }}</td>
-    <td>{{ f.get('bytes') | megabytes }}</td>
-    <td>{{ f.get('mtime') | ago }}</td>
-    <td>{% if f.get('site') %}<span class="badge warn">import in {{ f.get('site') | clip(40) }}</span>{% else %}<span class="muted">not used</span>{% endif %}</td>
+    <td data-label="File">{{ f.get('name', '') | clip(100) }}</td>
+    <td data-label="Size">{{ f.get('bytes') | megabytes }}</td>
+    <td data-label="Added">{{ f.get('mtime') | ago }}</td>
+    <td data-label="Used by">{% if f.get('site') %}<span class="badge warn">import in {{ f.get('site') | clip(40) }}</span>{% else %}<span class="muted">not used</span>{% endif %}</td>
     <td><div class="actions">
       {% if not f.get('site') %}
       <a class="button secondary" href="{{ url_for('import_hub') }}?file={{ f.get('name', '') | urlencode }}#start">Use</a>

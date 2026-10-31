@@ -107,6 +107,8 @@ class Renderer:
                    wp_secret_base=base, wp_db_password=db_password(base))
         if self.resend is not None:
             ctx["dellwp_wp_resend_key"] = self.resend
+        elif site.get("mail_mode") == "send":
+            raise RenderError("mail_mode is send but dellwp has no Resend key (dellwp_wp_resend_key): run scripts/wp_provider_key.sh resend, then dellwp/wp_sites_dellwp.yml, or set mail_mode back to log")
         return ctx
 
     def one(self, template, ctx):

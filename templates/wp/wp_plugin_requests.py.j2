@@ -1,0 +1,24 @@
+#!/usr/bin/python3 -I
+# Managed by Ansible (templates/wp/wp_plugin_requests.py.j2). What the sites ask to have installed (Plugins > Add New > Install in a site's wp-admin becomes a request):
+#   sudo wp-plugin-requests collect [--no-notify] [site] | list | decide <site> <id> approve|deny [--accept-risk <slug>] | resolve <token>
+# The logic is {{ wp_tools_lib }}/wp_plugin_requests.py (copied from scripts/ in the repo, where tests/test_wp_plugin_requests.py runs it); this file only carries the values from the repo. Root-only (0750).
+# `resolve` is for the approval listener (a button on the phone); `collect` runs from wp-plugin-requests.timer and from the control page's Refresh button; `decide` is the control page's.
+import sys
+
+sys.path.insert(0, "{{ wp_tools_lib }}")
+import wp_plugin_requests  # noqa: E402
+
+CONFIG = {
+    "data_dir": "{{ wp_data_mount }}/sites",
+    "tools_bin": "{{ wp_tools_bin }}",
+    "state_dir": "{{ wp_plugin_requests_state_dir }}",
+    "page_cache_dir": "{{ wp_page_cache_path }}",
+    "logger": "/usr/bin/logger",
+    "cli_timeout_s": {{ wp_plugin_requests_cli_timeout_s }},
+    "install_timeout_s": {{ wp_plugin_requests_install_timeout_s }},
+    "expire_days": {{ wp_plugin_requests_expire_days }},
+    "max_pending_per_site": {{ wp_plugin_requests_max_pending_per_site }},
+    "approvals": {"key_file": "{{ wp_approvals_dir }}/key", "approver_file": "{{ wp_approvals_dir }}/approver", "ntfy_conf": "{{ wp_ntfy_conf }}", "netrc": "{{ wp_ntfy_netrc }}",
+                  "reply_topic": "{{ wp_approvals_reply_topic }}", "ttl_s": {{ wp_approvals_ttl_s }}},
+}
+sys.exit(wp_plugin_requests.main(CONFIG, sys.argv[1:]))

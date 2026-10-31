@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Approve {{ r.slug }} · {{ r.site }}{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('requests_page') }}">Back to the requests</a> (nothing has been installed yet)</p>
+<div class="page-head"><div><h1>Approve {{ r.slug | clip(100) }} on {{ r.site | clip(40) }}?</h1></div></div>
+<p class="error" role="alert">
+  {% if r.vuln == 'found' %}This plugin version has a known vulnerability: {{ (r.vuln_line or '') | clip(300) }}
+  {% else %}The vulnerability check could not be run for this plugin ({{ (r.vuln_line or 'no reason given') | clip(200) }}), and "not checked" is not "safe".{% endif %}
+  It would be installed inactive, but the files are then on the site.
+</p>
+<section class="card danger">
+<form method="post" action="{{ url_for('request_decide') }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="site" value="{{ r.site }}"><input type="hidden" name="id" value="{{ r.id }}"><input type="hidden" name="decision" value="approve">
+  <label>Type the plugin's name to approve it anyway
+    <input name="confirm_slug" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ r.slug | clip(100) }}">
+  </label>
+  <div class="actions"><button type="submit" class="danger">Install {{ r.slug | clip(100) }}</button></div>
+</form>
+</section>
+{% endblock %}

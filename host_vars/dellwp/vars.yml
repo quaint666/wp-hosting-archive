@@ -9,6 +9,51 @@ wp_nginx_listen_port: 8080
 # A second loopback port on every vhost, for the update job's health probe: the same server block, so the probe exercises the same rules a visitor meets, but the maintenance flag
 # does not turn it into a 503 (the job probes the site BEFORE it reopens it). Nothing dials it from outside: cloudflared is pointed at wp_nginx_listen_port only.
 wp_nginx_probe_port: 8081
+# The page cache for anonymous visitors (the zone, its path and the bypass maps are in tasks/wp_nginx_base_common.yml, the per-site rules in templates/wp/site_nginx.conf.j2). A page is kept this
+# many seconds; 0 turns the cache off in every vhost. There is no purge: an edit shows within this time, and `find <wp_page_cache_path> -type f -delete` empties it at once. Logged-in users, carts,
+# the REST API, search, previews and anything with an Authorization header never touch it. The zone's name carries its size because nginx refuses a reload that redefines a zone with another
+# size (tasks/wp_nginx_base_common.yml, 2026-10-24): change wp_page_cache_keys_mb and the name changes with it.
+wp_page_cache_s: 300
+wp_page_cache_keys_mb: 10
+wp_page_cache_zone: "wp_pages_{{ wp_page_cache_keys_mb }}m"
+wp_page_cache_path: /var/cache/nginx/wp_pages
+wp_page_cache_max_mb: 256
+# php-fpm and PHP for every site (templates/wp/site_fpm_pool.conf.j2, templates/wp/site_php.ini.j2). Each value is what ran before it became a variable, so changing none of them changes nothing; the
+# experiment is one line here, a run of dellwp/wp_sites_dellwp.yml --tags wp_tools and `wp-site-provision apply <site>`, then scripts/wp_traffic_sim.sh and scripts/wp_perf_measure.sh.
+# pm: ondemand (no idle workers: the first request after wp_fpm_idle_timeout_s of quiet starts one, 50 to 350 ms measured on dellwp), dynamic (the three spare counts below keep workers
+# alive; each idle one holds RAM), or static (pm.max_children workers always). The spare counts are cut down to the site's fpm_max_children, which php-fpm insists on.
+wp_fpm_pm: ondemand
+wp_fpm_idle_timeout_s: 20
+wp_fpm_start_servers: 1
+wp_fpm_min_spare_servers: 1
+wp_fpm_max_spare_servers: 2
+# A worker is replaced after this many requests (a guard against leaks); with opcache a respawn is cheap.
+wp_fpm_max_requests: 500
+# A request that runs longer than this many whole seconds has its PHP stack written to the container's log (docker logs); 0 turns it off. php-fpm takes whole seconds only (units s, m, h, d,
+# no fractions), so 1 is the lowest that logs: it catches a stale page's refresh or a cold start, not a 400 ms uncached request. 10 is for trouble, 1 is for looking; the stacks name the plugin
+# on top at that moment (scripts/wp_perf_measure.sh ranks them). Keep it below request_terminate_timeout (120 s in the pool template).
+wp_fpm_slowlog_s: 10
+# 1 is PHP's own default with no php.ini (assertions are evaluated); -1 is what a production php.ini sets.
+wp_php_assertions: 1
+# opcache: the image's own settings (4000 files, 8 MB of interned strings, a file's age checked every 2 s). A site has about 8000 PHP files on disk, most never loaded; guides for WordPress
+# with WooCommerce suggest 16 to 32 MB of strings and a file limit well above the count of loaded files. validate 0 stops checking whether files changed: only safe if every change to a
+# site's code is followed by a php reload (the update job reloads; wp-site-ext does not), or the site runs stale code.
+wp_php_opcache_files: 4000
+# 16, not the image's 8: the timing plugin (2026-10-31, envo-ecommerce) found the interned-strings buffer full, 8 MB used and none free; PHP then stops sharing new strings between workers. 16 is the figure
+# the WordPress-with-WooCommerce guides give. scripts/wp_ab_test.sh --set opcache.interned_strings_buffer=8 compares it with the old value on the live site, one go.
+wp_php_opcache_strings_mb: 16
+wp_php_opcache_validate: 1
+wp_php_opcache_revalidate_s: 2
+wp_php_realpath_ttl_s: 120
+# 0 off, 1 on: every request that reaches PHP writes one "wph-timing {json}" line to the container's log (templates/wp/mu/40-wp-hosting-timing.php): when each stage of start-up was reached,
+# each plugin's include time, queries, memory and opcache's own gauges (is its file limit too low? it says). 2 also times every callback hooked to those stages and charges it to the plugin it was
+# written in; that wraps callbacks and costs a few percent. scripts/wp_perf_measure.sh summarises the lines. Set it back to 0 when done: it is a diagnostic, and the lines fill the log.
+wp_php_timing: 0
+# 1 keeps PHP's open_basedir (the site's directory, the must-use directory and /tmp); 0 takes it off. Measured on dellwp 2026-10-30: with it off a cached CLI boot took 247 ms instead of 581 ms
+# (scripts/wp_perf_profile.sh --ini). WHY it costs that is not established here: a package description says PHP skips its path cache while open_basedir is set, but no php-src page was found that
+# says so. What it protects: a hacked plugin reading files outside the site. Each site's container already sees only its own html, the must-use directory and a RAM-disk /tmp, so the container
+# is the first wall and this is the second; with it off, PHP can still read the rest of the image (/etc, /proc, the PHP files). Turn it off only on a site you decide can afford that.
+wp_php_open_basedir: 1
 # A host name only a local curl can send (Cloudflare forwards only names under the domain). The health vhost of tasks/wp_nginx_base_common.yml answers it and the
 # tunnel check (dellwp/cloudflared_check_dellwp.yml) asks for it, so the check can tell "nginx is up" from the catch-all's closed connection.
 wp_health_host: wp-healthz.internal
@@ -53,6 +98,7 @@ wp_site_defaults:
   allow_app_passwords: false
   allow_user_enum: false
   mail_mode: log
+  cart_fragments: normal
   php_allow_functions: []
 # The sites are not listed here: a site is a record in the registry on dellwp (/srv/wp/sites/<name>/site.json), made by wp-ctl create. What stays here is the FLOOR of numbers: the ports and
 # quota project ids of the sites of the old engine, which are all closed and gone. wp-site-provision never gives a new site a number at or below these (it takes the next one above everything ever
@@ -91,6 +137,13 @@ wp_provision_platform_vars:
   - wp_db_stop_grace_s
   - wp_db_uid
   - wp_domain
+  - wp_fpm_idle_timeout_s
+  - wp_fpm_max_requests
+  - wp_fpm_max_spare_servers
+  - wp_fpm_min_spare_servers
+  - wp_fpm_pm
+  - wp_fpm_slowlog_s
+  - wp_fpm_start_servers
   - wp_image_db
   - wp_image_php
   - wp_login_limit_ip
@@ -103,8 +156,19 @@ wp_provision_platform_vars:
   - wp_mu_mount
   - wp_nginx_listen_port
   - wp_nginx_probe_port
+  - wp_page_cache_s
+  - wp_page_cache_zone
+  - wp_php_assertions
   - wp_php_disable_functions
+  - wp_php_opcache_files
+  - wp_php_opcache_revalidate_s
+  - wp_php_opcache_strings_mb
+  - wp_php_opcache_validate
+  - wp_php_open_basedir
+  - wp_php_realpath_ttl_s
+  - wp_php_timing
   - wp_php_uid
+  - wp_plugin_requests_max
   - wp_stack_start_timeout_s
   - wp_stack_stop_timeout_s
   - wp_unit_dir
@@ -193,6 +257,17 @@ wp_approvals_max_per_minute: 20
 wp_approvals_read_timeout_s: 120
 wp_approvals_resolve_timeout_s: 7200
 wp_ntfy_notify_cmd: /usr/local/bin/ntfy-notify
+# Plugin requests (scripts/wp_plugin_requests.py, templates/wp/mu/50-wp-hosting-plugin-requests.php): a friend's Install in wp-admin is a request, collected from each live site every
+# wp_plugin_requests_interval_min minutes by wp-plugin-requests.timer (the control page's Refresh button collects at once), remembered in wp_plugin_requests_state_dir, and sent to the phone like an import
+# (Approve and Deny, the same ntfy, the same signing key; a token is good for wp_approvals_ttl_s). A request nobody answers expires after wp_plugin_requests_expire_days. A site may have
+# wp_plugin_requests_max_pending_per_site waiting at once on this side (the site's own limit, wp_plugin_requests_max above, is lower); the limit here is for a site that does not play fair.
+# Every WP-CLI call is given wp_plugin_requests_cli_timeout_s, an install wp_plugin_requests_install_timeout_s.
+wp_plugin_requests_state_dir: /var/lib/wp-plugin-requests
+wp_plugin_requests_interval_min: 15
+wp_plugin_requests_expire_days: 7
+wp_plugin_requests_max_pending_per_site: 20
+wp_plugin_requests_cli_timeout_s: 120
+wp_plugin_requests_install_timeout_s: 600
 # The control dispatcher (scripts/wp_ctl.py, templates/wp/wp_ctl.py.j2, tasks/wp_ctl_common.yml; design in docs/wordpress_hosting_explained.md section 11): the one program the control app's ssh key may run, and the
 # operator's own `sudo wp-ctl`. wp_ctl_user is the account that key logs in as (its only sudoers entry is wp-ctl). wp_ctl_panel_keys are the public keys allowed to log in as it, each forced to wp-ctl;
 # the list is empty until the control app's key exists, and an empty list means nobody can log in as that account. wp_ctl_panel_from is the one address those keys may log in from: the control app's VM. wp_ctl_state_dir holds the jobs (one directory each: its request, its log, its exit code) and
@@ -232,6 +307,11 @@ wp_ctl_limits:
   update-apply: { timeout_s: 5400, memory_mb: 1024 }
   vuln-check: { timeout_s: 300 }
   users: { timeout_s: 60 }
+  plugins: { timeout_s: 60 }
+  plugin-set: { timeout_s: 300 }
+  plugin-requests: { timeout_s: 60 }
+  plugin-requests-collect: { timeout_s: 900 }
+  plugin-request-decide: { timeout_s: 1200 }
   import-list: { timeout_s: 60 }
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64
@@ -287,3 +367,5 @@ wp_login_window_s: 900
 wp_mail_sender_domain: "mail.{{ wp_domain }}"
 wp_mail_per_hour: 20
 wp_mail_per_day: 60
+# Plugin requests (templates/wp/mu/50-wp-hosting-plugin-requests.php): how many a site may have waiting for the operator at once. 0 turns the feature off (wp-admin has no Add New, as before).
+wp_plugin_requests_max: 5

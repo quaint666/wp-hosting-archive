@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Plugins · {{ name }}{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('site', name=name) }}">{{ name | clip(40) }}</a></p>
+<div class="page-head"><div><h1>Plugins</h1>
+  <p class="small">Switch a plugin on or off, or remove one. Installing and uploading are not here: that stays with the operator's tools.</p></div></div>
+
+{% if state != 'live' and state != 'hold' %}<p class="notice">This site is {{ (state or 'in an unknown state') | clip(20) }}, so there is nothing running to ask.</p>{% endif %}
+{% if problem %}<p class="error" role="alert">{{ problem | clip(400) }}</p>{% endif %}
+
+<section class="card">
+{% if rows %}
+<div class="table-wrap flat stack">
+<table>
+  <thead><tr><th>Plugin</th><th>Version</th><th>Status</th><th>Do</th></tr></thead>
+  <tbody>
+  {% for p in rows %}
+  <tr>
+    <td data-label="Plugin"><strong>{{ p.title | clip(100) }}</strong>{% if p.title != p.name %}<br><span class="small"><code>{{ p.name | clip(100) }}</code></span>{% endif %}</td>
+    <td data-label="Version">{{ p.version | clip(40) }}{% if p.update %} <span class="badge warn">update</span>{% endif %}</td>
+    <td data-label="Status"><span class="badge {{ 'ok' if p.status == 'active' else '' }}">{{ p.status | clip(20) }}</span></td>
+    <td data-label="Do">
+      {% if p.status in ('active', 'inactive') %}
+      <div class="actions">
+        <form method="post" action="{{ url_for('plugin_change', name=name) }}" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="plugin" value="{{ p.name }}">
+          {% if p.status == 'active' %}
+          <input type="hidden" name="action" value="deactivate">
+          <button type="submit" class="secondary">Deactivate</button>
+          {% else %}
+          <input type="hidden" name="action" value="activate">
+          <button type="submit" class="secondary">Activate</button>
+          {% endif %}
+        </form>
+        {% if p.status == 'inactive' %}
+        <form method="post" action="{{ url_for('plugin_change', name=name) }}" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="plugin" value="{{ p.name }}">
+          <input type="hidden" name="action" value="delete">
+          <button type="submit" class="danger secondary">Delete…</button>
+        </form>
+        {% endif %}
+      </div>
+      {% else %}<span class="small">the hosting's own</span>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small">Each change clears the page cache of every site on dellwp, so visitors see it at once instead of after up to five minutes (the next few page views are slower while it fills again). A plugin has to be deactivated before it can be deleted. Must-use plugins and drop-ins belong to the hosting and have no buttons.</p>
+{% elif not problem %}<p>This site reports no plugins.</p>{% endif %}
+</section>
+{% endblock %}
