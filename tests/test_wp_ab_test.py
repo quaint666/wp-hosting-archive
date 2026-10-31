@@ -32,7 +32,7 @@ class Fake:
 
     def __init__(self, tmp, speed=lambda ini: 100.0, ready_after=0):
         self.tmp, self.speed, self.calls, self.restarts, self.http_log, self.ready_after, self.provision_line = tmp, speed, [], 0, [], ready_after, "same     /srv/wp/sites/alpha/php.ini"
-        self.restart_rc, self.fail_after_requests, self.requests, self.not_ready = 0, None, 0, False
+        self.restart_rc, self.fail_after_requests, self.requests, self.not_ready, self.login_hits = 0, None, 0, False, 0
         self.ini_at_restart = []
         self.t = 0.0
 
@@ -55,8 +55,12 @@ class Fake:
         if self.not_ready:
             return 503, 0.0, "-"
         ini = (self.tmp / "sites/alpha/php.ini").read_text()
+        if path.startswith("/wp-login.php"):             # nginx's limit_req: 10 a minute, burst 5, then 429 (templates/wp/site_nginx.conf.j2, tasks/wp_nginx_base_common.yml)
+            self.login_hits += 1
+            if self.login_hits > 6:
+                return 429, 0.0, "-"
         cache = "MISS" if path.startswith("/?ab=") else "BYPASS" if method == "POST" else "-"
-        return 200, self.speed(ini), cache
+        return (400 if path.startswith("/wp-admin/admin-ajax.php") else 200), self.speed(ini), cache
 
     def sleep(self, s):
         self.t += s
@@ -164,10 +168,28 @@ class Phases(Base):
         self.go(fake)
         self.assertEqual(list((self.tmp / "cache").rglob("page")), [])
         paths = {(m, p.split("-")[0] if p.startswith("/?ab=") else p) for m, p, _ in fake.http_log}
-        self.assertEqual(paths, {("GET", "/wp-login.php"), ("GET", "/wp-json/"), ("GET", "/?ab=A1"), ("GET", "/?ab=B1"), ("GET", "/?ab=A2"), ("GET", "/?ab=B2"), ("POST", "/?wc-ajax=get_refreshed_fragments")} | {("GET", "/?ab=A1")} - set())
+        self.assertEqual(paths, {("GET", "/wp-admin/admin-ajax.php"), ("GET", "/wp-json/"), ("GET", "/?ab=A1"), ("GET", "/?ab=B1"), ("GET", "/?ab=A2"), ("GET", "/?ab=B2"), ("POST", "/?wc-ajax=get_refreshed_fragments")})
         urls = [p for m, p, _ in fake.http_log if p.startswith("/?ab=")]
         self.assertEqual(len(urls), len(set(urls)), "every page address is new, so every one is a cache MISS")
         self.assertTrue(all(c and "woocommerce_items_in_cart" in c for m, p, c in fake.http_log if m == "POST"), "the mini-cart POST carries a cart cookie, so nginx does not answer it")
+
+    def test_no_request_is_rate_limited_so_none_fails_and_nothing_asks_for_wp_login(self):
+        """The first real run (2026-10-31) timed /wp-login.php 12 times in a row and got 429 for 11 of them: nginx allows that page 10 a minute. The fake site now does the same."""
+        fake = Fake(self.tmp)
+        rc, text = self.go(fake)
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("failed", text.split("==== A")[0], "no request failed in any phase")
+        self.assertNotIn("no answer", text)
+        self.assertEqual(fake.login_hits, 0, "/wp-login.php is not requested at all")
+        self.assertTrue(all(p != "/wp-login.php" for _, p, _ in fake.http_log))
+        for key in ("cold", "boot", "json", "pages", "frag"):
+            self.assertIn("  %-8s" % key, text)
+
+    def test_a_site_answering_429_or_502_is_not_ready_and_not_counted_as_measured(self):
+        fake = Fake(self.tmp)
+        fake.not_ready = True
+        rc, text = self.go(fake)
+        self.assertEqual(rc, 1); self.assertIn("did not answer on /wp-admin/admin-ajax.php", text)
 
     def test_a_setting_that_makes_the_site_faster_is_reported_faster_and_one_that_changes_nothing_is_not(self):
         fake = Fake(self.tmp, speed=lambda ini: 80.0 if "buffer = 8" in ini else 100.0)
@@ -234,7 +256,7 @@ class WayOut(Base):
         rc, text = self.go(fake)
         self.assertEqual(rc, 1)
         self.assertEqual(self.ini(), INI)
-        self.assertIn("did not answer 200", text)
+        self.assertIn("did not answer on /wp-admin/admin-ajax.php", text)
 
     def test_when_the_repo_says_php_ini_differs_it_is_said_loudly_and_the_exit_is_1(self):
         fake = Fake(self.tmp)

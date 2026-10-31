@@ -4,8 +4,8 @@
 A is the site's php.ini as it is; B is the same file with the --set values changed. The phases run A B A B (--rounds 2), because one run of each says little: the second pair shows how much the SAME setting
 differs from itself, and a difference is only called real when it is larger than that. In each phase the program writes the variant, restarts the site (systemctl restart wp-<site>: about ten seconds
 offline), waits until it answers, empties the page cache and then measures only requests PHP has to build, from nginx on this VM's loopback (no network, Cloudflare or browser in it):
-  cold    the first request after the restart (OPcache is empty: this is the compile cost)
-  login   GET /wp-login.php          PHP, never cached
+  cold    the first page after the restart (OPcache is empty: this is the compile cost of a whole page)
+  boot    GET /wp-admin/admin-ajax.php   WordPress start-up and nothing else (it answers 400 "0"): PHP, never cached, and not rate limited. NOT /wp-login.php: nginx allows that 10 a minute (429 after)
   json    GET /wp-json/              PHP, never cached
   pages   GET /?ab=<n>, one new address each time: a page-cache MISS that PHP builds
   frag    POST /?wc-ajax=get_refreshed_fragments with a cart cookie: PHP, never cached (WooCommerce's mini-cart)
@@ -26,9 +26,13 @@ import time
 KEY_RE = re.compile(r"^[a-z][a-z0-9_.]{1,60}$")
 VAL_RE = re.compile(r"^[A-Za-z0-9_.:/,+-]{1,60}$")
 SITE_RE = re.compile(r"^[a-z]([a-z0-9]|-[a-z0-9]){0,22}$")
-METRICS = (("cold", "first request after the restart"), ("login", "GET /wp-login.php"), ("json", "GET /wp-json/"), ("pages", "a page built by PHP (cache MISS)"), ("frag", "POST mini-cart refresh"))
+METRICS = (("cold", "first page after the restart"), ("boot", "WordPress start-up (admin-ajax.php)"), ("json", "GET /wp-json/"), ("pages", "a page built by PHP (cache MISS)"), ("frag", "POST mini-cart refresh"))
 MIN_REAL_CHANGE = 0.03          # a difference under 3 % is never called real, however quiet the noise
 NOISE_FACTOR = 2.0              # and it must be this many times the difference the same setting showed against itself
+
+
+AJAX = "/wp-admin/admin-ajax.php"
+OK_STATUS = (200, 400)          # admin-ajax.php with no action answers 400; both mean PHP and WordPress ran. 429, 502, 503 and no answer do not.
 
 
 class Stop(Exception):
@@ -148,10 +152,10 @@ class Site:
         """Seconds until /wp-login.php answers 200 after a restart; RuntimeError after the limit."""
         t0 = self.clock()
         while self.clock() - t0 < self.args.ready_timeout_s:
-            if self.client("GET", "/wp-login.php")[0] == 200:
+            if self.client("GET", AJAX)[0] in OK_STATUS:
                 return self.clock() - t0
             self.sleep(2)
-        raise RuntimeError("the site did not answer 200 on /wp-login.php within %d s after the restart" % self.args.ready_timeout_s)
+        raise RuntimeError("the site did not answer on %s within %d s after the restart" % (AJAX, self.args.ready_timeout_s))
 
     def flush_cache(self):
         n = 0
@@ -166,22 +170,22 @@ class Site:
 
     def measure(self, label):
         """One phase's numbers, after the site is up."""
-        out = {"cold": [], "login": [], "json": [], "pages": [], "frag": [], "cache": {}, "errors": 0}
+        out = {"cold": [], "boot": [], "json": [], "pages": [], "frag": [], "cache": {}, "errors": 0}
 
         def take(key, method, path, headers=None, body=None):
             status, ms, cache = self.client(method, path, headers, body)
-            if status != 200:
+            if status not in OK_STATUS:
                 out["errors"] += 1
                 return
             out[key].append(ms)
             out["cache"][cache] = out["cache"].get(cache, 0) + 1
 
         self.flush_cache()
-        take("cold", "GET", "/wp-login.php")
+        take("cold", "GET", "/?ab=%s-cold" % label)
         for _ in range(3):
-            self.client("GET", "/wp-login.php")                      # warm-up, not counted
+            self.client("GET", AJAX)                                 # warm-up, not counted
         for _ in range(self.args.requests):
-            take("login", "GET", "/wp-login.php")
+            take("boot", "GET", AJAX)
         for _ in range(max(3, self.args.requests // 2)):
             take("json", "GET", "/wp-json/")
         for i in range(self.args.requests):
