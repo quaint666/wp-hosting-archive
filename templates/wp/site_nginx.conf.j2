@@ -81,13 +81,25 @@ server {
         return 403;
     }
 {% if wp_s.ai1wm_export %}
-    # All-in-One WP Migration's export scratch directory is writable by php, so no PHP runs from it, and its exports (a whole site: database and files) are not served to anyone until the
-    # download gate exists: the export is made, the Download button answers 403.
+    # All-in-One WP Migration's export scratch directory is writable by php, so nothing is served from it. An export (a whole site: database and files) is served to an administrator only: the
+    # plugin's Download button links to the file, nginx sends that request to the download gate (templates/wp/mu/60-wp-hosting-download-gate.php), and the gate answers 403 or an
+    # X-Accel-Redirect to the internal location below. Any other name in that folder is a 403. $wphfile is a named capture because a rewrite without groups would empty $1.
     location ~* ^/wp-content/plugins/all-in-one-wp-migration/storage/ {
         return 403;
     }
+    location ~* ^/wp-content/uploads/ai1wm-backups/(?<wphfile>[A-Za-z0-9][A-Za-z0-9._-]*\.wpress)$ {
+        rewrite ^ /index.php?wph_dl=$wphfile last;
+    }
     location ~* ^/wp-content/uploads/ai1wm-backups/ {
         return 403;
+    }
+    location ^~ /__wph_ai1wm/ {
+        internal;
+        alias {{ wp_site_dir }}/html/wp-content/uploads/ai1wm-backups/;
+        default_type application/octet-stream;
+        add_header Content-Disposition attachment always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Cache-Control "private, no-store" always;
     }
 {% endif %}
     location ~* ^/wp-content/debug\.log$ {

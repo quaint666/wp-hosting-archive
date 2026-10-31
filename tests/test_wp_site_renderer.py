@@ -184,6 +184,14 @@ class Parity(unittest.TestCase):
         for needle in ("location ~* ^/wp-content/plugins/all-in-one-wp-migration/storage/ {", "location ~* ^/wp-content/uploads/ai1wm-backups/ {"):
             self.assertIn(needle, on["wp_site_alpha.conf"])
             self.assertIn("return 403;", on["wp_site_alpha.conf"].split(needle)[1].split("}")[0])
+        conf = on["wp_site_alpha.conf"]
+        self.assertIn("(?<wphfile>[A-Za-z0-9][A-Za-z0-9._-]*\\.wpress)$ {", conf, "only a plain .wpress name reaches the gate")
+        self.assertIn("rewrite ^ /index.php?wph_dl=$wphfile last;", conf, "a named capture: a rewrite regex without groups would empty $1")
+        internal = conf.split("location ^~ /__wph_ai1wm/ {")[1].split("\n    }\n")[0]
+        for needle in ("internal;", "/html/wp-content/uploads/ai1wm-backups/;", "Content-Disposition attachment"):
+            self.assertIn(needle, internal)
+        self.assertNotIn("__wph_ai1wm", off["wp_site_alpha.conf"])
+        self.assertLess(conf.index("(?<wphfile>"), conf.index("location ~* ^/wp-content/uploads/ai1wm-backups/ {"), "the .wpress rule comes before the catch-all 403")
 
     def test_cart_fragments_cache_is_its_own_location_and_only_when_asked(self):
         def vhost(state="live", extra=None, **site):
