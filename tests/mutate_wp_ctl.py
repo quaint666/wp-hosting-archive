@@ -449,6 +449,17 @@ M = [
  ('the A/B test sends the mini-cart POST without a cart cookie', 'scripts/wp_ab_test.py', '"Cookie": "woocommerce_items_in_cart=1; woocommerce_cart_hash=ab"', '"X-A": "b"', 'tests/test_wp_ab_test.py'),
  ('the A/B test does not ask whether php.ini is back', 'scripts/wp_ab_test.py', 'ok = line.split()[:1] == ["same"]', 'ok = True', 'tests/test_wp_ab_test.py'),
  ('the A/B test writes php.ini to a new file', 'scripts/wp_ab_test.py', 'with open(self.ini, "r+") as f:', 'with open(self.ini + ".new", "w") as f:', 'tests/test_wp_ab_test.py'),
+ ("pin_consumers follows names and paths in comments", 'scripts/pin_consumers.py', '            return "\\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))', '            return text', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores which host a host_vars file belongs to', 'scripts/pin_consumers.py', '            return {parts[1]}', '            return None', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores which group a group_vars file belongs to', 'scripts/pin_consumers.py', '            return self.groups.get(parts[1], {parts[1]})', '            return None', 'tests/test_pin_consumers.py'),
+ ('pin_consumers does not follow variables defined from the pin', 'scripts/pin_consumers.py', '        names = self.aliases(names)', '        names = set(names)', 'tests/test_pin_consumers.py'),
+ ('pin_consumers reports a comment-only edit', 'scripts/pin_consumers.py', 'if all(not c or c.startswith("#") for c in changed):', 'if False:', 'tests/test_pin_consumers.py'),
+ ("pin_consumers misses an indented src:", 'scripts/pin_consumers.py', '(?:^\\s*|[{,]\\s*)(?:-\\s+)?(?:src|script):', '(?:^|[{,]\\s*)(?:-\\s+)?(?:src|script):', 'tests/test_pin_consumers.py'),
+ ('pin_consumers ignores pins in task files', 'scripts/pin_consumers.py', 'r.parts[0] not in ("vars", "tasks")', 'r.parts[0] not in ("vars",)', 'tests/test_pin_consumers.py'),
+ ('pin_consumers rewrites an up-to-date comment', 'scripts/pin_consumers.py', '            if has and lines[i - 1] == want:\n                continue', '            if False:\n                continue', 'tests/test_pin_consumers.py'),
+ ('pin_consumers forgets a deleted file', 'scripts/pin_consumers.py', '" (deleted)" if gone else ""', '""', 'tests/test_pin_consumers.py'),
+ ('pin_consumers loses the old side of a removed variable', 'scripts/pin_consumers.py', '        for n in range(old_start, old_start + max(old_len, 1)):\n            names.add(owner(old_lines, n))\n', '', 'tests/test_pin_consumers.py'),
+ ('pin_consumers leaves a stale comment when a playbook starts using a pin', 'scripts/pin_consumers.py', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)\n            if has:\n                continue', 'tests/test_pin_consumers.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0
