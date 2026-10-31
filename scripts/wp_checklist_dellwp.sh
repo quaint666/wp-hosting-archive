@@ -175,7 +175,7 @@ expect "the hosting plugin for requests is deployed" "$(remote "sudo test -f $MU
 expect "wp-config.php allows requests (a limit above 0)" "$(count "$cfg" "define( 'WP_HOSTING_PLUGIN_REQUESTS_MAX', [1-9]")" 1
 expect "the tool is installed" "$(remote 'sudo test -x /usr/local/sbin/wp-plugin-requests && echo yes')" yes
 expect "the collection timer is active" "$(remote 'systemctl is-active wp-plugin-requests.timer')" active
-expect "the approval listener knows the tool" "$(remote "sudo grep -c 'wp-plugin-requests' /usr/local/sbin/wp-approval-listener")" 1
+expect "the approval listener knows the tool" "$(remote "sudo grep -c '\"plugin_tool\"' /usr/local/sbin/wp-approval-listener")" 1
 expect "the tool answers with its one JSON line" "$(jget "$(remote 'sudo /usr/local/sbin/wp-ctl plugin-requests')" ok)" true
 manual "ask for a plugin" "Log in to $NAME's wp-admin as the administrator. Plugins now has Add New. Search for 'classic editor', press the button on Classic Editor: it should say Requested (not Installed), and the page should list the request as waiting. There must be no Upload Plugin button." "Did Install turn into a request?"
 manual "refresh and read the request" "Panel > Requests > Refresh. The request should be listed as waiting for $NAME, with checks 'none known'. Your phone should get a notification with Approve and Deny buttons (it can take a moment)." "Is it listed, and did the phone get the notification?"
