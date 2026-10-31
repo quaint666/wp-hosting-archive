@@ -395,6 +395,19 @@ M = [
  ("the panel's rescan form is shown for an unfinished import too", 'app/wp_panel/templates/import_site.html', "{% if pending and pending.get('stage') == 'reported' %}\n<section class=\"card\">\n<h2>Scan again", "{% if pending %}\n<section class=\"card\">\n<h2>Scan again", 'tests/test_wp_panel.py'),
  ("the panel's rescan is sent without the request id", 'app/wp_panel/views.py', 'ask("import-rescan", site=name, req=field("req", 80))', 'ask("import-rescan", site=name)', 'tests/test_wp_panel.py'),
  ("the security page forgets the waiting import", 'app/wp_panel/templates/security.html', "{% if pending and pending.get('stage') == 'reported' %}", "{% if False %}", 'tests/test_wp_panel.py'),
+ ("a plugin may be acted on in any state", W, '    if row["status"] != needs:', '    if False:'),
+ ("a delete skips the slug rule", W, '        if not SLUG_RE.fullmatch(name):\n            raise Refuse("not_deletable"', '        if False:\n            raise Refuse("not_deletable"'),
+ ("a plugin the site does not list is acted on", W, '    if row is None:\n        raise Refuse("unknown_plugin"', '    if False:\n        raise Refuse("unknown_plugin"'),
+ ("the page cache is not cleared after a change", W, '        gone = purge_page_cache(call.ctl.cfg)', '        gone = 0'),
+ ("the page cache is cleared even when the tool failed", W, '    if rc == 0:\n        gone = purge_page_cache', '    if True:\n        gone = purge_page_cache'),
+ ("the purge follows links", W, 'os.walk(root, followlinks=False)', 'os.walk(root, followlinks=True)'),
+ ("the purge enters a linked cache directory", W, 'or os.path.islink(root):', ':'),
+ ("a failed deactivation is not tried again", W, '        if rc != 0:\n            rc, text = call.run([cli, site, "plugin", "deactivate", name, "--skip-plugins"', '        if False:\n            rc, text = call.run([cli, site, "plugin", "deactivate", name, "--skip-plugins"'),
+ ("the plugin list runs plugin code", W, '"--format=json", "--skip-plugins", "--skip-themes"])\n    try:\n        data = json.loads(text.strip().splitlines()[-1])\n        if rc != 0 or not isinstance(data, list):\n            raise ValueError\n    except (ValueError, IndexError):\n        raise Refuse("tool_output", "the plugins', '"--format=json"])\n    try:\n        data = json.loads(text.strip().splitlines()[-1])\n        if rc != 0 or not isinstance(data, list):\n            raise ValueError\n    except (ValueError, IndexError):\n        raise Refuse("tool_output", "the plugins'),
+ ("must-use plugins are listed as ordinary rows of any status", W, 'PLUGIN_STATUSES = ("active", "inactive", "active-network", "must-use", "dropin", "parent")', 'PLUGIN_STATUSES = ("active", "inactive")'),
+ ("the panel deletes a plugin on the first press", 'app/wp_panel/views.py', '        if what == "delete" and not typed:', '        if False:', 'tests/test_wp_panel.py'),
+ ("the panel client lets a delete go without the typed name", 'app/wp_panel/ctl.py', 'args.get("action") == "delete" and args.get("confirm_plugin") != args.get("plugin")', 'False', 'tests/test_wp_panel.py'),
+ ("the plugin page offers delete on an active plugin", 'app/wp_panel/templates/plugins.html', "{% if p.status == 'inactive' %}\n        <form", "{% if p.status in ('active', 'inactive') %}\n        <form", 'tests/test_wp_panel.py'),
 ]
 only = sys.argv[1:]
 surv, ran = [], 0

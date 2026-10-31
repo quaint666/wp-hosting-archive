@@ -41,6 +41,7 @@
 <h2>WordPress</h2>
 <p class="small">Install into an empty site, set a user's password, or bring in a .wpress archive.</p>
 <div class="actions">
+  <a class="button secondary" href="{{ url_for('plugins_page', name=name) }}">Plugins</a>
   <a class="button secondary" href="{{ url_for('security', name=name) }}">Updates and security</a>
   <a class="button secondary" href="{{ url_for('install_form', name=name) }}">Install WordPress</a>
   <a class="button secondary" href="{{ url_for('password_form', name=name) }}">Set a user's password</a>

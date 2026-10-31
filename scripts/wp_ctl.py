@@ -41,6 +41,11 @@ REJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)
 JOB_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 REQ_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+PLUGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")                  # a plugin's name as WP-CLI lists it (its directory under wp-content/plugins)
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")                                 # what wp-site-ext accepts for a delete: a wordpress.org slug
+PLUGIN_ACTIONS = ("activate", "deactivate", "delete")
+PLUGIN_STATUSES = ("active", "inactive", "active-network", "must-use", "dropin", "parent")
+PLUGIN_MAX = 300                                                              # the most plugins one reply lists
 BACKUP_TAGS = ("pre-update", "final", "pre-import")
 SET_KEYS = ("update_policy", "quota_mb", "backup_quota_mb", "php_mem_mb", "db_mem_mb", "upload_mb", "allow_xmlrpc", "allow_app_passwords", "allow_user_enum", "mail_mode", "cart_fragments", "label", "note")   # = wp_site_model.EDITABLE (a test compares them)
 STATES = ("hold", "live", "stopped")
@@ -627,6 +632,77 @@ def h_users(call):
     return {"ok": True, "site": call.args["site"], "users": users[:200]}
 
 
+def plain(value, limit):
+    """Text from a plugin's header made safe to show: control characters out, cut to `limit`."""
+    return CONTROL_RE.sub(" ", value)[:limit] if isinstance(value, str) else ""
+
+
+def list_plugins(call):
+    """The site's plugins as WP-CLI reads them from the database and the plugin folder, without running any plugin's code (--skip-plugins --skip-themes), so a plugin that breaks the site can still be listed. Rows are checked
+    one by one; one with an odd name or status is left out. A failure of the tool is a refusal that shows its last words."""
+    site = call.args["site"]
+    rc, text = call.run([call.ctl.tool("wp-site-cli"), site, "plugin", "list", "--fields=name,title,status,update,version", "--format=json", "--skip-plugins", "--skip-themes"])
+    try:
+        data = json.loads(text.strip().splitlines()[-1])
+        if rc != 0 or not isinstance(data, list):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise Refuse("tool_output", "the plugins of %s could not be listed (status %d): %s" % (site, rc, " ".join(text.split())[-200:]))
+    return [{"name": r["name"], "title": plain(r.get("title"), 100) or r["name"], "status": r["status"], "version": plain(r.get("version"), 40), "update": r.get("update") == "available"}
+            for r in data if isinstance(r, dict) and isinstance(r.get("name"), str) and PLUGIN_RE.fullmatch(r["name"]) and r.get("status") in PLUGIN_STATUSES][:PLUGIN_MAX]
+
+
+def h_plugins(call):
+    return {"ok": True, "site": call.args["site"], "plugins": list_plugins(call)}
+
+
+def purge_page_cache(cfg):
+    """Delete the files of the nginx page cache (every site shares the zone) and return how many. nginx treats a cache file that is gone as a miss, so no reload is needed (a reload would keep the files). Only regular
+    files are removed, nothing is followed, and a file that cannot be removed is skipped. None when the config names no cache directory."""
+    root = cfg.get("page_cache_dir")
+    if not root or not os.path.isdir(root) or os.path.islink(root):
+        return None
+    gone = 0
+    for dirpath, _dirs, files in os.walk(root, followlinks=False):
+        for f in files:
+            try:
+                os.unlink(os.path.join(dirpath, f))
+                gone += 1
+            except OSError:
+                pass
+    return gone
+
+
+def h_plugin_set(call):
+    """Activate, deactivate or delete one plugin of a site, then clear the page cache so visitors do not keep the old pages for five minutes. The plugin must be in the site's own list (read here, not trusted from
+    the caller) and in the right state: activate an inactive one, deactivate an active one, delete an inactive one (typed name as confirmation). Must-use plugins and drop-ins are the hosting's and are never touched. Activation
+    and deactivation run as the web app's identity (wp-site-cli); a deactivation that fails is tried again without loading the other plugins, which is how a plugin that breaks the site is switched off. A delete is
+    wp-site-ext's, so it is a wordpress.org-style name (lower case, digits, hyphens) or nothing."""
+    a = call.args
+    site, name, action = a["site"], a["plugin"], a["action"]
+    row = next((r for r in list_plugins(call) if r["name"] == name), None)
+    if row is None:
+        raise Refuse("unknown_plugin", "%s has no plugin called %s" % (site, name))
+    needs = {"activate": "inactive", "deactivate": "active", "delete": "inactive"}[action]
+    if row["status"] != needs:
+        raise Refuse("wrong_state", "%s is %s; %s needs it %s%s" % (name, row["status"], action, needs, " (deactivate it first)" if action == "delete" and row["status"] == "active" else ""))
+    cli = call.ctl.tool("wp-site-cli")
+    if action == "activate":
+        rc, text = call.run([cli, site, "plugin", "activate", name])
+    elif action == "deactivate":
+        rc, text = call.run([cli, site, "plugin", "deactivate", name])
+        if rc != 0:
+            rc, text = call.run([cli, site, "plugin", "deactivate", name, "--skip-plugins", "--skip-themes"])
+    else:
+        if not SLUG_RE.fullmatch(name):
+            raise Refuse("not_deletable", "%s is not a name wp-site-ext deletes (lower case letters, digits and hyphens); remove it by hand" % name)
+        rc, text = call.run([call.ctl.tool("wp-site-ext"), site, "plugin", "delete", name])
+    if rc == 0:
+        gone = purge_page_cache(call.ctl.cfg)
+        text += "\npage cache: %s\n" % ("not configured on this host" if gone is None else "%d files cleared" % gone)
+    return {"ok": rc == 0, "rc": rc, "ran": True, "out": text}
+
+
 def h_vuln_check(call):
     """What a site runs against the vulnerability index. The tool's own statuses are answers, not failures: 0 nothing known, 1 something found, 3 not run (no key, no index, or one too old to trust)."""
     rc, text = call.run([call.ctl.tool("wp-vulnfeed"), "check", call.args["site"]])
@@ -754,6 +830,8 @@ VERBS = {
     "import-list": Verb("read", {}, h_import_list),
     "vuln-check": Verb("read", {"site": SITE}, h_vuln_check),
     "users": Verb("read", {"site": SITE}, h_users),
+    "plugins": Verb("read", {"site": SITE}, h_plugins),
+    "plugin-set": Verb("inline", {"site": SITE, "plugin": Arg("text", rx=PLUGIN_RE), "action": Arg("enum", values=PLUGIN_ACTIONS), "confirm_plugin": Arg("text", rx=PLUGIN_RE, same="plugin", when=("action", "delete"))}, h_plugin_set, lock=True),
     "backup": Verb("job", {"site": SITE, "force": Arg("flag"), "tag": Arg("enum", required=False, values=BACKUP_TAGS)}, h_backup),
     "delete": Verb("job", {"site": SITE, "confirm_name": Arg("text", rx=NAME_RE, same="site"), "confirm_again": Arg("text", rx=NAME_RE, same="site")}, h_delete),
     "password": Verb("secret", {"site": SITE, "user": Arg("text", rx=USER_NAME_RE)}, h_password, lock=True),

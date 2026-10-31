@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ plugin }} · {{ name }}{% endblock %}
+{% block body %}
+<p class="crumbs"><a href="{{ url_for('plugins_page', name=name) }}">Back to the plugins</a> (nothing has been deleted yet)</p>
+<div class="page-head"><div><h1>Delete {{ plugin | clip(100) }}</h1></div></div>
+<p class="error" role="alert">This removes the plugin's files from {{ name | clip(40) }}, and runs the plugin's own uninstall step if it has one (some plugins delete their data then). It can only come back from a backup, or by installing it again with the operator's tools.</p>
+<section class="card danger">
+<form method="post" action="{{ url_for('plugin_change', name=name) }}" class="login">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="plugin" value="{{ plugin }}">
+  <input type="hidden" name="action" value="delete">
+  <label>Type the plugin's name to delete it
+    <input name="confirm_plugin" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="{{ plugin | clip(100) }}">
+  </label>
+  <div class="actions"><button type="submit" class="danger">Delete {{ plugin | clip(100) }}</button></div>
+</form>
+</section>
+{% endblock %}

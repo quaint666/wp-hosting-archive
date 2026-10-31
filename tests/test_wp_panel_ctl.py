@@ -63,20 +63,20 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(set(ctl.READ_VERBS) & set(ctl.ACTION_VERBS))
 
     def test_the_action_verbs_are_exactly_these_and_each_is_a_job_or_inline_verb_with_the_dispatchers_argument_names(self):
-        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply"},
+        self.assertEqual(set(ctl.ACTION_VERBS), {"create", "set", "ensure-state", "delete", "import-run", "import-approve", "import-reset", "import-discard", "import-new", "import-rescan", "update-check", "update-apply", "plugin-set"},
                          "a new action verb is a decision of its batch: add it here on purpose")
         for verb, spec in ctl.ACTION_VERBS.items():
             theirs = wp_ctl.VERBS[verb]
             self.assertIn(theirs.kind, ("job", "inline"), verb)
             self.assertEqual(set(spec), set(theirs.args), verb)
             for name, (required, _) in spec.items():
-                optional = theirs.args[name].kind == "flag" or name == "confirm_name" and verb in ("ensure-state", "import-run", "import-approve")      # a flag is false when absent; these confirmations are asked for by another argument
+                optional = theirs.args[name].kind == "flag" or name in ("confirm_name", "confirm_plugin") and verb in ("ensure-state", "import-run", "import-approve", "plugin-set")      # a flag is false when absent; these confirmations are asked for by another argument
                 self.assertEqual(required, theirs.args[name].required and not optional, (verb, name))
         self.assertEqual(ctl.ALLOWED.keys(), set(ctl.READ_VERBS) | set(ctl.ACTION_VERBS) | set(ctl.SECRET_VERBS) | set(ctl.STREAM_VERBS))
         self.assertEqual(set(ctl.STREAM_VERBS), {"import-receive"})
         self.assertEqual(wp_ctl.VERBS["import-receive"].kind, "stream")
         self.assertEqual(set(ctl.STREAM_VERBS["import-receive"]), set(wp_ctl.VERBS["import-receive"].args))
-        for verb in ("import-report", "import-list", "vuln-check", "users"):
+        for verb in ("import-report", "import-list", "vuln-check", "users", "plugins"):
             self.assertEqual(ctl.READ_VERBS[verb].keys(), wp_ctl.VERBS[verb].args.keys(), verb)
             self.assertEqual(wp_ctl.VERBS[verb].kind, "read", verb)
 

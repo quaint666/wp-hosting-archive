@@ -10,7 +10,7 @@ from flask import abort, current_app, jsonify, redirect, render_template, reques
 
 from werkzeug.exceptions import ClientDisconnected
 
-from .ctl import CHUNK, FILE_RE, JOB_RE, SET_KEYS, UPLOAD_MAX, CtlError
+from .ctl import CHUNK, FILE_RE, JOB_RE, PLUGIN_ACTIONS, PLUGIN_RE, SET_KEYS, UPLOAD_MAX, CtlError
 
 STATUS = {"not_allowed": 404, "unreachable": 503, "bad_reply": 502, "failed": 502}
 NOT_FOUND = {"unknown_site", "unknown_job"}
@@ -325,6 +325,39 @@ def register(app):
     @action
     def import_reset(name):
         return started(ask("import-reset", site=name, confirm_name=field("confirm_name", 60), req=field("req", 80)))
+
+    @app.get("/sites/<name>/plugins")
+    @page
+    def plugins_page(name):
+        """The site's plugins with what can be done to each. WordPress is asked through WP-CLI without loading any plugin, so a plugin that breaks the site is still listed (and can be switched off). When the list cannot be had the
+        page says why instead of an error page: the site's other pages are still there."""
+        reply = ask("show", site=name)                          # an unknown site is a 404 here
+        state = (reply.get("status") or {}).get("deployed") or (reply.get("registry") or {}).get("state")
+        try:
+            rows, problem = [p for p in ask("plugins", site=name).get("plugins", []) if isinstance(p, dict) and isinstance(p.get("name"), str)], ""
+        except CtlError as e:
+            if e.kind not in ("failed", "refused"):
+                raise
+            rows, problem = [], str(e)
+        return render_template("plugins.html", name=name, state=state, rows=rows, problem=problem)
+
+    @app.post("/sites/<name>/plugins")
+    @action
+    def plugin_change(name):
+        """Activate or deactivate at once; a delete is two steps like a site's: the first press opens the page that says what will go, the second (with the name typed) asks wp-ctl. wp-ctl re-reads the
+        site's own list, so a name or a state that is not true now is refused there."""
+        plugin, what, typed = field("plugin", 120), field("action", 20), field("confirm_plugin", 120)
+        if what not in PLUGIN_ACTIONS or not PLUGIN_RE.fullmatch(plugin):
+            return render_template("error.html", status=400, title="The form was not accepted", message="That is not a plugin action. Nothing was changed."), 400
+        if what == "delete" and not typed:
+            ask("show", site=name)
+            return render_template("plugin_delete.html", name=name, plugin=plugin)
+        args = {"site": name, "plugin": plugin, "action": what}
+        if what == "delete":
+            args["confirm_plugin"] = typed
+        reply = ask("plugin-set", **args)
+        titles = {"activate": "Plugin activated", "deactivate": "Plugin deactivated", "delete": "Plugin deleted"}
+        return done(titles[what], name, reply.get("out"), back="plugins")
 
     @app.get("/sites/<name>/security")
     @page

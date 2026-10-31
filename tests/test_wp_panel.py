@@ -57,6 +57,11 @@ class FakeCtl:
             "import-list": {"ok": True, "files": [{"name": "friend.wpress", "bytes": 5242880, "mtime": T0 - 7200, "site": None}, {"name": "used.wpress", "bytes": 1048576, "mtime": T0 - 86400 * 2, "site": "bravo"}],
                             "imports": [{"site": "bravo", "file": "used.wpress", "stage": "reported", "problems": ["known vulnerabilities: FOUND: 7 finding(s): core wordpress 7.1.3"]}]},
             "users": {"ok": True, "site": "alpha", "users": [{"user": "admin", "roles": "administrator"}, {"user": "ed", "roles": "editor"}]},
+            "plugins": {"ok": True, "site": "alpha", "plugins": [
+                {"name": "woocommerce", "title": "WooCommerce", "status": "active", "version": "9.3.3", "update": False},
+                {"name": "old-thing", "title": "Old <b>Thing</b>", "status": "inactive", "version": "1.0", "update": True},
+                {"name": "hosting-mail", "title": "hosting-mail", "status": "must-use", "version": "1", "update": False}]},
+            "plugin-set": {"ok": True, "rc": 0, "ran": True, "out": "Success: done.\npage cache: 12 files cleared\n"},
             "vuln-check": {"ok": True, "rc": 1, "ran": True, "out": "core wordpress 7.1.3: WordPress Core 4.7.0 - 7.1.3 (7 findings)\n"},
             "update-check": {"ok": True, "job": JOB}, "update-apply": {"ok": True, "job": JOB}, "import-new": {"ok": True, "job": JOB}, "import-rescan": {"ok": True, "job": JOB},
             "import-run": {"ok": True, "job": JOB},
@@ -141,7 +146,7 @@ class Base(unittest.TestCase):
         return self.c
 
 
-PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/password"]
+PAGES = ["/", "/sites", "/sites/alpha", "/jobs", "/jobs/" + JOB, "/audit", "/import", "/sites/alpha/import", "/sites/alpha/security", "/sites/alpha/plugins", "/sites/alpha/password"]
 # written out here, not read from the app: a test that compares the app with its own constant would pass when a header was deleted
 EXPECTED_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
@@ -817,6 +822,88 @@ class Actions(Base):
         r = self.get(path)
         self.assertEqual(r.status_code, status, (path, r.get_data(as_text=True)[:200]))
         return r.get_data(as_text=True)
+
+
+class PluginsPage(Base):
+    def setUp(self):
+        super().setUp()
+        self.logged_in()
+
+    def post(self, data, token=True):
+        data = dict(data)
+        if token is True:
+            token = self.csrf(path="/sites/alpha")
+        if token:
+            data["csrf"] = token
+        return self.c.post("/sites/alpha/plugins", data=data, base_url=BASE)
+
+    def acted(self):
+        return [(v, a) for v, a in self.ctl.calls if v == "plugin-set"]
+
+    def test_the_page_lists_each_plugin_with_the_buttons_its_state_allows(self):
+        html = self.get("/sites/alpha/plugins").get_data(as_text=True)
+        rows = re.findall(r"<tr>(.*?)</tr>", html, re.S)[1:]
+        self.assertEqual(len(rows), 3)
+        woo, old, mu = rows
+        self.assertIn('value="deactivate"', woo)
+        self.assertNotIn('value="delete"', woo, "an active plugin is deactivated before it can be deleted")
+        self.assertIn('value="activate"', old)
+        self.assertIn('value="delete"', old)
+        self.assertIn("update", old)
+        self.assertNotIn("<form", mu)
+        self.assertIn("hosting", mu)
+        self.assertEqual(self.get("/sites/alpha").get_data(as_text=True).count('href="/sites/alpha/plugins"'), 1, "the Site page links to it")
+
+    def test_text_from_a_plugin_header_is_shown_as_text(self):
+        html = self.get("/sites/alpha/plugins").get_data(as_text=True)
+        self.assertNotIn("<b>Thing</b>", html)
+        self.assertIn("&lt;b&gt;Thing&lt;/b&gt;", html)
+        self.assertNotIn("<script", html.lower())
+
+    def test_a_list_that_cannot_be_had_is_said_on_the_page_not_an_error_page(self):
+        self.ctl.fail["plugins"] = CtlError("refused", "wp-ctl refused: tool_output (the plugins of alpha could not be listed)", "tool_output")
+        r = self.get("/sites/alpha/plugins")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("could not be listed", r.get_data(as_text=True))
+
+    def test_an_unknown_site_is_a_404_page(self):
+        self.ctl.fail["show"] = CtlError("refused", "wp-ctl refused: unknown_site", "unknown_site")
+        self.assertEqual(self.get("/sites/ghost/plugins").status_code, 404)
+
+    def test_activate_and_deactivate_ask_for_one_verb_and_show_what_the_tool_said(self):
+        for what in ("activate", "deactivate"):
+            r = self.post({"plugin": "old-thing", "action": what})
+            self.assertEqual(r.status_code, 200, what)
+            self.assertIn("12 files cleared", r.get_data(as_text=True))
+        self.assertEqual(self.acted(), [("plugin-set", {"site": "alpha", "plugin": "old-thing", "action": "activate"}), ("plugin-set", {"site": "alpha", "plugin": "old-thing", "action": "deactivate"})])
+
+    def test_delete_is_two_steps_and_the_first_deletes_nothing(self):
+        r = self.post({"plugin": "old-thing", "action": "delete"})
+        html = r.get_data(as_text=True)
+        self.assertEqual((r.status_code, self.acted()), (200, []))
+        self.assertIn('name="confirm_plugin"', html)
+        self.assertIn('value="old-thing"', html)
+        r = self.post({"plugin": "old-thing", "action": "delete", "confirm_plugin": "old-thing"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.acted(), [("plugin-set", {"site": "alpha", "plugin": "old-thing", "action": "delete", "confirm_plugin": "old-thing"})])
+
+    def test_a_delete_with_another_name_typed_is_refused_here_and_asks_nothing(self):
+        r = self.post({"plugin": "old-thing", "action": "delete", "confirm_plugin": "old"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.acted(), [])
+
+    def test_no_token_no_request_and_odd_forms_are_refused(self):
+        for token in (False, "", "wrong"):
+            self.assertEqual(self.post({"plugin": "old-thing", "action": "activate"}, token=token).status_code, 400)
+        for data in ({"plugin": "../x", "action": "activate"}, {"plugin": "old-thing", "action": "install"}, {"plugin": "", "action": "delete"}, {"action": "activate"}):
+            self.assertEqual(self.post(data).status_code, 400, data)
+        self.assertEqual(self.acted(), [])
+
+    def test_a_refusal_from_wp_ctl_is_shown(self):
+        self.ctl.fail["plugin-set"] = CtlError("refused", "wp-ctl refused: wrong_state (woocommerce is active; activate needs it inactive)", "wrong_state")
+        r = self.post({"plugin": "woocommerce", "action": "activate"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("wrong_state", r.get_data(as_text=True))
 
 
 class Secrets(Base):
@@ -1504,7 +1591,7 @@ class ReadOnly(Base):
                                         ("/jobs", ("GET",)), ("/jobs/<job>", ("GET",)), ("/login", ("GET", "POST")), ("/logout", ("POST",)),
                                         ("/new-site", ("GET",)), ("/new-site", ("POST",)), ("/sites", ("GET",)), ("/sites/<name>", ("GET",)), ("/sites/<name>/delete", ("POST",)),
                                         ("/sites/<name>/import", ("GET",)), ("/sites/<name>/import/approve", ("POST",)), ("/sites/<name>/import/rescan", ("POST",)), ("/sites/<name>/import/reset", ("POST",)), ("/sites/<name>/install", ("GET",)), ("/sites/<name>/install", ("POST",)), ("/sites/<name>/password", ("GET",)), ("/sites/<name>/password", ("POST",)),
-                                        ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
+                                        ("/sites/<name>/plugins", ("GET",)), ("/sites/<name>/plugins", ("POST",)), ("/sites/<name>/security", ("GET",)), ("/sites/<name>/set", ("POST",)), ("/sites/<name>/state", ("POST",)),
                                         ("/sites/<name>/updates/apply", ("POST",)), ("/sites/<name>/updates/check", ("POST",)),
                                         ("/static/<path:filename>", ("GET",))]),
                          "a new route or a new method is a step-6 decision: it must be added here on purpose (batch 11: create, set, state; batch 12: delete, password, install; batch 13: the import)")

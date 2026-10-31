@@ -293,6 +293,8 @@ wp_ctl_limits:
   update-apply: { timeout_s: 5400, memory_mb: 1024 }
   vuln-check: { timeout_s: 300 }
   users: { timeout_s: 60 }
+  plugins: { timeout_s: 60 }
+  plugin-set: { timeout_s: 300 }
   import-list: { timeout_s: 60 }
 wp_restore_db_mem_mb: 384
 wp_restore_db_buffer_pool_mb: 64

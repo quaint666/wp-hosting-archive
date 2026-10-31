@@ -2,6 +2,7 @@
 {% block title %}{{ title }}{% endblock %}
 {% block body %}
 {% if back == 'site' %}<p class="crumbs"><a href="{{ url_for('site', name=name) }}">Back to {{ name | clip(40) }}</a></p>
+{% elif back == 'plugins' %}<p class="crumbs"><a href="{{ url_for('plugins_page', name=name) }}">Back to the plugins of {{ name | clip(40) }}</a></p>
 {% else %}<p class="crumbs"><a href="{{ url_for(back) }}">Back</a></p>{% endif %}
 <div class="page-head"><div><h1>{{ title }}</h1></div><span class="badge job-done-ok">done</span></div>
 {% if out %}<section class="card"><h2>What the tool said</h2>
