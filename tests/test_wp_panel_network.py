@@ -78,7 +78,7 @@ def vm(name):
 class Declared(unittest.TestCase):
     def test_the_vm_is_declared_as_agreed(self):
         v = resolve(vm("aopenpanel"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
-        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 2048, 15))
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 1536, 15))
         self.assertEqual(v["address"], "%s/29" % PANEL_IP)
         self.assertEqual(v["gateway"], "10.8.0.70")
         self.assertEqual(v["tags"], ["panel"])
@@ -102,9 +102,9 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_the_memory_declared_on_the_aopen_leaves_the_host_two_gib(self):
-        """12800 MB of 15 GiB (15360): accepted on 2026-10-29 with a check of free -m once the VM runs. A VM added later must reopen this decision, not slip under it."""
+        """9728 MB of 15 GiB (15360): re-accepted 2026-11-01 after the drill, the control app and the replica were cut to measured peaks (the template 399 is included). A VM added later must reopen this decision, not slip under it."""
         total = sum(v["memory"] for v in AOPEN["proxmox_vms"]) + AOPEN["proxmox_drill_memory_mb"]
-        self.assertEqual(total, 12800)
+        self.assertEqual(total, 9728)
         self.assertLessEqual(total, 15 * 1024 - 2048)
 
     def test_the_vm_is_in_the_group_the_base_plays_target(self):
