@@ -193,7 +193,9 @@ class Vhost(unittest.TestCase):
             d = Path(d)
             subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(d / "privkey.pem"), "-out", str(d / "fullchain.pem"), "-days", "2", "-subj", "/CN=x"], check=True, capture_output=True)
             conf = self.text.replace(net.resolve("{{ le_cert_dir }}"), str(d)).replace(net.HOSTS["aopenpanel"]["overlay_ip"] + ":443", "127.0.0.1:18443")
-            (d / "nginx.conf").write_text("pid %s/n.pid; error_log %s/e.log; events {} http { access_log off; %s }\n" % (d, d, conf))
+            # The temp paths are the scratch directory's: `nginx -t` makes them, and the defaults (/var/lib/nginx/tmp) are root's, so as a normal user the test failed on a machine with nginx installed.
+            temp = " ".join("%s_temp_path %s/%s;" % (k, d, k) for k in ("client_body", "proxy", "fastcgi", "uwsgi", "scgi"))
+            (d / "nginx.conf").write_text("pid %s/n.pid; error_log %s/e.log; events {} http { access_log off; %s %s }\n" % (d, d, temp, conf))
             r = subprocess.run(["nginx", "-t", "-c", str(d / "nginx.conf"), "-p", str(d)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
