@@ -37,7 +37,7 @@ def hosts_of(node, out=None):
 INVENTORY = load("inventory.yml")
 HOSTS = hosts_of(INVENTORY)
 CTX = {"hostvars": HOSTS}
-for f in ("network", "ports", "wireguard", "domain", "proxmox", "services"):
+for f in ("network", "ports", "wireguard", "domain", "proxmox", "services", "backup"):
     CTX.update(load("group_vars/all/%s.yml" % f))
 CTX.update(load("group_vars/proxmox_guests/vars.yml"))
 for host in ("aopen", "delloptiplex3040", "dellwp"):
@@ -79,7 +79,7 @@ def vm(name):
 class Declared(unittest.TestCase):
     def test_the_vm_is_declared_as_agreed(self):
         v = resolve(vm("aopenpanel"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
-        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 4096, 35))
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 3072, 35))
         self.assertEqual(v["address"], "%s/29" % PANEL_IP)
         self.assertEqual(v["gateway"], "10.8.0.70")
         self.assertEqual(v["tags"], ["panel", "watch"], "the VM also runs the watcher")
@@ -103,9 +103,9 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_the_memory_declared_on_the_aopen_leaves_the_host_two_gib(self):
-        """12800 MB of 15 GiB (15360): re-accepted 2026-11-04 when the production fallback (aopenfallback) was added to the 10752 MB left after the watcher moved into the control app's VM (4096 MB; the drill's spare VM is included), and again the same day when it grew from 1536 to 2048 MB, the size of dellapps, because a failover restores dellapps into it. A VM added later must reopen this decision, not slip under it."""
+        """11776 MB of 15 GiB (15360): re-accepted 2026-11-04 when the production fallback (aopenfallback) was added to the 10752 MB left after the watcher moved into the control app's VM (4096 MB; the drill's spare VM is included), again the same day when the slot grew from 1536 to 2048 MB, the size of dellapps, because a failover restores dellapps into it (12800 MB), and again when the control app's VM was lowered to 3072 MB after measuring 1.4 GiB used of 3.8 (11776 MB). A VM added later must reopen this decision, not slip under it."""
         total = sum(v["memory"] for v in AOPEN["proxmox_vms"]) + AOPEN["proxmox_drill_memory_mb"]
-        self.assertEqual(total, 12800)
+        self.assertEqual(total, 11776)
         self.assertLessEqual(total, 15 * 1024 - 2048)
 
     def test_the_vm_is_in_the_group_the_base_plays_target(self):
