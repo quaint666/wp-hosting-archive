@@ -333,17 +333,23 @@ class PrivateBackups(unittest.TestCase):
         for needle in ("restrict", 'from="{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ item.dir }}"'):
             self.assertIn(needle, options)
 
-    def test_aopenpbs_lets_in_ssh_from_the_vm_and_the_drill_and_from_nobody_else_new(self):
+    def test_aopenpbs_lets_in_ssh_from_the_vm_the_drill_and_centermc92_and_the_hosts_forward_rule_names_the_same(self):
+        """Besides the HP and the control node (the group's default): the private-services VM (its backups), the drill (read-only fetches) and centermc92 (the Navidrome snapshots)."""
         extra = resolve(self.pbs["vm_nft_extra_tcp"], {"hostvars": HOSTS})
         ssh = sorted(e["src"] for e in extra if 22 in e["ports"])
-        self.assertEqual(ssh, sorted([resolve(HOSTS["aopenpanel"]["overlay_ip"]), resolve(HOSTS["aopendrill"]["overlay_ip"])]))
+        self.assertEqual(ssh, sorted(resolve(HOSTS[h]["overlay_ip"]) for h in ("aopenpanel", "aopendrill", "centermc92")))
+        forward = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == resolve(HOSTS["centermc92"]["overlay_ip"])]
+        self.assertEqual([(e["ports"], e["bridges"]) for e in forward], [([22], ["vmbr1"])])
 
     def test_the_age_checks_watch_the_same_three_services_where_they_are_made_and_where_they_land(self):
-        for host in (self.panel, self.pbs):
-            dirs = sorted(c["path"] for c in host["backup_age_checks"])
-            self.assertEqual(dirs, sorted(self.dirs()))
-            for c in host["backup_age_checks"]:
-                self.assertEqual((c["kind"], c["max_hours"]), ("newest_file", 36))
+        dirs = sorted(c["path"] for c in self.panel["backup_age_checks"])
+        self.assertEqual(dirs, sorted(self.dirs()))
+        landed = {c["path"]: c for c in self.pbs["backup_age_checks"]}
+        for d in self.dirs():
+            self.assertIn(d, landed)
+        for c in self.panel["backup_age_checks"] + [landed[d] for d in self.dirs()]:
+            self.assertEqual((c["kind"], c["max_hours"]), ("newest_file", 36))
+            self.assertIn("max_files", c, "retention that stops pruning is seen")
         self.assertEqual(self.pbs["backup_age_requires_mount"], "{{ pbs_check_mount_unit }}")
 
     def test_the_drill_reads_the_two_copies_and_nothing_of_centermc92_for_them(self):
@@ -358,6 +364,68 @@ class PrivateBackups(unittest.TestCase):
         keys = load("aopenvms/service_drill_keys_aopenvms.yml")
         sources_play = next(p for p in keys if p["name"].startswith("Authorize the drill"))
         self.assertIn("aopenpbs", sources_play["hosts"].split(","))
+
+
+class SameSetOnBothDisks(unittest.TestCase):
+    """The ASUS's HDD and the AOpen's HDD hold the same backups (said 2026-11-04): what the HP, centermc92 and the private-services VM send, and what each disk's age check watches, must agree."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hp = load("host_vars/hp705g4/vars.yml")
+        cls.pbs = load("host_vars/aopenpbs/vars.yml")
+        cls.drill = load("host_vars/aopendrill/vars.yml")
+        cls.asus_checks = load("asus/backup_age_check_asus.yml")[0]["vars"]["backup_age_checks"]
+
+    def test_every_directory_the_asus_watches_is_watched_on_the_aopens_disk_too_except_the_aopens_own_config(self):
+        asus = {c["path"] for c in self.asus_checks}
+        pbs = {c["path"] for c in self.pbs["backup_age_checks"]}
+        own = "{{ backup_dirs.aopen_config }}"
+        self.assertIn(own, asus)
+        self.assertEqual(asus - {own} - pbs, set(), "a backup the ASUS keeps that the AOpen's disk does not")
+
+    def test_the_hp_ships_each_service_to_the_aopen_and_n8n_to_the_asus_as_well(self):
+        by = {s["name"]: s for s in self.hp["aopen_ship"]}
+        self.assertEqual(sorted(by), ["gitea", "n8n", "nextcloud", "vaultwarden"])
+        for name, s in by.items():
+            self.assertIn("aopenpbs", s["destinations"], name)
+            self.assertTrue(set(s["destinations"]) <= {"aopenpbs", "asus"}, name)
+        self.assertEqual(sorted(by["n8n"]["destinations"]), ["aopenpbs", "asus"])
+        groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
+        for s in by.values():
+            self.assertIn(s["group"], groups)
+
+    def test_each_hp_service_is_watched_on_the_aopens_disk_and_drilled_from_it(self):
+        watched = {c["path"] for c in self.pbs["backup_age_checks"]}
+        drilled = {(s["service"], s["host"]) for s in self.drill["drill_sources"]}
+        for s in self.hp["aopen_ship"]:
+            self.assertIn(s["dest"], watched, s["name"])
+            self.assertIn((s["name"], "aopenpbs"), drilled, s["name"])
+        self.assertIn(("navidrome", "aopenpbs"), drilled)
+        self.assertIn(("n8n", "asus"), drilled)
+
+    def test_the_destination_hosts_the_ship_play_authorizes_are_exactly_the_ones_in_the_list(self):
+        plays = load("hp705g4/backup_aopen_ship_hp705g4.yml")
+        authorize = next(p for p in plays if p["name"].startswith("Authorize"))
+        listed = sorted({d for s in self.hp["aopen_ship"] for d in s["destinations"]})
+        self.assertEqual(sorted(authorize["hosts"].split(",")), listed)
+        task = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)
+        options = task["ansible.posix.authorized_key"]["key_options"]
+        for needle in ("restrict", 'from="{{ hostvars[\'hp705g4\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ item.dest }}"'):
+            self.assertIn(needle, options)
+
+    def test_the_loki_archive_and_navidrome_second_copies_are_there_and_the_loki_key_is_single_sourced(self):
+        loki = (ROOT / "hp705g4/backup_loki_to_aopen.yml").read_text()
+        self.assertIn("ARCHIVE_HOST={{ hostvars['aopenpbs']['overlay_ip'] }}", loki)
+        self.assertIn("{{ loki_archive_age_recipient }}", loki)
+        self.assertNotIn("age1", "".join(re.findall(r"AGE_RECIPIENT=.*", loki)).replace("{{ loki_archive_age_recipient }}", ""))
+        self.assertRegex(self.hp["loki_archive_age_recipient"], r"^age1[0-9a-z]{50,}$")
+        self.assertNotIn("loki_archive_age_recipient:", (ROOT / "hp705g4/backup_loki_to_asus.yml").read_text())
+        plays = load("centermc92/backup_navidrome_to_aopen.yml")
+        self.assertIn("hostvars['aopenpbs']['overlay_ip']", (ROOT / "centermc92/backup_navidrome_to_aopen.yml").read_text())
+        authorize = next(p for p in plays if p["hosts"] == "aopenpbs")
+        options = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)["ansible.posix.authorized_key"]["key_options"]
+        self.assertIn("restrict", options)
+        self.assertIn('from="{{ hostvars[\'centermc92\'][\'overlay_ip\'] }}"', options)
 
 
 class RuleComments(unittest.TestCase):
