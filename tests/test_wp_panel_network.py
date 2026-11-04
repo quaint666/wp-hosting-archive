@@ -189,13 +189,13 @@ class Https(unittest.TestCase):
     def test_no_wider_source_reaches_443_on_the_aopens_vms(self):
         for e in resolve(AOPEN["proxmox_overlay_to_vm"]):
             if 443 in e["ports"]:
-                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP, HP_IP), "only the control node, the phone and the HP (its heartbeat push to Uptime Kuma, which shares this listener)")
+                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP, HP_IP, HOSTS["dellapps"]["overlay_ip"]), "only the control node, the phone, the HP (its heartbeat push to Uptime Kuma, which shares this listener) and dellapps (the Gitea registry, while the panel serves Gitea)")
                 self.assertEqual(e["bridges"], ["vmbr1"], "never on the fallback's bridge")
 
     def test_the_vm_lets_in_443_from_the_control_node_the_phone_and_the_hp_and_dns_from_the_overlay(self):
         vars_ = load("host_vars/aopenpanel/vars.yml")
         extra = resolve(vars_["vm_nft_extra_tcp"])
-        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443]), (HP_IP, [443]), ("10.8.0.0/24", [53])])
+        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443]), (HP_IP, [443]), (resolve("{{ hostvars['dellapps']['overlay_ip'] }}", {"hostvars": HOSTS}), [443]), ("10.8.0.0/24", [53])])
         self.assertEqual([(e["src"], e["ports"]) for e in resolve(vars_["vm_nft_extra_udp"])], [("10.8.0.0/24", [53])])
         self.assertEqual(CONTROL_IP, "10.8.0.8")
         self.assertEqual(PHONE_IP, "10.8.0.4")
@@ -203,6 +203,43 @@ class Https(unittest.TestCase):
     def test_the_inside_layer_is_the_same_as_the_group_default_for_ssh_and_scraping(self):
         guests = load("group_vars/proxmox_guests/vars.yml")
         self.assertIn("wg_control_node_overlay_ip", guests["vm_nft_ssh_sources"][1])
+
+
+class GiteaAndVaultwardenFallback(unittest.TestCase):
+    """The cold Gitea and Vaultwarden on the panel (aopenvms/gitea_fallback_aopenvms.yml, vaultwarden_fallback_aopenvms.yml): the permanent rules for what the clients of a failed-over Gitea need, in all three layers."""
+
+    def test_dellapps_reaches_the_panel_on_443_at_the_dells_forward_rules_the_hub_and_the_aopens_forward_and_the_vm(self):
+        dellapps = HOSTS["dellapps"]["overlay_ip"]
+        dell_dests = [(r["dest"], tuple(str(p) for p in r["ports"])) for r in resolve(DELL["proxmox_vm_to_overlay"]["vmbr1"], {"hostvars": HOSTS})]
+        self.assertIn((PANEL_IP, ("443",)), dell_dests)
+        self.assertNotIn(PANEL_IP, [r["dest"] for r in resolve(DELL["proxmox_vm_to_overlay"]["vmbr2"], {"hostvars": HOSTS})], "dellwp never reaches the panel")
+        rules = load("opnsense/wireguard_hub_rules.yml")[0]["vars"]
+        ctx = {k: resolve(v, {"hostvars": HOSTS}) for k, v in rules.items() if k.startswith("hub_") and k != "hub_vm_rules"}
+        listed = [resolve(r, dict(ctx, hostvars=HOSTS)) for r in rules["hub_vm_rules"]]
+        apps = [r for r in listed if r["src"] == ctx["hub_vm_apps_net"] and r["dst"] == PANEL_IP + "/32"]
+        self.assertEqual([(r["proto"], r["port"]) for r in apps], [("TCP", "443")])
+        self.assertEqual(len({r["seq"] for r in listed}), len(listed))
+        self.assertLess(apps[0]["seq"], max(r["seq"] for r in listed if r.get("action") == "block" and r["src"] == ctx["hub_vm_block"]), "before the Dell block-everything rule")
+        aopen = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if e["src"] == dellapps]
+        self.assertEqual([(e["ports"], e["bridges"]) for e in aopen], [([443], ["vmbr1"])])
+        vm = [e for e in resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"], {"hostvars": HOSTS}) if e["src"] == dellapps]
+        self.assertEqual([e["ports"] for e in vm], [[443]])
+
+    def test_git_over_ssh_is_open_to_the_overlay_on_the_vm_bridge_only_and_the_vm_has_no_rule_for_it(self):
+        entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if 2222 in e["ports"]]
+        self.assertEqual([(e["src"], e["bridges"]) for e in entries], [("10.8.0.0/24", ["vmbr1"])])
+        for e in resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"], {"hostvars": HOSTS}):
+            self.assertNotIn(2222, e["ports"], "Docker's NAT bypasses the input chain; a rule here would only look like a restriction")
+        unit = (ROOT / "aopenvms/gitea_fallback_aopenvms.yml").read_text()
+        self.assertIn("-p {{ overlay_ip }}:2222:22", unit)
+
+    def test_the_panel_ports_do_not_collide(self):
+        ports = {"wp-panel": 8000, "kuma": 3002, "gitea": 3001, "vaultwarden": 8090, "ntfy": 8089, "prometheus": 9090, "alertmanager": 9093, "blackbox": 9115, "adguard-ui": 3000}
+        self.assertEqual(len(set(ports.values())), len(ports))
+        self.assertIn("127.0.0.1:3001:3000", (ROOT / "aopenvms/gitea_fallback_aopenvms.yml").read_text())
+        self.assertIn("127.0.0.1:8090:80", (ROOT / "aopenvms/vaultwarden_fallback_aopenvms.yml").read_text())
+        self.assertEqual(load("host_vars/aopenpanel/vars.yml")["kuma_loopback_port"], 3002)
+        self.assertEqual(resolve("{{ ports.ntfy }}"), "8089")
 
 
 class Name(unittest.TestCase):
