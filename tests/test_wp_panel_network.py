@@ -103,9 +103,9 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_the_memory_declared_on_the_aopen_leaves_the_host_two_gib(self):
-        """12288 MB of 15 GiB (15360): re-accepted 2026-11-04 when the production fallback (1536 MB, aopenfallback) was added to the 10752 MB left after the watcher moved into the control app's VM (4096 MB; the drill's spare VM is included). A VM added later must reopen this decision, not slip under it."""
+        """12800 MB of 15 GiB (15360): re-accepted 2026-11-04 when the production fallback (aopenfallback) was added to the 10752 MB left after the watcher moved into the control app's VM (4096 MB; the drill's spare VM is included), and again the same day when it grew from 1536 to 2048 MB, the size of dellapps, because a failover restores dellapps into it. A VM added later must reopen this decision, not slip under it."""
         total = sum(v["memory"] for v in AOPEN["proxmox_vms"]) + AOPEN["proxmox_drill_memory_mb"]
-        self.assertEqual(total, 12288)
+        self.assertEqual(total, 12800)
         self.assertLessEqual(total, 15 * 1024 - 2048)
 
     def test_the_vm_is_in_the_group_the_base_plays_target(self):
@@ -267,7 +267,7 @@ class Fallback(unittest.TestCase):
 
     def test_the_vm_is_declared_on_its_own_bridge_inside_the_block(self):
         v = resolve(vm("aopenfallback"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
-        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"], v["bridge"]), (305, 2, 1536, 20, "vmbr2"))
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"], v["bridge"]), (305, 2, 2048, 25, "vmbr2"))
         self.assertEqual((v["address"], v["gateway"]), ("10.8.0.73/29", "10.8.0.78"))
         bridge = next(b for b in AOPEN["proxmox_vm_bridges"] if b["name"] == "vmbr2")
         self.assertEqual(resolve(bridge["subnet"]), "10.8.0.72/29")
