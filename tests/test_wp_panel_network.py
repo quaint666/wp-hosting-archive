@@ -131,7 +131,10 @@ class Ssh(unittest.TestCase):
         mine = [r for r in listed if r["src"] == PANEL_IP + "/32"]
         # 59 is the watcher on this VM probing the HP over https; 60 is the app's ssh to dellwp. Nothing else starts from this address.
         hp_ip = resolve(HOSTS["hp705g4"]["overlay_ip"])
-        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22")])
+        pings = [(r["seq"], r["dst"], r["proto"], r.get("port", "")) for r in mine if r["proto"] == "ICMP"]
+        self.assertEqual([r[3] for r in pings], ["", "", ""], "Uptime Kuma's ping monitors: the Dell, the ASUS and centermc92, ICMP only")
+        self.assertEqual(sorted(r[0] for r in pings), [61, 62, 69])
+        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine if r["proto"] != "ICMP"], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22")])
         self.assertEqual(len({r["seq"] for r in listed}), len(listed), "sequence numbers are unique")
         block = next(r for r in listed if r.get("action") == "block" and r["src"] == resolve(AOPEN["proxmox_vm_block"]))
         self.assertLess(60, block["seq"])
