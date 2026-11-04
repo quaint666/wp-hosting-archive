@@ -1,7 +1,7 @@
 ---
 # dellwp/wp_approvals_dellwp.yml
 # Approvals by phone for the WordPress imports on dellwp: the signing key, the two ntfy logins and the listener service (tasks/wp_approvals_common.yml). Run dellwp/wp_sites_dellwp.yml first (it
-# installs wp-site-import and the modules), and centermc92/ntfy_centermc92.yml once after scripts/wp_approvals_secrets.sh (it creates the ntfy users `approver` and `wpvm`).
+# installs wp-site-import and the modules), and aopenvms/ntfy_aopenvms.yml once after scripts/wp_approvals_secrets.sh (it creates the ntfy users `approver` and `wpvm`).
 # Secrets: dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml) and centermc92_ntfy_approver_password / centermc92_ntfy_wpvm_password (host_vars/centermc92/vault_ntfy.yml).
 
 - name: Deploy the approval listener on dellwp

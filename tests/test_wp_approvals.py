@@ -994,7 +994,7 @@ class Plumbing(unittest.TestCase):
         t = {x["name"]: x for x in self.tasks()}
         self.assertTrue(t["Write the button user's login"]["ansible.builtin.copy"]["content"].startswith("approver:{{ hostvars['centermc92']['centermc92_ntfy_approver_password'] }}"))
         self.assertTrue(t["Write the listener's login"]["ansible.builtin.copy"]["content"].startswith("wpvm:{{ hostvars['centermc92']['centermc92_ntfy_wpvm_password'] }}"))
-        text = (ROOT / "centermc92/ntfy_centermc92.yml").read_text()
+        text = (ROOT / "aopenvms/ntfy_aopenvms.yml").read_text()
         for line in ("ensure_user approver \"$APPROVER_PW\"", "ensure_user wpvm \"$WPVM_PW\"", "ntfy access approver {{ ntfy_approvals_topic }} write-only", "ntfy access wpvm {{ ntfy_approvals_topic }} read-only",
                      "ntfy access hosts {{ ntfy_acer_topic }} write-only", "ntfy access admin {{ ntfy_acer_topic }} read-write"):
             self.assertIn(line, text)
@@ -1007,7 +1007,7 @@ class Plumbing(unittest.TestCase):
         script = (ROOT / "scripts/wp_approvals_secrets.sh").read_text()
         self.assertIn("centermc92_ntfy_approver_password", script)
         self.assertIn("centermc92_ntfy_wpvm_password", script)
-        for f in ("tasks/wp_approvals_common.yml", "centermc92/ntfy_centermc92.yml"):
+        for f in ("tasks/wp_approvals_common.yml", "aopenvms/ntfy_aopenvms.yml"):
             used = set(__import__("re").findall(r"centermc92_ntfy_(?:approver|wpvm)_password", (ROOT / f).read_text()))
             self.assertEqual(used, {"centermc92_ntfy_approver_password", "centermc92_ntfy_wpvm_password"}, f)
 

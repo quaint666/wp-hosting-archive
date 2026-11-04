@@ -4,7 +4,7 @@
 # handlers; imported via import_tasks into dellwp/wp_approvals_dellwp.yml, which sets wp_template_dir, wp_scripts_dir and wp_master_secret. The tokens themselves are made and checked by wp-site-import (an import) and wp-plugin-requests (a plugin request, collected by the timer at the end of this file)
 # (tasks/wp_tools_common.yml deploys it, with wp_approvals.py); without these files an import says "phone approval is off" and goes on, so this play can be run any time after the sites play.
 # Secrets: the key is derived from dellwp_wp_master_secret; the two logins are the passwords of the ntfy users `approver` and `wpvm` on centermc92 (host_vars/centermc92/vault_ntfy.yml, made by
-# scripts/wp_approvals_secrets.sh, applied there by centermc92/ntfy_centermc92.yml). Check mode cannot show: whether the listener starts, whether ntfy accepts its login, or the files' contents (no_log).
+# scripts/wp_approvals_secrets.sh, applied there by aopenvms/ntfy_aopenvms.yml). Check mode cannot show: whether the listener starts, whether ntfy accepts its login, or the files' contents (no_log).
 
 - name: Stop early if a secret or the tools are missing
   ansible.builtin.assert:
@@ -14,7 +14,7 @@
       - hostvars['centermc92']['centermc92_ntfy_wpvm_password'] is defined
     fail_msg: >-
       Missing a secret: dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml), or centermc92_ntfy_approver_password / centermc92_ntfy_wpvm_password (host_vars/centermc92/vault_ntfy.yml:
-      run scripts/wp_approvals_secrets.sh, then centermc92/ntfy_centermc92.yml). Nothing was changed.
+      run scripts/wp_approvals_secrets.sh, then aopenvms/ntfy_aopenvms.yml). Nothing was changed.
     quiet: true
 
 - name: Look for the tools the listener needs
