@@ -134,7 +134,7 @@ class Ssh(unittest.TestCase):
         pings = [(r["seq"], r["dst"], r["proto"], r.get("port", "")) for r in mine if r["proto"] == "ICMP"]
         self.assertEqual([r[3] for r in pings], ["", "", ""], "Uptime Kuma's ping monitors: the Dell, the ASUS and centermc92, ICMP only")
         self.assertEqual(sorted(r[0] for r in pings), [61, 62, 69])
-        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine if r["proto"] != "ICMP"], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22")])
+        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine if r["proto"] != "ICMP"], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22"), (70, resolve(HOSTS["asus"]["overlay_ip"]) + "/32", "TCP", "22")])
         self.assertEqual(len({r["seq"] for r in listed}), len(listed), "sequence numbers are unique")
         block = next(r for r in listed if r.get("action") == "block" and r["src"] == resolve(AOPEN["proxmox_vm_block"]))
         self.assertLess(60, block["seq"])
@@ -296,6 +296,65 @@ class Fallback(unittest.TestCase):
         text = (ROOT / "hp705g4/prometheus_hp705g4.yml").read_text()
         self.assertRegex(text, r"prometheus_vm_hosts: \[[^\]]*aopenfallback[^\]]*\]")
         self.assertEqual(len(re.findall(r"host: aopenfallback\b", text)), 1)
+
+
+class PrivateBackups(unittest.TestCase):
+    """The backups of ntfy, Uptime Kuma and AdGuard (aopenvms/backup_private_ship_aopenvms.yml): the services, the destinations, the firewalls and the watchers must name the same things."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.panel = load("host_vars/aopenpanel/vars.yml")
+        cls.pbs = load("host_vars/aopenpbs/vars.yml")
+        cls.drill = load("host_vars/aopendrill/vars.yml")
+        cls.backup = load("group_vars/all/backup.yml")["backup_dirs"]
+        cls.ship = load("aopenvms/backup_private_ship_aopenvms.yml")
+
+    def dirs(self):
+        return [b["dir"] for b in self.panel["private_backups"]]
+
+    def test_each_service_is_one_of_the_shared_backup_directories_and_has_its_own_key_name(self):
+        names = [b["name"] for b in self.panel["private_backups"]]
+        self.assertEqual(sorted(names), ["adguard", "kuma", "ntfy"])
+        self.assertEqual(len(set(names)), 3)
+        for d in self.dirs():
+            self.assertRegex(d, r"^\{\{ backup_dirs\.[a-z_]+ \}\}$")
+            self.assertIn(d.split("backup_dirs.")[1].split(" ")[0], self.backup)
+
+    def test_the_destinations_are_one_at_the_apartment_and_one_at_home_and_the_ship_play_authorizes_exactly_them(self):
+        self.assertEqual(self.panel["private_backup_destinations"], ["aopenpbs", "asus"])
+        authorize = next(p for p in self.ship if p["name"].startswith("Authorize"))
+        self.assertEqual(sorted(authorize["hosts"].split(",")), sorted(self.panel["private_backup_destinations"]))
+        self.assertEqual(HOSTS["asus"].get("wg_site", "home"), "home", "the ASUS is the home copy")
+
+    def test_a_key_can_only_run_rrsync_on_its_own_directory_from_the_vm(self):
+        authorize = next(p for p in self.ship if p["name"].startswith("Authorize"))
+        task = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)
+        options = task["ansible.posix.authorized_key"]["key_options"]
+        for needle in ("restrict", 'from="{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ item.dir }}"'):
+            self.assertIn(needle, options)
+
+    def test_aopenpbs_lets_in_ssh_from_the_vm_and_the_drill_and_from_nobody_else_new(self):
+        extra = resolve(self.pbs["vm_nft_extra_tcp"], {"hostvars": HOSTS})
+        ssh = sorted(e["src"] for e in extra if 22 in e["ports"])
+        self.assertEqual(ssh, sorted([resolve(HOSTS["aopenpanel"]["overlay_ip"]), resolve(HOSTS["aopendrill"]["overlay_ip"])]))
+
+    def test_the_age_checks_watch_the_same_three_services_where_they_are_made_and_where_they_land(self):
+        for host in (self.panel, self.pbs):
+            dirs = sorted(c["path"] for c in host["backup_age_checks"])
+            self.assertEqual(dirs, sorted(self.dirs()))
+            for c in host["backup_age_checks"]:
+                self.assertEqual((c["kind"], c["max_hours"]), ("newest_file", 36))
+        self.assertEqual(self.pbs["backup_age_requires_mount"], "{{ pbs_check_mount_unit }}")
+
+    def test_the_drill_reads_the_two_copies_and_nothing_of_centermc92_for_them(self):
+        by = {}
+        for s in self.drill["drill_sources"]:
+            by.setdefault(s["service"], []).append(s["host"])
+        for service in ("ntfy", "kuma", "adguard"):
+            self.assertEqual(sorted(by[service]), ["aopenpbs", "asus"], service)
+        keys = load("aopenvms/service_drill_keys_aopenvms.yml")
+        sources_play = next(p for p in keys if p["name"].startswith("Authorize the drill"))
+        self.assertIn("aopenpbs", sources_play["hosts"].split(","))
 
 
 if __name__ == "__main__":
