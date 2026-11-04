@@ -311,6 +311,7 @@ M = [
  ("the panel VM takes the watcher's id", 'host_vars/aopen/vars.yml', '    vmid: 304\n', '    vmid: 303\n', 'tests/test_wp_panel_network.py'),
  ('the panel VM is given two gigabytes', 'host_vars/aopen/vars.yml', '    memory: 4096\n    cores: 2\n    disk: 35\n', '    memory: 2048\n    cores: 2\n    disk: 35\n', 'tests/test_wp_panel_network.py'),
     ("a firewall comment is over nft's limit", 'host_vars/aopenpbs/vars.yml', 'comment: "ssh: the private-services VM ships its backups here (one directory per key)"', 'comment: "ssh: the private-services VM ships its backups here (restricted to one directory per key, aopenvms/backup_private_ship_aopenvms.yml and a long explanation that nft will not take)"', 'tests/test_wp_panel_network.py'),
+    ("the drill expects Kuma's old tarball layout", 'host_vars/aopendrill/vars.yml', '"{{ hostvars[\'aopenpanel\'][\'kuma_data_dir\'][1:] }}/"]', '"mnt/data/uptime-kuma/data/"]', 'tests/test_wp_panel_network.py'),
     ("a private-services key may run any command", 'aopenvms/backup_private_ship_aopenvms.yml', ',command="/usr/bin/rrsync {{ item.dir }}"', '', 'tests/test_wp_panel_network.py'),
     ("aopenpbs lets everyone's ssh in", 'host_vars/aopenpbs/vars.yml', 'src: "{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}", ports: [22]', 'src: "{{ overlay_cidr }}", ports: [22]', 'tests/test_wp_panel_network.py'),
     ("the drill cannot read aopenpbs", 'aopenvms/service_drill_keys_aopenvms.yml', 'hosts: hp705g4,asus,centermc92,aopenpbs', 'hosts: hp705g4,asus,centermc92', 'tests/test_wp_panel_network.py'),

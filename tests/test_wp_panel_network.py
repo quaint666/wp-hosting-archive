@@ -352,6 +352,9 @@ class PrivateBackups(unittest.TestCase):
             by.setdefault(s["service"], []).append(s["host"])
         for service in ("ntfy", "kuma", "adguard"):
             self.assertEqual(sorted(by[service]), ["aopenpbs", "asus"], service)
+        expect = resolve(self.drill["drill_services"]["kuma"]["expect"], {"hostvars": {"aopenpanel": self.panel}})
+        self.assertIn(self.panel["kuma_data_dir"].lstrip("/") + "/", expect, "the drill looks for the data directory where the backup script puts it in the tarball")
+        self.assertIn("kuma_data_dir[1:]", (ROOT / "aopenvms/backup_kuma_to_local.yml").read_text())
         keys = load("aopenvms/service_drill_keys_aopenvms.yml")
         sources_play = next(p for p in keys if p["name"].startswith("Authorize the drill"))
         self.assertIn("aopenpbs", sources_play["hosts"].split(","))
