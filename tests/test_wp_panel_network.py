@@ -63,6 +63,7 @@ def resolve(value, ctx=None):
     return value
 
 
+HP_IP = resolve(HOSTS["hp705g4"]["overlay_ip"])
 PANEL_IP = HOSTS["aopenpanel"]["overlay_ip"]
 WP_IP = HOSTS["dellwp"]["overlay_ip"]
 CONTROL_IP = resolve("{{ wg_control_node_overlay_ip }}")
@@ -102,9 +103,9 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_the_memory_declared_on_the_aopen_leaves_the_host_two_gib(self):
-        """10752 MB of 15 GiB (15360): re-accepted 2026-11-04 when the watcher moved into the control app's VM (4096 MB; the watcher's own 1536 MB VM is gone; the drill's spare VM is included). A VM added later must reopen this decision, not slip under it."""
+        """12288 MB of 15 GiB (15360): re-accepted 2026-11-04 when the production fallback (1536 MB, aopenfallback) was added to the 10752 MB left after the watcher moved into the control app's VM (4096 MB; the drill's spare VM is included). A VM added later must reopen this decision, not slip under it."""
         total = sum(v["memory"] for v in AOPEN["proxmox_vms"]) + AOPEN["proxmox_drill_memory_mb"]
-        self.assertEqual(total, 10752)
+        self.assertEqual(total, 12288)
         self.assertLessEqual(total, 15 * 1024 - 2048)
 
     def test_the_vm_is_in_the_group_the_base_plays_target(self):
@@ -167,7 +168,7 @@ class Https(unittest.TestCase):
     """The page: reachable from the control node and from the phone on 443, and from nobody else."""
 
     def test_the_aopens_forward_rules_let_the_control_node_reach_443_on_the_vm_bridge(self):
-        entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == CONTROL_IP]
+        entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == CONTROL_IP and "vmbr1" in e["bridges"]]
         self.assertEqual(len(entries), 1)
         self.assertIn(443, entries[0]["ports"])
         self.assertIn(22, entries[0]["ports"])
@@ -182,11 +183,14 @@ class Https(unittest.TestCase):
     def test_no_wider_source_reaches_443_on_the_aopens_vms(self):
         for e in resolve(AOPEN["proxmox_overlay_to_vm"]):
             if 443 in e["ports"]:
-                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP), "only the control node and the phone")
+                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP, HP_IP), "only the control node, the phone and the HP (its heartbeat push to Uptime Kuma, which shares this listener)")
+                self.assertEqual(e["bridges"], ["vmbr1"], "never on the fallback's bridge")
 
-    def test_the_vm_lets_in_443_from_the_control_node_and_the_phone_alone(self):
-        extra = resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"])
-        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443])])
+    def test_the_vm_lets_in_443_from_the_control_node_the_phone_and_the_hp_and_dns_from_the_overlay(self):
+        vars_ = load("host_vars/aopenpanel/vars.yml")
+        extra = resolve(vars_["vm_nft_extra_tcp"])
+        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443]), (HP_IP, [443]), ("10.8.0.0/24", [53])])
+        self.assertEqual([(e["src"], e["ports"]) for e in resolve(vars_["vm_nft_extra_udp"])], [("10.8.0.0/24", [53])])
         self.assertEqual(CONTROL_IP, "10.8.0.8")
         self.assertEqual(PHONE_IP, "10.8.0.4")
 
@@ -253,6 +257,42 @@ class Monitoring(unittest.TestCase):
         self.assertRegex(text, r"prometheus_vm_hosts: \[[^\]]*aopenpanel[^\]]*\]")
         self.assertIn("hostvars['aopenpanel']['overlay_ip']", text)
         self.assertEqual(len(re.findall(r"host: aopenpanel\b", text)), 1)
+
+
+class Fallback(unittest.TestCase):
+    """The production fallback VM (aopenfallback): its own bridge, and the same four destinations at the forward rules and at the hub, nothing else, and no way in on 443 or 53."""
+
+    def test_the_vm_is_declared_on_its_own_bridge_inside_the_block(self):
+        v = resolve(vm("aopenfallback"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"], v["bridge"]), (305, 2, 1536, 20, "vmbr2"))
+        self.assertEqual((v["address"], v["gateway"]), ("10.8.0.73/29", "10.8.0.78"))
+        bridge = next(b for b in AOPEN["proxmox_vm_bridges"] if b["name"] == "vmbr2")
+        self.assertEqual(resolve(bridge["subnet"]), "10.8.0.72/29")
+        self.assertTrue(ipaddress.ip_network(resolve(bridge["subnet"])).subnet_of(ipaddress.ip_network(resolve(AOPEN["proxmox_vm_block"]))))
+        self.assertFalse(ipaddress.ip_network("10.8.0.72/29").overlaps(ipaddress.ip_network("10.8.0.64/29")))
+
+    def test_the_forward_rules_and_the_hub_name_the_same_destinations(self):
+        fwd = resolve(AOPEN["proxmox_vm_to_overlay"]["vmbr2"])
+        fwd_set = {(d, e["proto"].upper(), str(p)) for e in fwd for d in [e["dest"]] for p in e["ports"]}
+        rules = load("opnsense/wireguard_hub_rules.yml")[0]["vars"]
+        ctx = {k: resolve(v, {"hostvars": HOSTS}) for k, v in rules.items() if k.startswith("hub_") and k != "hub_vm_rules"}
+        listed = [resolve(r, dict(ctx, hostvars=HOSTS)) for r in rules["hub_vm_rules"]]
+        mine = [r for r in listed if r["src"] == "10.8.0.72/29"]
+        hub_set = {(r["dst"].split("/")[0], r["proto"], r["port"]) for r in mine}
+        self.assertEqual(fwd_set, hub_set)
+        self.assertEqual(sorted(r["seq"] for r in mine), [65, 66, 67, 68])
+        self.assertEqual(len({r["seq"] for r in listed}), len(listed))
+
+    def test_nothing_from_the_overlay_reaches_the_fallback_except_ssh_and_the_scrape(self):
+        for e in resolve(AOPEN["proxmox_overlay_to_vm"]):
+            if "vmbr2" in e["bridges"]:
+                self.assertIn(e["src"], (HP_IP, CONTROL_IP))
+                self.assertEqual({str(x) for x in e["ports"]} - {"22", "9100"}, set(), "only ssh and node_exporter")
+
+    def test_prometheus_watches_it(self):
+        text = (ROOT / "hp705g4/prometheus_hp705g4.yml").read_text()
+        self.assertRegex(text, r"prometheus_vm_hosts: \[[^\]]*aopenfallback[^\]]*\]")
+        self.assertEqual(len(re.findall(r"host: aopenfallback\b", text)), 1)
 
 
 if __name__ == "__main__":
