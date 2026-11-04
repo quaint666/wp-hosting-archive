@@ -357,5 +357,18 @@ class PrivateBackups(unittest.TestCase):
         self.assertIn("aopenpbs", sources_play["hosts"].split(","))
 
 
+class RuleComments(unittest.TestCase):
+    def test_no_firewall_comment_is_longer_than_nftables_allows(self):
+        """nft refuses a rule whose comment is over 128 characters ("comment too long"; seen on aopenpbs 2026-11-04), after the play has already rendered it: the VMs' extra rules and the hosts' forward rules."""
+        checked = 0
+        for path in sorted((ROOT / "host_vars").glob("*/vars.yml")):
+            data = yaml.safe_load(path.read_text()) or {}
+            for key in ("vm_nft_extra_tcp", "vm_nft_extra_udp"):
+                for rule in data.get(key, []):
+                    checked += 1
+                    self.assertLessEqual(len(resolve(rule["comment"], {"hostvars": HOSTS})), 128, "%s %s: %s" % (path, key, rule["comment"]))
+        self.assertGreater(checked, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
