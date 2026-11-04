@@ -78,11 +78,11 @@ def vm(name):
 class Declared(unittest.TestCase):
     def test_the_vm_is_declared_as_agreed(self):
         v = resolve(vm("aopenpanel"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
-        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 1536, 15))
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 4096, 35))
         self.assertEqual(v["address"], "%s/29" % PANEL_IP)
         self.assertEqual(v["gateway"], "10.8.0.70")
-        self.assertEqual(v["tags"], ["panel"])
-        self.assertEqual(v["startup"].split(",")[0], "order=4", "after the watcher (3)")
+        self.assertEqual(v["tags"], ["panel", "watch"], "the VM also runs the watcher")
+        self.assertEqual(v["startup"].split(",")[0], "order=4", "after the drill (2)")
 
     def test_its_address_is_inside_the_bridge_subnet_unique_and_not_the_free_one(self):
         net = ipaddress.ip_network(resolve(AOPEN["proxmox_vm_bridges"][0]["subnet"]))
@@ -102,9 +102,9 @@ class Declared(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_the_memory_declared_on_the_aopen_leaves_the_host_two_gib(self):
-        """9728 MB of 15 GiB (15360): re-accepted 2026-11-01 after the drill, the control app and the replica were cut to measured peaks (the template 399 is included). A VM added later must reopen this decision, not slip under it."""
+        """10752 MB of 15 GiB (15360): re-accepted 2026-11-04 when the watcher moved into the control app's VM (4096 MB; the watcher's own 1536 MB VM is gone; the drill's spare VM is included). A VM added later must reopen this decision, not slip under it."""
         total = sum(v["memory"] for v in AOPEN["proxmox_vms"]) + AOPEN["proxmox_drill_memory_mb"]
-        self.assertEqual(total, 9728)
+        self.assertEqual(total, 10752)
         self.assertLessEqual(total, 15 * 1024 - 2048)
 
     def test_the_vm_is_in_the_group_the_base_plays_target(self):
@@ -128,7 +128,9 @@ class Ssh(unittest.TestCase):
         ctx = {k: resolve(v, {"hostvars": HOSTS}) for k, v in ctx.items()}
         listed = [resolve(r, dict(ctx, hostvars=HOSTS)) for r in rules["hub_vm_rules"]]
         mine = [r for r in listed if r["src"] == PANEL_IP + "/32"]
-        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine], [(60, WP_IP + "/32", "TCP", "22")])
+        # 59 is the watcher on this VM probing the HP over https; 60 is the app's ssh to dellwp. Nothing else starts from this address.
+        hp_ip = resolve(HOSTS["hp705g4"]["overlay_ip"])
+        self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22")])
         self.assertEqual(len({r["seq"] for r in listed}), len(listed), "sequence numbers are unique")
         block = next(r for r in listed if r.get("action") == "block" and r["src"] == resolve(AOPEN["proxmox_vm_block"]))
         self.assertLess(60, block["seq"])
