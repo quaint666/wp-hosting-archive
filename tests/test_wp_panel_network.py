@@ -7,7 +7,10 @@ setup that lets the hook in; the monitoring in Prometheus. A layer that is missi
 group variables and host variables resolved with Jinja, the plays as YAML) and checks that they agree. It proves the files; it does not prove that a firewall accepted them, that the certificate reached the VM or
 that anything answers: the plays and the rehearsal do. Run: python3 -I tests/test_wp_panel_network.py"""
 import ipaddress
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -426,6 +429,155 @@ class SameSetOnBothDisks(unittest.TestCase):
         options = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)["ansible.posix.authorized_key"]["key_options"]
         self.assertIn("restrict", options)
         self.assertIn('from="{{ hostvars[\'centermc92\'][\'overlay_ip\'] }}"', options)
+
+
+class ThreeADay(unittest.TestCase):
+    """Gitea and Vaultwarden are backed up three times a day (said 2026-11-04) so a failover to the panel loses at most 8 hours: 21 kept on the HP, the ASUS and the AOpen's disk; R2 stays daily at 3; centermc92 stays as it was."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.keep = load("group_vars/all/backup.yml")["backup_keep"]
+        cls.hp = load("host_vars/hp705g4/vars.yml")
+        cls.pbs = load("host_vars/aopenpbs/vars.yml")
+
+    def timer(self, path):
+        return re.search(r"OnCalendar=(.*)", (ROOT / path).read_text()).group(1).strip()
+
+    def test_the_hp_keeps_7_the_asus_and_the_aopens_disk_keep_21_and_the_rest_is_unchanged(self):
+        for svc in ("gitea", "vaultwarden"):
+            self.assertEqual(self.keep["local"][svc], 7, svc)
+            self.assertEqual(self.keep["asus"][svc], 21, svc)
+            self.assertEqual(self.keep["aopen"][svc], 21, svc)
+        self.assertEqual(self.keep["r2"], 3)
+        self.assertEqual((self.keep["centermc92"]["gitea"], self.keep["centermc92"]["vaultwarden"]), (7, 7))
+        self.assertEqual(self.keep["local"]["nextcloud"], 3, "only Gitea and Vaultwarden change")
+        self.assertEqual(sorted(self.keep["aopen"]), ["gitea", "vaultwarden"])
+
+    def test_the_local_jobs_run_three_times_and_each_leg_follows_its_own_local_job(self):
+        self.assertEqual(self.timer("hp705g4/gitea_backup_local.yml"), "*-*-* 00,08,16:05:00")
+        self.assertEqual(self.timer("hp705g4/backup_vaultwarden_to_local.yml"), "*-*-* 00,08,16:20:00")
+        self.assertEqual(self.timer("hp705g4/gitea_backup_asus.yml"), "*-*-* 00,08,16:25:00")
+        self.assertEqual(self.timer("hp705g4/backup_vaultwarden_to_asus.yml"), "*-*-* 00,08,16:35:00")
+
+    def test_r2_and_centermc92_stay_daily(self):
+        for path in ("hp705g4/gitea_backup_r2.yml", "hp705g4/vaultwarden_backup_r2.yml", "hp705g4/gitea_backup_centermc92.yml", "hp705g4/backup_vaultwarden_to_centermc92.yml"):
+            self.assertNotIn(",", self.timer(path), path)
+
+    def test_the_ship_to_the_aopen_runs_after_every_leg_of_the_same_hour_and_its_window_covers_the_local_file(self):
+        groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
+        self.assertEqual(groups["frequent"]["calendar"], "*-*-* 00,08,16:45:00")
+        by = {s["name"]: s["group"] for s in self.hp["aopen_ship"]}
+        self.assertEqual((by["gitea"], by["vaultwarden"], by["nextcloud"], by["n8n"]), ("frequent", "frequent", "night", "n8n"))
+        self.assertGreaterEqual(groups["frequent"]["max_age_min"], 45 - 5, "the newest local file is up to 40 minutes old at :45")
+        self.assertLess(groups["frequent"]["max_age_min"], 8 * 60, "a missed local run is never shipped as if it were new")
+
+    def test_the_age_checks_expect_a_file_within_12_hours_and_at_most_one_more_than_is_kept(self):
+        asus = {c["path"]: c for c in load("asus/backup_age_check_asus.yml")[0]["vars"]["backup_age_checks"]}
+        hp = {c["path"]: c for c in load("hp705g4/backup_age_check_hp705g4.yml")[0]["vars"]["backup_age_checks"] if c["kind"] == "newest_file"}
+        pbs = {c["path"]: c for c in self.pbs["backup_age_checks"]}
+        for svc, path in (("gitea", "{{ backup_dirs.gitea }}"), ("vaultwarden", "{{ backup_dirs.vaultwarden }}")):
+            for where, c in (("asus", asus[path]), ("aopenpbs", pbs[path])):
+                self.assertEqual(c["max_hours"], 12, "%s on %s" % (svc, where))
+                self.assertEqual(c["max_files"], (self.keep["aopen"] if where == "aopenpbs" else self.keep["asus"])[svc] + 1, "%s on %s" % (svc, where))
+        self.assertEqual(hp["{{ backup_dirs.gitea_local }}"]["max_hours"], 12)
+        self.assertEqual(hp["{{ backup_dirs.vaultwarden }}"]["max_hours"], 12)
+
+    # --- the AOpen's disk keeps more than the HP: sent without --delete, pruned on the AOpen
+    def render(self, content, **ctx):
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined, trim_blocks=True, keep_trailing_newline=True)
+        env.filters["regex_replace"] = lambda s, a, b: re.sub(a, b, s)
+        return env.from_string(content).render(**ctx)
+
+    def ship_items(self):
+        return resolve(self.hp["aopen_ship"], {"hostvars": HOSTS, "backup_keep": self.keep})
+
+    def test_gitea_and_vaultwarden_are_sent_without_delete_and_the_rest_are_mirrors(self):
+        items = {s["name"]: s for s in self.ship_items()}
+        self.assertEqual({n for n, s in items.items() if "keep" in s}, {"gitea", "vaultwarden"})
+        self.assertEqual(int(items["gitea"]["keep"]), 21)
+        play = load("hp705g4/backup_aopen_ship_hp705g4.yml")[2]
+        content = next(t for t in play["tasks"] if t.get("name", "").startswith("Deploy the shipping script"))["ansible.builtin.copy"]["content"]
+        hosts = {"aopenpbs": {"overlay_ip": "10.0.0.1"}, "asus": {"overlay_ip": "10.0.0.2"}}
+        script = self.render(content, aopen_ship=self.ship_items(), aopen_ship_groups=resolve(self.hp["aopen_ship_groups"]), hostvars=hosts)
+        for name in ("gitea", "vaultwarden"):
+            rsync = [l for l in script.splitlines() if "rsync -a" in l and ("/%s" % name in l or '"%s"' % items[name]["src"] in l)]
+            self.assertTrue(rsync, name)
+            for l in rsync:
+                self.assertNotIn("--delete", l, name)
+        for name in ("nextcloud", "n8n"):
+            rsync = [l for l in script.splitlines() if "rsync -a" in l and '"%s/"' % items[name]["src"] in l]
+            self.assertTrue(rsync, name)
+            for l in rsync:
+                self.assertIn("--delete", l, name)
+
+    def prune_script(self, dirs):
+        play = load("aopenvms/backup_prune_aopenvms.yml")[0]
+        content = next(t for t in play["tasks"] if t.get("name") == "Deploy the prune script")["ansible.builtin.copy"]["content"]
+        items = [dict(s, dest=dirs[s["name"]], keep=int(s["keep"])) for s in self.ship_items() if "keep" in s]
+        return self.render(content, prune_items=items)
+
+    def run_prune(self, files, keep_overrides=None):
+        tmp = Path(tempfile.mkdtemp(prefix="prune-"))
+        dirs = {n: str(tmp / n) for n in ("gitea", "vaultwarden")}
+        for d in dirs.values():
+            os.makedirs(d)
+        for name, names in files.items():
+            for f in names:
+                (Path(dirs[name]) / f).write_text("x")
+        script = self.prune_script(dirs)
+        if keep_overrides:
+            for old, new in keep_overrides.items():
+                script = script.replace(old, new)
+        bin_ = tmp / "bin"
+        bin_.mkdir()
+        (bin_ / "ntfy-notify").write_text("#!/bin/bash\necho \"$*\" >> %s\n" % (tmp / "ntfy.log"))
+        (bin_ / "ntfy-notify").chmod(0o755)
+        sh = tmp / "prune.sh"
+        sh.write_text(script)
+        r = subprocess.run(["bash", str(sh)], capture_output=True, text=True, env=dict(os.environ, PATH="%s:%s" % (bin_, os.environ["PATH"])), timeout=30)
+        left = {n: sorted(os.listdir(d)) for n, d in dirs.items()}
+        said = (tmp / "ntfy.log").read_text() if (tmp / "ntfy.log").exists() else ""
+        return r, left, said
+
+    def test_the_prune_keeps_the_newest_21_of_each_and_nothing_else_is_touched(self):
+        gitea = ["gitea-2026-11-%02d_%02d-05-01.tar.zst" % (d, h) for d in range(1, 10) for h in (0, 8, 16)]
+        vw = ["vaultwarden-2026-11-%02d_%02d-20-01.tar.zst" % (d, h) for d in range(1, 8) for h in (0, 8, 16)]
+        r, left, said = self.run_prune({"gitea": gitea + ["notes.txt", "gitea-latest.tar"], "vaultwarden": vw})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len([f for f in left["gitea"] if f.endswith(".tar.zst")]), 21)
+        self.assertEqual([f for f in left["gitea"] if f.endswith(".tar.zst")], sorted(gitea)[-21:], "the newest, by the date in the name")
+        self.assertIn("notes.txt", left["gitea"])
+        self.assertIn("gitea-latest.tar", left["gitea"])
+        self.assertEqual(left["vaultwarden"], sorted(vw), "21 or fewer: nothing removed")
+        self.assertEqual(said, "")
+
+    def test_the_prune_never_removes_below_the_keep_and_refuses_a_bad_keep(self):
+        few = ["gitea-2026-11-0%d_00-05-01.tar.zst" % d for d in range(1, 6)]
+        r, left, _ = self.run_prune({"gitea": few, "vaultwarden": []})
+        self.assertEqual(left["gitea"], few)
+        r, left, said = self.run_prune({"gitea": few * 1, "vaultwarden": []}, {" 21\n": " 0\n"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(left["gitea"], few, "a keep of zero removes nothing")
+        self.assertIn("FAILED", said)
+
+    def test_the_prune_timer_follows_ten_minutes_after_the_ship(self):
+        play = load("aopenvms/backup_prune_aopenvms.yml")[0]
+        content = next(t for t in play["tasks"] if t.get("name") == "Deploy the prune timer")["ansible.builtin.copy"]["content"]
+        out = self.render(content, hostvars={"hp705g4": {"aopen_ship_groups": resolve(self.hp["aopen_ship_groups"])}})
+        self.assertIn("OnCalendar=*-*-* 00,08,16:55:00", out)
+        self.assertEqual(play["hosts"], "aopenpbs")
+
+    def test_only_the_first_run_of_the_day_sends_a_success_message(self):
+        for path in ("hp705g4/gitea_backup_local.yml", "hp705g4/backup_vaultwarden_to_local.yml", "hp705g4/gitea_backup_asus.yml", "hp705g4/backup_vaultwarden_to_asus.yml"):
+            text = (ROOT / path).read_text()
+            completed = [l for l in text.splitlines() if "notify" in l and "completed" in l and "echo" not in l and "FAILED" not in l and "#" not in l.split("notify")[0]]
+            self.assertTrue(completed, path)
+            for l in completed:
+                self.assertIn('if [ "$(date +%H)" = 00 ]', l, path)
+
+    def test_the_verify_script_knows_the_new_timer(self):
+        text = (ROOT / "scripts/aopen_backups_verify.sh").read_text()
+        self.assertIn("aopen-ship-frequent", text)
 
 
 class RuleComments(unittest.TestCase):
