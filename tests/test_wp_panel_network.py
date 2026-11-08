@@ -423,13 +423,12 @@ class SameSetOnBothDisks(unittest.TestCase):
         self.assertIn(own, asus)
         self.assertEqual(asus - {own} - pbs, set(), "a backup the ASUS keeps that the AOpen's disk does not")
 
-    def test_the_hp_ships_each_service_to_the_aopen_and_n8n_to_the_asus_as_well(self):
+    def test_the_hp_ships_each_service_to_the_aopen(self):
         by = {s["name"]: s for s in self.hp["aopen_ship"]}
-        self.assertEqual(sorted(by), ["gitea", "n8n", "nextcloud", "vaultwarden"])
+        self.assertEqual(sorted(by), ["gitea", "nextcloud", "vaultwarden"])
         for name, s in by.items():
             self.assertIn("aopenpbs", s["destinations"], name)
             self.assertTrue(set(s["destinations"]) <= {"aopenpbs", "asus"}, name)
-        self.assertEqual(sorted(by["n8n"]["destinations"]), ["aopenpbs", "asus"])
         groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
         for s in by.values():
             self.assertIn(s["group"], groups)
@@ -441,7 +440,6 @@ class SameSetOnBothDisks(unittest.TestCase):
             self.assertIn(s["dest"], watched, s["name"])
             self.assertIn((s["name"], "aopenpbs"), drilled, s["name"])
         self.assertIn(("navidrome", "aopenpbs"), drilled)
-        self.assertIn(("n8n", "asus"), drilled)
 
     def test_the_destination_hosts_the_ship_play_authorizes_are_exactly_the_ones_in_the_list(self):
         plays = load("hp705g4/backup_aopen_ship_hp705g4.yml")
@@ -504,7 +502,7 @@ class ThreeADay(unittest.TestCase):
         groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
         self.assertEqual(groups["frequent"]["calendar"], "*-*-* 00,08,16:45:00")
         by = {s["name"]: s["group"] for s in self.hp["aopen_ship"]}
-        self.assertEqual((by["gitea"], by["vaultwarden"], by["nextcloud"], by["n8n"]), ("frequent", "frequent", "night", "n8n"))
+        self.assertEqual((by["gitea"], by["vaultwarden"], by["nextcloud"]), ("frequent", "frequent", "night"))
         self.assertGreaterEqual(groups["frequent"]["max_age_min"], 45 - 5, "the newest local file is up to 40 minutes old at :45")
         self.assertLess(groups["frequent"]["max_age_min"], 8 * 60, "a missed local run is never shipped as if it were new")
 
@@ -541,7 +539,7 @@ class ThreeADay(unittest.TestCase):
             self.assertTrue(rsync, name)
             for l in rsync:
                 self.assertNotIn("--delete", l, name)
-        for name in ("nextcloud", "n8n"):
+        for name in ("nextcloud",):
             rsync = [l for l in script.splitlines() if "rsync -a" in l and '"%s/"' % items[name]["src"] in l]
             self.assertTrue(rsync, name)
             for l in rsync:
