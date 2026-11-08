@@ -425,7 +425,7 @@ class SameSetOnBothDisks(unittest.TestCase):
 
     def test_the_hp_ships_each_service_to_the_aopen(self):
         by = {s["name"]: s for s in self.hp["aopen_ship"]}
-        self.assertEqual(sorted(by), ["gitea", "nextcloud", "vaultwarden"])
+        self.assertEqual(sorted(by), ["gitea", "kuma_home", "nextcloud", "vaultwarden"])
         for name, s in by.items():
             self.assertIn("aopenpbs", s["destinations"], name)
             self.assertTrue(set(s["destinations"]) <= {"aopenpbs", "asus"}, name)
