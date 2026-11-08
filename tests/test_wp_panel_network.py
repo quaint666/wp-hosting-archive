@@ -474,7 +474,7 @@ class SameSetOnBothDisks(unittest.TestCase):
 
     def test_the_hp_ships_each_service_to_the_aopen(self):
         by = {s["name"]: s for s in self.hp["aopen_ship"]}
-        self.assertEqual(sorted(by), ["copyparty", "gitea", "kuma_home", "nextcloud", "vaultwarden"])
+        self.assertEqual(sorted(by), ["copyparty", "gitea", "kuma_home", "vaultwarden"])
         for name, s in by.items():
             self.assertIn("aopenpbs", s["destinations"], name)
             self.assertTrue(set(s["destinations"]) <= {"aopenpbs", "asus"}, name)
@@ -528,7 +528,7 @@ class ThreeADay(unittest.TestCase):
             self.assertEqual(self.keep["aopen"][svc], 21, svc)
         self.assertEqual(self.keep["r2"], 3)
         self.assertEqual((self.keep["centermc92"]["gitea"], self.keep["centermc92"]["vaultwarden"]), (7, 7))
-        self.assertEqual(self.keep["local"]["nextcloud"], 3, "only Gitea and Vaultwarden change")
+        self.assertNotIn("nextcloud", self.keep["local"], "Nextcloud was retired on 2026-11-08")
         self.assertEqual(sorted(self.keep["aopen"]), ["gitea", "vaultwarden"])
 
     def test_the_local_jobs_run_three_times_and_each_leg_follows_its_own_local_job(self):
@@ -545,7 +545,7 @@ class ThreeADay(unittest.TestCase):
         groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
         self.assertEqual(groups["frequent"]["calendar"], "*-*-* 00,08,16:45:00")
         by = {s["name"]: s["group"] for s in self.hp["aopen_ship"]}
-        self.assertEqual((by["gitea"], by["vaultwarden"], by["nextcloud"]), ("frequent", "frequent", "night"))
+        self.assertEqual((by["gitea"], by["vaultwarden"], by["copyparty"]), ("frequent", "frequent", "night"))
         self.assertGreaterEqual(groups["frequent"]["max_age_min"], 45 - 5, "the newest local file is up to 40 minutes old at :45")
         self.assertLess(groups["frequent"]["max_age_min"], 8 * 60, "a missed local run is never shipped as if it were new")
 
@@ -582,7 +582,7 @@ class ThreeADay(unittest.TestCase):
             self.assertTrue(rsync, name)
             for l in rsync:
                 self.assertNotIn("--delete", l, name)
-        for name in ("nextcloud",):
+        for name in ("copyparty",):
             rsync = [l for l in script.splitlines() if "rsync -a" in l and '"%s/"' % items[name]["src"] in l]
             self.assertTrue(rsync, name)
             for l in rsync:
