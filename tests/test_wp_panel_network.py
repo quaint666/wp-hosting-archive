@@ -40,7 +40,7 @@ def hosts_of(node, out=None):
 INVENTORY = load("inventory.yml")
 HOSTS = hosts_of(INVENTORY)
 CTX = {"hostvars": HOSTS}
-for f in ("network", "ports", "wireguard", "domain", "proxmox", "services", "backup"):
+for f in ("network", "ports", "wireguard", "domain", "proxmox", "services", "backup", "ntfy"):
     CTX.update(load("group_vars/all/%s.yml" % f))
 CTX.update(load("group_vars/proxmox_guests/vars.yml"))
 for host in ("aopen", "delloptiplex3040", "dellwp"):
