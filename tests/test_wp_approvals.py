@@ -180,8 +180,8 @@ class Files(unittest.TestCase):
 
     def test_the_conf(self):
         p = self.t / "conf"
-        p.write_text('NTFY_BASE="http://10.0.0.2:8089"\nNTFY_FALLBACK_URL="https://ntfy-acer.example.org"\nNTFY_FALLBACK_TOPIC="acer-alerts"\n')
-        self.assertEqual(ap.read_conf(p), ("https://ntfy-acer.example.org", "acer-alerts"))
+        p.write_text('NTFY_BASE="http://10.0.0.2:8089"\nNTFY_FALLBACK_URL="https://ntfy-apartment.example.org"\nNTFY_FALLBACK_TOPIC="ntfy-apartment"\n')
+        self.assertEqual(ap.read_conf(p), ("https://ntfy-apartment.example.org", "ntfy-apartment"))
         for bad in ('NTFY_FALLBACK_URL="http://x.org"\nNTFY_FALLBACK_TOPIC="t"\n', 'NTFY_FALLBACK_URL="https://x.org/path"\nNTFY_FALLBACK_TOPIC="t"\n', 'NTFY_FALLBACK_URL="https://x.org"\n',
                     'NTFY_FALLBACK_URL="https://x.org"\nNTFY_FALLBACK_TOPIC="a b"\n', "", 'NTFY_FALLBACK_URL="https://x.org evil"\nNTFY_FALLBACK_TOPIC="t"\n'):
             p.write_text(bad)
@@ -192,14 +192,14 @@ class Files(unittest.TestCase):
 
     def test_the_credentials(self):
         n = self.t / "netrc"
-        n.write_text("machine ntfy-acer.example.org login hosts password s3cret\n")
-        self.assertEqual(ap.sender_auth(n, "https://ntfy-acer.example.org"), "Basic " + base64.b64encode(b"hosts:s3cret").decode())
+        n.write_text("machine ntfy-apartment.example.org login hosts password s3cret\n")
+        self.assertEqual(ap.sender_auth(n, "https://ntfy-apartment.example.org"), "Basic " + base64.b64encode(b"hosts:s3cret").decode())
         for bad_url in ("https://other.example.org",):
             with self.assertRaises(ap.ApprovalError):
                 ap.sender_auth(n, bad_url)
         n.write_text("garbage garbage")
         with self.assertRaises(ap.ApprovalError):
-            ap.sender_auth(n, "https://ntfy-acer.example.org")
+            ap.sender_auth(n, "https://ntfy-apartment.example.org")
         a = self.t / "approver"
         a.write_text("approver:pa:ss\n")
         self.assertEqual(ap.approver_auth(a), "Basic " + base64.b64encode(b"approver:pa:ss").decode())
@@ -936,7 +936,7 @@ class Plumbing(unittest.TestCase):
                              "read_timeout_s": v["wp_approvals_read_timeout_s"]})
         for k in ("resolve_timeout_s", "max_per_minute", "read_timeout_s"):
             self.assertIsInstance(c[k], int)
-        self.assertNotIn("ntfy-acer", text)
+        self.assertNotIn("ntfy-apartment", text)
         self.assertNotIn("http", text.replace("https://", "").split("CONFIG")[1])
 
     def test_the_rendered_command_runs_the_real_listener_module(self):
@@ -996,10 +996,10 @@ class Plumbing(unittest.TestCase):
         self.assertTrue(t["Write the listener's login"]["ansible.builtin.copy"]["content"].startswith("wpvm:{{ hostvars['centermc92']['centermc92_ntfy_wpvm_password'] }}"))
         text = (ROOT / "aopenvms/ntfy_aopenvms.yml").read_text()
         for line in ("ensure_user approver \"$APPROVER_PW\"", "ensure_user wpvm \"$WPVM_PW\"", "ntfy access approver {{ ntfy_approvals_topic }} write-only", "ntfy access wpvm {{ ntfy_approvals_topic }} read-only",
-                     "ntfy access hosts {{ ntfy_acer_topic }} write-only", "ntfy access admin {{ ntfy_acer_topic }} read-write"):
+                     "ntfy access hosts {{ ntfy_apartment_topic }} write-only", "ntfy access admin {{ ntfy_apartment_topic }} read-write"):
             self.assertIn(line, text)
-        self.assertNotIn("access approver {{ ntfy_acer_topic }}", text)
-        self.assertNotIn("access wpvm {{ ntfy_acer_topic }}", text)
+        self.assertNotIn("access approver {{ ntfy_apartment_topic }}", text)
+        self.assertNotIn("access wpvm {{ ntfy_apartment_topic }}", text)
         self.assertNotRegex(text, r"access (approver|wpvm) \{\{ ntfy_approvals_topic \}\} (read-write|write-only|read-only|deny)\n(?s:.*)access (approver|wpvm) \{\{ ntfy_approvals_topic \}\} read-write")
         self.assertIn("hostvars['dellwp']['wp_approvals_reply_topic']", text)
 
