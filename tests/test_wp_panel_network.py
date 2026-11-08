@@ -82,7 +82,7 @@ def vm(name):
 class Declared(unittest.TestCase):
     def test_the_vm_is_declared_as_agreed(self):
         v = resolve(vm("aopenpanel"), {"proxmox_vm_bridges": AOPEN["proxmox_vm_bridges"]})
-        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 3072, 35))
+        self.assertEqual((v["vmid"], v["cores"], v["memory"], v["disk"]), (304, 2, 3072, 50))
         self.assertEqual(v["address"], "%s/29" % PANEL_IP)
         self.assertEqual(v["gateway"], "10.8.0.70")
         self.assertEqual(v["tags"], ["panel", "watch"], "the VM also runs the watcher")
@@ -382,12 +382,13 @@ class PrivateBackups(unittest.TestCase):
         self.assertEqual([(e["ports"], e["bridges"]) for e in forward], [([22], ["vmbr1"])])
 
     def test_the_age_checks_watch_the_same_three_services_where_they_are_made_and_where_they_land(self):
-        dirs = sorted(c["path"] for c in self.panel["backup_age_checks"])
+        tarballs = [c for c in self.panel["backup_age_checks"] if c["kind"] == "newest_file"]  # Navidrome's weekly snapshot check has its own test below
+        dirs = sorted(c["path"] for c in tarballs)
         self.assertEqual(dirs, sorted(self.dirs()))
         landed = {c["path"]: c for c in self.pbs["backup_age_checks"]}
         for d in self.dirs():
             self.assertIn(d, landed)
-        for c in self.panel["backup_age_checks"] + [landed[d] for d in self.dirs()]:
+        for c in tarballs + [landed[d] for d in self.dirs()]:
             self.assertEqual((c["kind"], c["max_hours"]), ("newest_file", 36))
             self.assertIn("max_files", c, "retention that stops pruning is seen")
         self.assertEqual(self.pbs["backup_age_requires_mount"], "{{ pbs_check_mount_unit }}")
@@ -404,6 +405,54 @@ class PrivateBackups(unittest.TestCase):
         keys = load("aopenvms/service_drill_keys_aopenvms.yml")
         sources_play = next(p for p in keys if p["name"].startswith("Authorize the drill"))
         self.assertIn("aopenpbs", sources_play["hosts"].split(","))
+
+
+class NavidromeBackups(unittest.TestCase):
+    """Navidrome's library snapshots (aopenvms/backup_navidrome_to_local.yml, aopenvms/backup_navidrome_ship_aopenvms.yml, 2026-11): made on the private-services VM, mirrored to the same two places as the other private services, watched at all three, drilled from the two copies."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.panel = load("host_vars/aopenpanel/vars.yml")
+        cls.pbs = load("host_vars/aopenpbs/vars.yml")
+        cls.drill = load("host_vars/aopendrill/vars.yml")
+        cls.keep = load("group_vars/all/backup.yml")["backup_keep"]["local"]
+        cls.ship = load("aopenvms/backup_navidrome_ship_aopenvms.yml")
+        cls.asus_checks = load("asus/backup_age_check_asus.yml")[0]["vars"]["backup_age_checks"]
+
+    def test_the_destinations_are_the_private_services_two_and_the_ship_play_authorizes_exactly_them(self):
+        self.assertEqual(self.panel["navidrome_ship_destinations"], self.panel["private_backup_destinations"])
+        authorize = next(p for p in self.ship if p["name"].startswith("Authorize"))
+        self.assertEqual(sorted(authorize["hosts"].split(",")), sorted(self.panel["navidrome_ship_destinations"]))
+
+    def test_the_key_can_only_run_rrsync_on_the_navidrome_directory_from_the_vm(self):
+        authorize = next(p for p in self.ship if p["name"].startswith("Authorize"))
+        task = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)
+        options = task["ansible.posix.authorized_key"]["key_options"]
+        for needle in ("restrict", 'from="{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ backup_dirs.navidrome }}"'):
+            self.assertIn(needle, options)
+
+    def test_the_shipment_mirrors_with_hard_links_kept_and_the_snapshots_kept_are_three(self):
+        text = (ROOT / "aopenvms/backup_navidrome_ship_aopenvms.yml").read_text()
+        self.assertIn("rsync -aH --delete", text, "without -H every snapshot arrives as a full copy; without --delete a destination keeps more than the VM")
+        self.assertEqual(self.keep["navidrome"], 3)
+        self.assertIn("backup_keep.local.navidrome", (ROOT / "aopenvms/backup_navidrome_to_local.yml").read_text())
+
+    def test_the_local_job_refuses_an_empty_or_shrunken_snapshot_because_the_mirror_would_spread_it(self):
+        text = (ROOT / "aopenvms/backup_navidrome_to_local.yml").read_text()
+        self.assertIn('the new snapshot has no files', text)
+        self.assertIn("under 80 %", text)
+
+    def test_the_snapshot_is_watched_where_it_is_made_and_where_it_lands_weekly_not_monthly(self):
+        watched = [c for c in self.panel["backup_age_checks"] if c["kind"] == "snapshot_dirs"]
+        landed = [c for c in self.pbs["backup_age_checks"] if c["kind"] == "snapshot_dirs"]
+        asus = [c for c in self.asus_checks if c["kind"] == "snapshot_dirs"]
+        for group in (watched, landed, asus):
+            self.assertEqual([c["path"] for c in group], ["{{ backup_dirs.navidrome }}"])
+            self.assertEqual(group[0]["max_hours"], 200)
+
+    def test_the_drill_reads_the_two_copies_and_centermc92_is_no_longer_a_navidrome_source(self):
+        hosts = {s["host"] for s in self.drill["drill_sources"] if s["service"] == "navidrome"}
+        self.assertEqual(hosts, {"asus", "aopenpbs"})
 
 
 class SameSetOnBothDisks(unittest.TestCase):
