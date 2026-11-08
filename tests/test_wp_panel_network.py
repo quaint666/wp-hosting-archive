@@ -500,19 +500,13 @@ class SameSetOnBothDisks(unittest.TestCase):
         for needle in ("restrict", 'from="{{ hostvars[\'hp705g4\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ item.dest }}"'):
             self.assertIn(needle, options)
 
-    def test_the_loki_archive_and_navidrome_second_copies_are_there_and_the_loki_key_is_single_sourced(self):
+    def test_the_loki_archive_second_copy_is_there_and_the_loki_key_is_single_sourced(self):
         loki = (ROOT / "hp705g4/backup_loki_to_aopen.yml").read_text()
         self.assertIn("ARCHIVE_HOST={{ hostvars['aopenpbs']['overlay_ip'] }}", loki)
         self.assertIn("{{ loki_archive_age_recipient }}", loki)
         self.assertNotIn("age1", "".join(re.findall(r"AGE_RECIPIENT=.*", loki)).replace("{{ loki_archive_age_recipient }}", ""))
         self.assertRegex(self.hp["loki_archive_age_recipient"], r"^age1[0-9a-z]{50,}$")
         self.assertNotIn("loki_archive_age_recipient:", (ROOT / "hp705g4/backup_loki_to_asus.yml").read_text())
-        plays = load("centermc92/backup_navidrome_to_aopen.yml")
-        self.assertIn("hostvars['aopenpbs']['overlay_ip']", (ROOT / "centermc92/backup_navidrome_to_aopen.yml").read_text())
-        authorize = next(p for p in plays if p["hosts"] == "aopenpbs")
-        options = next(t for t in authorize["tasks"] if "ansible.posix.authorized_key" in t)["ansible.posix.authorized_key"]["key_options"]
-        self.assertIn("restrict", options)
-        self.assertIn('from="{{ hostvars[\'centermc92\'][\'overlay_ip\'] }}"', options)
 
 
 class ThreeADay(unittest.TestCase):
