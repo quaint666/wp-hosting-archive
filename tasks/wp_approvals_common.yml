@@ -3,17 +3,17 @@
 # Approvals by phone on dellwp: the root-only files (the key that signs the tokens, the login of the button user, the login of the listener), the listener and its unit. No hosts:/become: and no
 # handlers; imported via import_tasks into dellwp/wp_approvals_dellwp.yml, which sets wp_template_dir, wp_scripts_dir and wp_master_secret. The tokens themselves are made and checked by wp-site-import (an import) and wp-plugin-requests (a plugin request, collected by the timer at the end of this file)
 # (tasks/wp_tools_common.yml deploys it, with wp_approvals.py); without these files an import says "phone approval is off" and goes on, so this play can be run any time after the sites play.
-# Secrets: the key is derived from dellwp_wp_master_secret; the two logins are the passwords of the ntfy users `approver` and `wpvm` on centermc92 (host_vars/centermc92/vault_ntfy.yml, made by
+# Secrets: the key is derived from dellwp_wp_master_secret; the two logins are the passwords of the ntfy users `approver` and `wpvm` on the private-services VM (host_vars/aopenpanel/vault_private_services.yml, made by
 # scripts/wp_approvals_secrets.sh, applied there by aopenvms/ntfy_aopenvms.yml). Check mode cannot show: whether the listener starts, whether ntfy accepts its login, or the files' contents (no_log).
 
 - name: Stop early if a secret or the tools are missing
   ansible.builtin.assert:
     that:
       - wp_master_secret is defined
-      - hostvars['centermc92']['centermc92_ntfy_approver_password'] is defined
-      - hostvars['centermc92']['centermc92_ntfy_wpvm_password'] is defined
+      - hostvars['aopenpanel']['aopenpanel_ntfy_approver_password'] is defined
+      - hostvars['aopenpanel']['aopenpanel_ntfy_wpvm_password'] is defined
     fail_msg: >-
-      Missing a secret: dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml), or centermc92_ntfy_approver_password / centermc92_ntfy_wpvm_password (host_vars/centermc92/vault_ntfy.yml:
+      Missing a secret: dellwp_wp_master_secret (host_vars/dellwp/vault_wp.yml), or aopenpanel_ntfy_approver_password / aopenpanel_ntfy_wpvm_password (host_vars/aopenpanel/vault_private_services.yml:
       run scripts/wp_approvals_secrets.sh, then aopenvms/ntfy_aopenvms.yml). Nothing was changed.
     quiet: true
 
@@ -63,7 +63,7 @@
 - name: Write the button user's login
   ansible.builtin.copy:
     dest: "{{ wp_approvals_dir }}/approver"
-    content: "approver:{{ hostvars['centermc92']['centermc92_ntfy_approver_password'] }}\n"
+    content: "approver:{{ hostvars['aopenpanel']['aopenpanel_ntfy_approver_password'] }}\n"
     owner: root
     group: root
     mode: "0600"
@@ -72,7 +72,7 @@
 - name: Write the listener's login
   ansible.builtin.copy:
     dest: "{{ wp_approvals_dir }}/listener"
-    content: "wpvm:{{ hostvars['centermc92']['centermc92_ntfy_wpvm_password'] }}\n"
+    content: "wpvm:{{ hostvars['aopenpanel']['aopenpanel_ntfy_wpvm_password'] }}\n"
     owner: root
     group: root
     mode: "0600"

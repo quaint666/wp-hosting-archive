@@ -1,14 +1,14 @@
 #!/bin/bash
-# Add the two ntfy logins that approvals by phone need to host_vars/centermc92/vault_ntfy.yml: centermc92_ntfy_approver_password (the user whose login is inside the Approve and Deny buttons,
-# write-only on the approvals topic) and centermc92_ntfy_wpvm_password (the listener on dellwp, read-only on it). Both are generated here at random and never printed, never put in an argument,
+# Add the two ntfy logins that approvals by phone need to host_vars/aopenpanel/vault_private_services.yml: aopenpanel_ntfy_approver_password (the user whose login is inside the Approve and Deny buttons,
+# write-only on the approvals topic) and aopenpanel_ntfy_wpvm_password (the listener on dellwp, read-only on it). Both are generated here at random and never printed, never put in an argument,
 # never written anywhere except the encrypted vault: only their lengths are shown. A name that is already in the vault is left alone (run it again to be sure; it changes nothing).
 #   bash scripts/wp_approvals_secrets.sh
 # Needs ansible-vault and its password file (ansible.cfg names it) and openssl; run it from anywhere in the repo. It refuses if the vault file has uncommitted changes, so the commit afterwards is only this.
-# Afterwards:  git add host_vars/centermc92/vault_ntfy.yml && git commit -m "ops(wp): ntfy logins for phone approvals"   then run centermc92/ntfy_centermc92.yml and dellwp/wp_approvals_dellwp.yml.
+# Afterwards:  git add host_vars/aopenpanel/vault_private_services.yml && git commit -m "ops(wp): ntfy logins for phone approvals"   then run aopenvms/ntfy_aopenvms.yml and dellwp/wp_approvals_dellwp.yml.
 set -euo pipefail
 cd "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
-readonly VAULT=host_vars/centermc92/vault_ntfy.yml
-readonly NAMES=(centermc92_ntfy_approver_password centermc92_ntfy_wpvm_password)
+readonly VAULT=host_vars/aopenpanel/vault_private_services.yml
+readonly NAMES=(aopenpanel_ntfy_approver_password aopenpanel_ntfy_wpvm_password)
 tmp=""; new=""
 trap 'rm -f "$tmp" "$new"' EXIT
 

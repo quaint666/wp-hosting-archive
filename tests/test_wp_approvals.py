@@ -992,8 +992,8 @@ class Plumbing(unittest.TestCase):
 
     def test_the_logins_are_the_ntfy_users_the_other_play_creates(self):
         t = {x["name"]: x for x in self.tasks()}
-        self.assertTrue(t["Write the button user's login"]["ansible.builtin.copy"]["content"].startswith("approver:{{ hostvars['centermc92']['centermc92_ntfy_approver_password'] }}"))
-        self.assertTrue(t["Write the listener's login"]["ansible.builtin.copy"]["content"].startswith("wpvm:{{ hostvars['centermc92']['centermc92_ntfy_wpvm_password'] }}"))
+        self.assertTrue(t["Write the button user's login"]["ansible.builtin.copy"]["content"].startswith("approver:{{ hostvars['aopenpanel']['aopenpanel_ntfy_approver_password'] }}"))
+        self.assertTrue(t["Write the listener's login"]["ansible.builtin.copy"]["content"].startswith("wpvm:{{ hostvars['aopenpanel']['aopenpanel_ntfy_wpvm_password'] }}"))
         text = (ROOT / "aopenvms/ntfy_aopenvms.yml").read_text()
         for line in ("ensure_user approver \"$APPROVER_PW\"", "ensure_user wpvm \"$WPVM_PW\"", "ntfy access approver {{ ntfy_approvals_topic }} write-only", "ntfy access wpvm {{ ntfy_approvals_topic }} read-only",
                      "ntfy access hosts {{ ntfy_apartment_topic }} write-only", "ntfy access admin {{ ntfy_apartment_topic }} read-write"):
@@ -1005,11 +1005,11 @@ class Plumbing(unittest.TestCase):
 
     def test_the_secrets_script_adds_exactly_the_names_the_plays_read(self):
         script = (ROOT / "scripts/wp_approvals_secrets.sh").read_text()
-        self.assertIn("centermc92_ntfy_approver_password", script)
-        self.assertIn("centermc92_ntfy_wpvm_password", script)
+        self.assertIn("aopenpanel_ntfy_approver_password", script)
+        self.assertIn("aopenpanel_ntfy_wpvm_password", script)
         for f in ("tasks/wp_approvals_common.yml", "aopenvms/ntfy_aopenvms.yml"):
-            used = set(__import__("re").findall(r"centermc92_ntfy_(?:approver|wpvm)_password", (ROOT / f).read_text()))
-            self.assertEqual(used, {"centermc92_ntfy_approver_password", "centermc92_ntfy_wpvm_password"}, f)
+            used = set(__import__("re").findall(r"aopenpanel_ntfy_(?:approver|wpvm)_password", (ROOT / f).read_text()))
+            self.assertEqual(used, {"aopenpanel_ntfy_approver_password", "aopenpanel_ntfy_wpvm_password"}, f)
 
     def test_the_play_notifies_the_handler_it_defines_and_asserts_before_it_changes_anything(self):
         play = yaml.safe_load((ROOT / "dellwp/wp_approvals_dellwp.yml").read_text())[0]
@@ -1039,13 +1039,13 @@ class Secrets(unittest.TestCase):
         self.d = tempfile.TemporaryDirectory()
         self.repo = Path(self.d.name)
         (self.repo / "scripts").mkdir()
-        (self.repo / "host_vars/centermc92").mkdir(parents=True)
+        (self.repo / "host_vars/aopenpanel").mkdir(parents=True)
         (self.repo / "bin").mkdir()
         (self.repo / "scripts/wp_approvals_secrets.sh").write_text(SECRETS.read_text())
         (self.repo / "bin/ansible-vault").write_text(VAULT_SHIM)
         (self.repo / "bin/ansible-vault").chmod(0o755)
-        self.vault = self.repo / "host_vars/centermc92/vault_ntfy.yml"
-        self.vault.write_text("$ANSIBLE_VAULT;1.1;AES256\ncentermc92_ntfy_phone_password: \"p\"\ncentermc92_ntfy_hosts_password: \"h\"\n")
+        self.vault = self.repo / "host_vars/aopenpanel/vault_private_services.yml"
+        self.vault.write_text("$ANSIBLE_VAULT;1.1;AES256\naopenpanel_ntfy_phone_password: \"p\"\naopenpanel_ntfy_hosts_password: \"h\"\n")
         for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
             subprocess.run(["git", "-C", str(self.repo), *cmd], check=True, capture_output=True)
         self.env = dict(os.environ, PATH="%s:%s" % (self.repo / "bin", os.environ["PATH"]), SHIM_BREAK=str(self.repo / "break"))
@@ -1063,12 +1063,12 @@ class Secrets(unittest.TestCase):
         r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
         v = self.values()
-        for name in ("centermc92_ntfy_approver_password", "centermc92_ntfy_wpvm_password"):
+        for name in ("aopenpanel_ntfy_approver_password", "aopenpanel_ntfy_wpvm_password"):
             self.assertRegex(v[name], r"^[0-9a-f]{48}$")
             self.assertIn("%s: generated, 48 characters" % name, r.stdout)
             self.assertNotIn(v[name], r.stdout + r.stderr)
-        self.assertNotEqual(v["centermc92_ntfy_approver_password"], v["centermc92_ntfy_wpvm_password"])
-        self.assertEqual((v["centermc92_ntfy_phone_password"], v["centermc92_ntfy_hosts_password"]), ("p", "h"), "what was there is kept")
+        self.assertNotEqual(v["aopenpanel_ntfy_approver_password"], v["aopenpanel_ntfy_wpvm_password"])
+        self.assertEqual((v["aopenpanel_ntfy_phone_password"], v["aopenpanel_ntfy_hosts_password"]), ("p", "h"), "what was there is kept")
         self.assertTrue(self.vault.read_text().startswith("$ANSIBLE_VAULT"))
 
     def test_a_second_run_changes_nothing(self):
@@ -1081,14 +1081,14 @@ class Secrets(unittest.TestCase):
         self.assertEqual(self.vault.read_bytes(), before)
 
     def test_a_login_that_is_already_there_is_never_replaced(self):
-        self.vault.write_text(self.vault.read_text() + 'centermc92_ntfy_wpvm_password: "keepme-keepme-keepme-keepme-keepme-keepme"\n')
+        self.vault.write_text(self.vault.read_text() + 'aopenpanel_ntfy_wpvm_password: "keepme-keepme-keepme-keepme-keepme-keepme"\n')
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "x"], check=True, capture_output=True)
         r = self.run_script()
         self.assertEqual(r.returncode, 0)
-        self.assertIn("centermc92_ntfy_wpvm_password: already in the vault, left alone", r.stdout)
+        self.assertIn("aopenpanel_ntfy_wpvm_password: already in the vault, left alone", r.stdout)
         v = self.values()
-        self.assertEqual(v["centermc92_ntfy_wpvm_password"], "keepme-keepme-keepme-keepme-keepme-keepme")
-        self.assertIn("centermc92_ntfy_approver_password", v)
+        self.assertEqual(v["aopenpanel_ntfy_wpvm_password"], "keepme-keepme-keepme-keepme-keepme-keepme")
+        self.assertIn("aopenpanel_ntfy_approver_password", v)
 
     def test_it_refuses_a_vault_file_with_uncommitted_changes(self):
         self.vault.write_text(self.vault.read_text() + "x: 1\n")
@@ -1099,12 +1099,12 @@ class Secrets(unittest.TestCase):
         self.assertEqual(self.vault.read_bytes(), before)
 
     def test_it_refuses_a_file_that_is_not_encrypted(self):
-        self.vault.write_text("centermc92_ntfy_phone_password: plain\n")
+        self.vault.write_text("aopenpanel_ntfy_phone_password: plain\n")
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "x"], check=True, capture_output=True)
         r = self.run_script()
         self.assertEqual(r.returncode, 2)
         self.assertIn("not an encrypted vault file", r.stderr)
-        self.assertEqual(self.vault.read_text(), "centermc92_ntfy_phone_password: plain\n")
+        self.assertEqual(self.vault.read_text(), "aopenpanel_ntfy_phone_password: plain\n")
 
     def test_a_failed_encryption_leaves_the_vault_as_it_was(self):
         (self.repo / "break").write_text("")
