@@ -135,8 +135,8 @@ class Ssh(unittest.TestCase):
         # 59 is the watcher on this VM probing the HP over https; 60 is the app's ssh to dellwp. Nothing else starts from this address.
         hp_ip = resolve(HOSTS["hp705g4"]["overlay_ip"])
         pings = [(r["seq"], r["dst"], r["proto"], r.get("port", "")) for r in mine if r["proto"] == "ICMP"]
-        self.assertEqual([r[3] for r in pings], ["", "", ""], "Uptime Kuma's ping monitors: the Dell, the ASUS and centermc92, ICMP only")
-        self.assertEqual(sorted(r[0] for r in pings), [61, 62, 69])
+        self.assertEqual([r[3] for r in pings], ["", ""], "Uptime Kuma's ping monitors: the Dell and the ASUS, ICMP only")
+        self.assertEqual(sorted(r[0] for r in pings), [61, 62])
         self.assertEqual([(r["seq"], r["dst"], r["proto"], r["port"]) for r in mine if r["proto"] != "ICMP"], [(59, hp_ip + "/32", "TCP", "443"), (60, WP_IP + "/32", "TCP", "22"), (70, resolve(HOSTS["asus"]["overlay_ip"]) + "/32", "TCP", "22")])
         self.assertEqual(len({r["seq"] for r in listed}), len(listed), "sequence numbers are unique")
         block = next(r for r in listed if r.get("action") == "block" and r["src"] == resolve(AOPEN["proxmox_vm_block"]))
@@ -373,13 +373,11 @@ class PrivateBackups(unittest.TestCase):
         for needle in ("restrict", 'from="{{ hostvars[\'aopenpanel\'][\'overlay_ip\'] }}"', 'command="/usr/bin/rrsync {{ item.dir }}"'):
             self.assertIn(needle, options)
 
-    def test_aopenpbs_lets_in_ssh_from_the_vm_the_drill_and_centermc92_and_the_hosts_forward_rule_names_the_same(self):
-        """Besides the HP and the control node (the group's default): the private-services VM (its backups), the drill (read-only fetches) and centermc92 (the Navidrome snapshots)."""
+    def test_aopenpbs_lets_in_ssh_from_the_vm_and_the_drill(self):
+        """Besides the HP and the control node (the group's default): the private-services VM (its backups) and the drill (read-only fetches)."""
         extra = resolve(self.pbs["vm_nft_extra_tcp"], {"hostvars": HOSTS})
         ssh = sorted(e["src"] for e in extra if 22 in e["ports"])
-        self.assertEqual(ssh, sorted(resolve(HOSTS[h]["overlay_ip"]) for h in ("aopenpanel", "aopendrill", "centermc92")))
-        forward = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"]) if e["src"] == resolve(HOSTS["centermc92"]["overlay_ip"])]
-        self.assertEqual([(e["ports"], e["bridges"]) for e in forward], [([22], ["vmbr1"])])
+        self.assertEqual(ssh, sorted(resolve(HOSTS[h]["overlay_ip"]) for h in ("aopenpanel", "aopendrill")))
 
     def test_the_age_checks_watch_the_same_three_services_where_they_are_made_and_where_they_land(self):
         tarballs = [c for c in self.panel["backup_age_checks"] if c["kind"] == "newest_file"]  # Navidrome's weekly snapshot check has its own test below
@@ -393,7 +391,7 @@ class PrivateBackups(unittest.TestCase):
             self.assertIn("max_files", c, "retention that stops pruning is seen")
         self.assertEqual(self.pbs["backup_age_requires_mount"], "{{ pbs_check_mount_unit }}")
 
-    def test_the_drill_reads_the_two_copies_and_nothing_of_centermc92_for_them(self):
+    def test_the_drill_reads_the_two_copies_for_them(self):
         by = {}
         for s in self.drill["drill_sources"]:
             by.setdefault(s["service"], []).append(s["host"])
@@ -450,13 +448,13 @@ class NavidromeBackups(unittest.TestCase):
             self.assertEqual([c["path"] for c in group], ["{{ backup_dirs.navidrome }}"])
             self.assertEqual(group[0]["max_hours"], 200)
 
-    def test_the_drill_reads_the_two_copies_and_centermc92_is_no_longer_a_navidrome_source(self):
+    def test_the_drill_reads_the_two_copies_for_navidrome(self):
         hosts = {s["host"] for s in self.drill["drill_sources"] if s["service"] == "navidrome"}
         self.assertEqual(hosts, {"asus", "aopenpbs"})
 
 
 class SameSetOnBothDisks(unittest.TestCase):
-    """The ASUS's HDD and the AOpen's HDD hold the same backups (said 2026-11-04): what the HP, centermc92 and the private-services VM send, and what each disk's age check watches, must agree."""
+    """The ASUS's HDD and the AOpen's HDD hold the same backups (said 2026-11-04): what the HP and the private-services VM send, and what each disk's age check watches, must agree."""
 
     @classmethod
     def setUpClass(cls):
@@ -510,7 +508,7 @@ class SameSetOnBothDisks(unittest.TestCase):
 
 
 class ThreeADay(unittest.TestCase):
-    """Gitea and Vaultwarden are backed up three times a day (said 2026-11-04) so a failover to the panel loses at most 8 hours: 21 kept on the HP, the ASUS and the AOpen's disk; R2 stays daily at 3; centermc92 stays as it was."""
+    """Gitea and Vaultwarden are backed up three times a day (said 2026-11-04) so a failover to the panel loses at most 8 hours: 21 kept on the HP, the ASUS and the AOpen's disk; R2 stays daily at 3."""
 
     @classmethod
     def setUpClass(cls):
@@ -527,7 +525,6 @@ class ThreeADay(unittest.TestCase):
             self.assertEqual(self.keep["asus"][svc], 21, svc)
             self.assertEqual(self.keep["aopen"][svc], 21, svc)
         self.assertEqual(self.keep["r2"], 3)
-        self.assertEqual((self.keep["centermc92"]["gitea"], self.keep["centermc92"]["vaultwarden"]), (7, 7))
         self.assertNotIn("nextcloud", self.keep["local"], "Nextcloud was retired on 2026-11-08")
         self.assertEqual(sorted(self.keep["aopen"]), ["gitea", "vaultwarden"])
 
@@ -537,8 +534,8 @@ class ThreeADay(unittest.TestCase):
         self.assertEqual(self.timer("hp705g4/gitea_backup_asus.yml"), "*-*-* 00,08,16:25:00")
         self.assertEqual(self.timer("hp705g4/backup_vaultwarden_to_asus.yml"), "*-*-* 00,08,16:35:00")
 
-    def test_r2_and_centermc92_stay_daily(self):
-        for path in ("hp705g4/gitea_backup_r2.yml", "hp705g4/vaultwarden_backup_r2.yml", "hp705g4/gitea_backup_centermc92.yml", "hp705g4/backup_vaultwarden_to_centermc92.yml"):
+    def test_r2_stays_daily(self):
+        for path in ("hp705g4/gitea_backup_r2.yml", "hp705g4/vaultwarden_backup_r2.yml"):
             self.assertNotIn(",", self.timer(path), path)
 
     def test_the_ship_to_the_aopen_runs_after_every_leg_of_the_same_hour_and_its_window_covers_the_local_file(self):
