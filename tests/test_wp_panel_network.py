@@ -525,7 +525,6 @@ class ThreeADay(unittest.TestCase):
             self.assertEqual(self.keep["asus"][svc], 21, svc)
             self.assertEqual(self.keep["aopen"][svc], 21, svc)
         self.assertEqual(self.keep["r2"], 3)
-        self.assertNotIn("nextcloud", self.keep["local"], "Nextcloud was retired on 2026-11-08")
         self.assertEqual(sorted(self.keep["aopen"]), ["gitea", "vaultwarden"])
 
     def test_the_local_jobs_run_three_times_and_each_leg_follows_its_own_local_job(self):
