@@ -257,7 +257,7 @@ class Create(Base):
         self.assertEqual((rec["port"], rec["quota_id"]), (9103, 1003))
 
     def test_a_name_the_repo_or_the_registry_closed_is_free_and_gets_numbers_above_every_one_ever_recorded(self):
-        self.make().create("alpha")
+        # No live site is created first: dellwp holds two sites (3 GB), and the two names below are those two; the tombstone's 9150 is above any live number anyway.
         reg = model.Registry(self.cfg["data_dir"], self.cfg["tombstones_dir"], self.cfg["defaults"])
         reg.write_tombstone({"schema": 1, "name": "gone", "port": 9150, "quota_id": 1050, "state": "closed"}, "20261001T000000Z")
         for name in ("gone", "old"):
