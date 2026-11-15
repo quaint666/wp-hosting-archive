@@ -189,13 +189,13 @@ class Https(unittest.TestCase):
     def test_no_wider_source_reaches_443_on_the_aopens_vms(self):
         for e in resolve(AOPEN["proxmox_overlay_to_vm"]):
             if 443 in e["ports"]:
-                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP, HP_IP, HOSTS["dellapps"]["overlay_ip"]), "only the control node, the phone, the HP (its heartbeat push to Uptime Kuma, which shares this listener) and dellapps (the Gitea registry, while the panel serves Gitea)")
+                self.assertIn(e["src"], (CONTROL_IP, PHONE_IP, HP_IP), "only the control node, the phone and the HP (its heartbeat push to Uptime Kuma, which shares this listener)")
                 self.assertEqual(e["bridges"], ["vmbr1"], "never on the fallback's bridge")
 
     def test_the_vm_lets_in_443_from_the_control_node_the_phone_and_the_hp_and_dns_from_the_overlay(self):
         vars_ = load("host_vars/aopenpanel/vars.yml")
         extra = resolve(vars_["vm_nft_extra_tcp"])
-        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443]), (HP_IP, [443]), (resolve("{{ hostvars['dellapps']['overlay_ip'] }}", {"hostvars": HOSTS}), [443]), ("10.8.0.0/24", [53])])
+        self.assertEqual([(e["src"], e["ports"]) for e in extra], [(CONTROL_IP, [443]), (PHONE_IP, [443]), (HP_IP, [443]), ("10.8.0.0/24", [53])])
         self.assertEqual([(e["src"], e["ports"]) for e in resolve(vars_["vm_nft_extra_udp"])], [("10.8.0.0/24", [53])])
         self.assertEqual(CONTROL_IP, "10.8.0.8")
         self.assertEqual(PHONE_IP, "10.8.0.4")
@@ -205,38 +205,32 @@ class Https(unittest.TestCase):
         self.assertIn("wg_control_node_overlay_ip", guests["vm_nft_ssh_sources"][1])
 
 
-class GiteaAndVaultwardenFallback(unittest.TestCase):
-    """The cold Gitea and Vaultwarden on the panel (aopenvms/gitea_fallback_aopenvms.yml, vaultwarden_fallback_aopenvms.yml): the permanent rules for what the clients of a failed-over Gitea need, in all three layers."""
+class VaultwardenFallback(unittest.TestCase):
+    """The cold Vaultwarden on the panel (aopenvms/vaultwarden_fallback_aopenvms.yml). The Bloomy image comes from GHCR over the internet, so no VM, hub or host rule lets dellapps reach the HP or the panel on 443 any more (the Gitea registry's rules, retired 2026-11-15), and nothing opens git over ssh (2222)."""
 
-    def test_dellapps_reaches_the_panel_on_443_at_the_dells_forward_rules_the_hub_and_the_aopens_forward_and_the_vm(self):
+    def test_dellapps_has_no_https_path_to_the_panel_or_the_hp_at_any_layer(self):
         dellapps = HOSTS["dellapps"]["overlay_ip"]
-        dell_dests = [(r["dest"], tuple(str(p) for p in r["ports"])) for r in resolve(DELL["proxmox_vm_to_overlay"]["vmbr1"], {"hostvars": HOSTS})]
-        self.assertIn((PANEL_IP, ("443",)), dell_dests)
-        self.assertNotIn(PANEL_IP, [r["dest"] for r in resolve(DELL["proxmox_vm_to_overlay"]["vmbr2"], {"hostvars": HOSTS})], "dellwp never reaches the panel")
+        dell = [(r["dest"], tuple(str(p) for p in r["ports"])) for r in resolve(DELL["proxmox_vm_to_overlay"]["vmbr1"], {"hostvars": HOSTS})]
+        self.assertNotIn(PANEL_IP, [d for d, _ in dell], "the Dell's forward rules")
+        self.assertEqual([ports for d, ports in dell if d == HP_IP], [(str(resolve("{{ ports.loki }}")), str(resolve("{{ ports.ntfy }}")))], "the HP: Loki and ntfy only")
         rules = load("opnsense/wireguard_hub_rules.yml")[0]["vars"]
-        ctx = {k: resolve(v, {"hostvars": HOSTS}) for k, v in rules.items() if k.startswith("hub_") and k != "hub_vm_rules"}
+        ctx = {k: resolve(v, {"hostvars": HOSTS}) for k, v in rules.items() if k.startswith("hub_") and k not in ("hub_vm_rules", "hub_vm_rules_removed")}
         listed = [resolve(r, dict(ctx, hostvars=HOSTS)) for r in rules["hub_vm_rules"]]
-        apps = [r for r in listed if r["src"] == ctx["hub_vm_apps_net"] and r["dst"] == PANEL_IP + "/32"]
-        self.assertEqual([(r["proto"], r["port"]) for r in apps], [("TCP", "443")])
         self.assertEqual(len({r["seq"] for r in listed}), len(listed))
-        self.assertLess(apps[0]["seq"], max(r["seq"] for r in listed if r.get("action") == "block" and r["src"] == ctx["hub_vm_block"]), "before the Dell block-everything rule")
-        aopen = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if e["src"] == dellapps]
-        self.assertEqual([(e["ports"], e["bridges"]) for e in aopen], [([443], ["vmbr1"])])
-        vm = [e for e in resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"], {"hostvars": HOSTS}) if e["src"] == dellapps]
-        self.assertEqual([e["ports"] for e in vm], [[443]])
+        self.assertEqual([r for r in listed if r["src"] == ctx["hub_vm_apps_net"] and r.get("port") == "443"], [], "the hub")
+        self.assertIn("apps to the HP: HTTPS (the Gitea registry)", rules["hub_vm_rules_removed"], "the box deletes the saved rule by name")
+        self.assertIn("apps to the panel VM: HTTPS (the Gitea registry while the panel serves it)", rules["hub_vm_rules_removed"])
+        self.assertEqual([e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if e["src"] == dellapps], [], "the AOpen's forward rules")
+        self.assertEqual([e for e in resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"], {"hostvars": HOSTS}) if e["src"] == dellapps], [], "the panel VM")
 
-    def test_git_over_ssh_is_open_to_the_overlay_on_the_vm_bridge_only_and_the_vm_has_no_rule_for_it(self):
-        entries = [e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if 2222 in e["ports"]]
-        self.assertEqual([(e["src"], e["bridges"]) for e in entries], [("10.8.0.0/24", ["vmbr1"])])
+    def test_nothing_opens_git_over_ssh(self):
+        self.assertEqual([e for e in resolve(AOPEN["proxmox_overlay_to_vm"], {"hostvars": HOSTS}) if 2222 in e["ports"]], [])
         for e in resolve(load("host_vars/aopenpanel/vars.yml")["vm_nft_extra_tcp"], {"hostvars": HOSTS}):
-            self.assertNotIn(2222, e["ports"], "Docker's NAT bypasses the input chain; a rule here would only look like a restriction")
-        unit = (ROOT / "aopenvms/gitea_fallback_aopenvms.yml").read_text()
-        self.assertIn("-p {{ overlay_ip }}:2222:22", unit)
+            self.assertNotIn(2222, e["ports"])
 
     def test_the_panel_ports_do_not_collide(self):
-        ports = {"wp-panel": 8000, "kuma": 3002, "gitea": 3001, "vaultwarden": 8090, "ntfy": 8089, "prometheus": 9090, "alertmanager": 9093, "blackbox": 9115, "adguard-ui": 3000}
+        ports = {"wp-panel": 8000, "kuma": 3002, "vaultwarden": 8090, "ntfy": 8089, "prometheus": 9090, "alertmanager": 9093, "blackbox": 9115, "adguard-ui": 3000}
         self.assertEqual(len(set(ports.values())), len(ports))
-        self.assertIn("127.0.0.1:3001:3000", (ROOT / "aopenvms/gitea_fallback_aopenvms.yml").read_text())
         self.assertIn("127.0.0.1:8090:80", (ROOT / "aopenvms/vaultwarden_fallback_aopenvms.yml").read_text())
         self.assertEqual(load("host_vars/aopenpanel/vars.yml")["kuma_loopback_port"], 3002)
         self.assertEqual(resolve("{{ ports.ntfy }}"), "8089")
@@ -472,7 +466,7 @@ class SameSetOnBothDisks(unittest.TestCase):
 
     def test_the_hp_ships_each_service_to_the_aopen(self):
         by = {s["name"]: s for s in self.hp["aopen_ship"]}
-        self.assertEqual(sorted(by), ["copyparty", "gitea", "kuma_home", "vaultwarden"])
+        self.assertEqual(sorted(by), ["copyparty", "kuma_home", "vaultwarden"])
         for name, s in by.items():
             self.assertIn("aopenpbs", s["destinations"], name)
             self.assertTrue(set(s["destinations"]) <= {"aopenpbs", "asus"}, name)
@@ -508,7 +502,7 @@ class SameSetOnBothDisks(unittest.TestCase):
 
 
 class ThreeADay(unittest.TestCase):
-    """Gitea and Vaultwarden are backed up three times a day (said 2026-11-04) so a failover to the panel loses at most 8 hours: 21 kept on the HP, the ASUS and the AOpen's disk; R2 stays daily at 3."""
+    """Vaultwarden is backed up three times a day (said 2026-11-04) so a failover to the panel loses at most 8 hours: 21 kept on the HP, the ASUS and the AOpen's disk; R2 stays daily at 3."""
 
     @classmethod
     def setUpClass(cls):
@@ -520,28 +514,26 @@ class ThreeADay(unittest.TestCase):
         return re.search(r"OnCalendar=(.*)", (ROOT / path).read_text()).group(1).strip()
 
     def test_the_hp_keeps_7_the_asus_and_the_aopens_disk_keep_21_and_the_rest_is_unchanged(self):
-        for svc in ("gitea", "vaultwarden"):
+        for svc in ("vaultwarden",):
             self.assertEqual(self.keep["local"][svc], 7, svc)
             self.assertEqual(self.keep["asus"][svc], 21, svc)
             self.assertEqual(self.keep["aopen"][svc], 21, svc)
         self.assertEqual(self.keep["r2"], 3)
-        self.assertEqual(sorted(self.keep["aopen"]), ["gitea", "vaultwarden"])
+        self.assertEqual(sorted(self.keep["aopen"]), ["vaultwarden"])
 
     def test_the_local_jobs_run_three_times_and_each_leg_follows_its_own_local_job(self):
-        self.assertEqual(self.timer("hp705g4/gitea_backup_local.yml"), "*-*-* 00,08,16:05:00")
         self.assertEqual(self.timer("hp705g4/backup_vaultwarden_to_local.yml"), "*-*-* 00,08,16:20:00")
-        self.assertEqual(self.timer("hp705g4/gitea_backup_asus.yml"), "*-*-* 00,08,16:25:00")
         self.assertEqual(self.timer("hp705g4/backup_vaultwarden_to_asus.yml"), "*-*-* 00,08,16:35:00")
 
     def test_r2_stays_daily(self):
-        for path in ("hp705g4/gitea_backup_r2.yml", "hp705g4/vaultwarden_backup_r2.yml"):
+        for path in ("hp705g4/vaultwarden_backup_r2.yml",):
             self.assertNotIn(",", self.timer(path), path)
 
     def test_the_ship_to_the_aopen_runs_after_every_leg_of_the_same_hour_and_its_window_covers_the_local_file(self):
         groups = {g["name"]: g for g in self.hp["aopen_ship_groups"]}
         self.assertEqual(groups["frequent"]["calendar"], "*-*-* 00,08,16:45:00")
         by = {s["name"]: s["group"] for s in self.hp["aopen_ship"]}
-        self.assertEqual((by["gitea"], by["vaultwarden"], by["copyparty"]), ("frequent", "frequent", "night"))
+        self.assertEqual((by["vaultwarden"], by["copyparty"]), ("frequent", "night"))
         self.assertGreaterEqual(groups["frequent"]["max_age_min"], 45 - 5, "the newest local file is up to 40 minutes old at :45")
         self.assertLess(groups["frequent"]["max_age_min"], 8 * 60, "a missed local run is never shipped as if it were new")
 
@@ -549,11 +541,10 @@ class ThreeADay(unittest.TestCase):
         asus = {c["path"]: c for c in load("asus/backup_age_check_asus.yml")[0]["vars"]["backup_age_checks"]}
         hp = {c["path"]: c for c in load("hp705g4/backup_age_check_hp705g4.yml")[0]["vars"]["backup_age_checks"] if c["kind"] == "newest_file"}
         pbs = {c["path"]: c for c in self.pbs["backup_age_checks"]}
-        for svc, path in (("gitea", "{{ backup_dirs.gitea }}"), ("vaultwarden", "{{ backup_dirs.vaultwarden }}")):
+        for svc, path in (("vaultwarden", "{{ backup_dirs.vaultwarden }}"),):
             for where, c in (("asus", asus[path]), ("aopenpbs", pbs[path])):
                 self.assertEqual(c["max_hours"], 12, "%s on %s" % (svc, where))
                 self.assertEqual(c["max_files"], (self.keep["aopen"] if where == "aopenpbs" else self.keep["asus"])[svc] + 1, "%s on %s" % (svc, where))
-        self.assertEqual(hp["{{ backup_dirs.gitea_local }}"]["max_hours"], 12)
         self.assertEqual(hp["{{ backup_dirs.vaultwarden }}"]["max_hours"], 12)
 
     # --- the AOpen's disk keeps more than the HP: sent without --delete, pruned on the AOpen
@@ -565,15 +556,15 @@ class ThreeADay(unittest.TestCase):
     def ship_items(self):
         return resolve(self.hp["aopen_ship"], {"hostvars": HOSTS, "backup_keep": self.keep})
 
-    def test_gitea_and_vaultwarden_are_sent_without_delete_and_the_rest_are_mirrors(self):
+    def test_vaultwarden_is_sent_without_delete_and_the_rest_are_mirrors(self):
         items = {s["name"]: s for s in self.ship_items()}
-        self.assertEqual({n for n, s in items.items() if "keep" in s}, {"gitea", "vaultwarden"})
-        self.assertEqual(int(items["gitea"]["keep"]), 21)
+        self.assertEqual({n for n, s in items.items() if "keep" in s}, {"vaultwarden"})
+        self.assertEqual(int(items["vaultwarden"]["keep"]), 21)
         play = load("hp705g4/backup_aopen_ship_hp705g4.yml")[2]
         content = next(t for t in play["tasks"] if t.get("name", "").startswith("Deploy the shipping script"))["ansible.builtin.copy"]["content"]
         hosts = {"aopenpbs": {"overlay_ip": "10.0.0.1"}, "asus": {"overlay_ip": "10.0.0.2"}}
         script = self.render(content, aopen_ship=self.ship_items(), aopen_ship_groups=resolve(self.hp["aopen_ship_groups"]), hostvars=hosts)
-        for name in ("gitea", "vaultwarden"):
+        for name in ("vaultwarden",):
             rsync = [l for l in script.splitlines() if "rsync -a" in l and ("/%s" % name in l or '"%s"' % items[name]["src"] in l)]
             self.assertTrue(rsync, name)
             for l in rsync:
@@ -592,7 +583,7 @@ class ThreeADay(unittest.TestCase):
 
     def run_prune(self, files, keep_overrides=None):
         tmp = Path(tempfile.mkdtemp(prefix="prune-"))
-        dirs = {n: str(tmp / n) for n in ("gitea", "vaultwarden")}
+        dirs = {n: str(tmp / n) for n in ("vaultwarden",)}
         for d in dirs.values():
             os.makedirs(d)
         for name, names in files.items():
@@ -613,25 +604,23 @@ class ThreeADay(unittest.TestCase):
         said = (tmp / "ntfy.log").read_text() if (tmp / "ntfy.log").exists() else ""
         return r, left, said
 
-    def test_the_prune_keeps_the_newest_21_of_each_and_nothing_else_is_touched(self):
-        gitea = ["gitea-2026-11-%02d_%02d-05-01.tar.zst" % (d, h) for d in range(1, 10) for h in (0, 8, 16)]
-        vw = ["vaultwarden-2026-11-%02d_%02d-20-01.tar.zst" % (d, h) for d in range(1, 8) for h in (0, 8, 16)]
-        r, left, said = self.run_prune({"gitea": gitea + ["notes.txt", "gitea-latest.tar"], "vaultwarden": vw})
+    def test_the_prune_keeps_the_newest_21_and_nothing_else_is_touched(self):
+        vw = ["vaultwarden-2026-11-%02d_%02d-20-01.tar.zst" % (d, h) for d in range(1, 10) for h in (0, 8, 16)]
+        r, left, said = self.run_prune({"vaultwarden": vw + ["notes.txt", "vaultwarden-latest.tar"]})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len([f for f in left["gitea"] if f.endswith(".tar.zst")]), 21)
-        self.assertEqual([f for f in left["gitea"] if f.endswith(".tar.zst")], sorted(gitea)[-21:], "the newest, by the date in the name")
-        self.assertIn("notes.txt", left["gitea"])
-        self.assertIn("gitea-latest.tar", left["gitea"])
-        self.assertEqual(left["vaultwarden"], sorted(vw), "21 or fewer: nothing removed")
+        self.assertEqual(len([f for f in left["vaultwarden"] if f.endswith(".tar.zst")]), 21)
+        self.assertEqual([f for f in left["vaultwarden"] if f.endswith(".tar.zst")], sorted(vw)[-21:], "the newest, by the date in the name")
+        self.assertIn("notes.txt", left["vaultwarden"])
+        self.assertIn("vaultwarden-latest.tar", left["vaultwarden"])
         self.assertEqual(said, "")
 
     def test_the_prune_never_removes_below_the_keep_and_refuses_a_bad_keep(self):
-        few = ["gitea-2026-11-0%d_00-05-01.tar.zst" % d for d in range(1, 6)]
-        r, left, _ = self.run_prune({"gitea": few, "vaultwarden": []})
-        self.assertEqual(left["gitea"], few)
-        r, left, said = self.run_prune({"gitea": few * 1, "vaultwarden": []}, {" 21\n": " 0\n"})
+        few = ["vaultwarden-2026-11-0%d_00-20-01.tar.zst" % d for d in range(1, 6)]
+        r, left, _ = self.run_prune({"vaultwarden": few})
+        self.assertEqual(left["vaultwarden"], few)
+        r, left, said = self.run_prune({"vaultwarden": few * 1}, {" 21\n": " 0\n"})
         self.assertNotEqual(r.returncode, 0)
-        self.assertEqual(left["gitea"], few, "a keep of zero removes nothing")
+        self.assertEqual(left["vaultwarden"], few, "a keep of zero removes nothing")
         self.assertIn("FAILED", said)
 
     def test_the_prune_timer_follows_ten_minutes_after_the_ship(self):
@@ -642,7 +631,7 @@ class ThreeADay(unittest.TestCase):
         self.assertEqual(play["hosts"], "aopenpbs")
 
     def test_only_the_first_run_of_the_day_sends_a_success_message(self):
-        for path in ("hp705g4/gitea_backup_local.yml", "hp705g4/backup_vaultwarden_to_local.yml", "hp705g4/gitea_backup_asus.yml", "hp705g4/backup_vaultwarden_to_asus.yml"):
+        for path in ("hp705g4/backup_vaultwarden_to_local.yml", "hp705g4/backup_vaultwarden_to_asus.yml"):
             text = (ROOT / path).read_text()
             completed = [l for l in text.splitlines() if "notify" in l and "completed" in l and "echo" not in l and "FAILED" not in l and "#" not in l.split("notify")[0]]
             self.assertTrue(completed, path)
