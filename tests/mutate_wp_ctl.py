@@ -476,10 +476,10 @@ M = [
  ('pin_consumers leaves a stale comment when a playbook starts using a pin', 'scripts/pin_consumers.py', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)', '            has = i > 0 and lines[i - 1].lstrip().startswith(MARK)\n            if has:\n                continue', 'tests/test_pin_consumers.py'),
  ('pin_consumers ties every template to a play that names ../templates', 'scripts/pin_consumers.py', ' and d.as_posix() not in ROOT_DIRS:', ':', 'tests/test_pin_consumers.py'),
  ('pin_consumers ignores the directory a file sits in', 'scripts/pin_consumers.py', '        return {Path(rel)} | {d for d in Path(rel).parents if d in self.dirs}', '        return {Path(rel)}', 'tests/test_pin_consumers.py'),
- ('the pins workflow can fail the run with its report', '.gitea/workflows/pins.yml', 'python3 -I scripts/pin_consumers.py --since "$SINCE" || true', 'python3 -I scripts/pin_consumers.py --since "$SINCE"', 'tests/test_pin_consumers.py'),
- ('the pins workflow skips a playbook-only change', '.gitea/workflows/pins.yml', '      - "**/*.yml"\n      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', '      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', 'tests/test_pin_consumers.py'),
- ('the pins workflow does not run the check', '.gitea/workflows/pins.yml', 'run: python3 -I scripts/pin_consumers.py --check', 'run: echo skipped', 'tests/test_pin_consumers.py'),
- ('the pins workflow has too little history to diff', '.gitea/workflows/pins.yml', 'fetch-depth: 0', 'fetch-depth: 1', 'tests/test_pin_consumers.py'),
+ ('the pins workflow can fail the run with its report', '.github/workflows/pins.yml', 'python3 -I scripts/pin_consumers.py --since "$SINCE" || true', 'python3 -I scripts/pin_consumers.py --since "$SINCE"', 'tests/test_pin_consumers.py'),
+ ('the pins workflow skips a playbook-only change', '.github/workflows/pins.yml', '      - "**/*.yml"\n      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', '      - scripts/pin_consumers.py\n      - tests/test_pin_consumers.py\n  pull_request:', 'tests/test_pin_consumers.py'),
+ ('the pins workflow does not run the check', '.github/workflows/pins.yml', 'run: python3 -I scripts/pin_consumers.py --check', 'run: echo skipped', 'tests/test_pin_consumers.py'),
+ ('the pins workflow has too little history to diff', '.github/workflows/pins.yml', 'fetch-depth: 0', 'fetch-depth: 1', 'tests/test_pin_consumers.py'),
 ]
 # A suite that fails in the copy with nothing broken proves nothing about any mutant: stop and say which one.
 def baseline(root, suites):
