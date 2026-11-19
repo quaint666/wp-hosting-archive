@@ -116,7 +116,7 @@ flowchart LR
 Why a compromised control app can do only what the allowlist says.
 
 ```mermaid
-flowchart LR
+flowchart TB
     b(["Browser<br/>(WireGuard only)"]) -->|"password + TOTP,<br/>signed 3 h cookie, CSRF token"| app
 
     subgraph panel["aopenpanel: control app container"]

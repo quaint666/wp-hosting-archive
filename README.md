@@ -34,4 +34,4 @@ A small, strict WordPress hosting service that ran on one VM in a home lab from 
 
 ## Licence
 
-No licence has been chosen yet; until one is added, all rights are reserved by the author.
+MIT, see [`LICENSE`](LICENSE).
