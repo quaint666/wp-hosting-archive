@@ -1,6 +1,6 @@
 # Retrospective, part one: WordPress hosting for friends, explained
 
-*Archive edition, 2026-11-19. This is part one of a three-part retrospective written during the work (parts two and three compare the programming with a second project and describe the home lab under both; they are not included). It is longer and more explanatory than [`wordpress_hosting.md`](wordpress_hosting.md), and written for the operator ("you"). The notes addressed to the operator ("please correct these", "for you to answer") were never answered, so the assumptions in section 1.2 are inferences, not facts.*
+*Archive edition, 2026-11-19. This is part one of a three-part retrospective written during the work (parts two and three compare the programming with a second project and describe the home lab under both; they are not included). It is longer and more explanatory than [`wordpress_hosting.md`](wordpress_hosting.md), and written for the operator ("you"). The questions addressed to the operator in section 1.2 were answered on 2026-11-19, the day the service was retired; the answers are added to that table next to the original assumptions.*
 
 ## 1.1 The service on one page
 
@@ -85,25 +85,21 @@ what is only assumed, and what you still need to fill in.
 - The friends are **trusted but fallible**: their laptops, passwords and plugin choices are as weak as anyone's. The
   design assumes a friend's site *will* be compromised one day and limits what that costs.
 
-### What is assumed and should be confirmed (please correct these)
+### What was assumed, and the operator's answers (2026-11-19)
 
-The previous explainer never described the sites' *content*, and neither did any handoff. These are reasonable
-inferences from the practice file and from the word "friends", marked as such, and each is a place where your answer
-would change the document.
+The previous explainer never described the sites' *content*, and neither did any handoff. The table gives the working assumption written at the time and, added in the archive edition, the operator's answer `[stated: 2026-11-19]`.
 
-| Question | My working assumption | Why it matters |
-|---|---|---|
-| What do the friends' sites do? Portfolios, small shops, event pages, a club site? | A mix of brochure sites and one or two small WooCommerce shops, like the practice file `[inferred]` | A shop means money, personal data and payment plugins: the compromise cost is higher and a backup gap hurts more. A brochure site is mostly about not being defaced. |
-| Do any of them take payments or collect personal data on this server? | Payments go through a hosted gateway (the plugin redirects), no card data touches `dellwp` `[inferred]` | It decides whether the "compliance paperwork" gap in section 1.4 is a nuisance or a blocker. |
-| How much traffic does a typical friend's site get? | A few hundred visits a week at most `[inferred]` | It decides whether Cloudflare's free proxy is enough and whether 512 MB of PHP memory per site is generous. |
-| Who edits content, and how often? | The friend, in WordPress admin, weekly to monthly `[inferred]` | It decides how much data changes between backups (the nightly cadence is fine for weekly edits, thin for a daily blog). |
-| What happens to a site when a friend loses interest? | It sits on `hold` or `stopped` and eventually gets deleted with the 14-day archive `[inferred]` | It is the reason `stopped` and `closed` exist as separate states. |
-| Is a friend ever allowed to run custom code (a bespoke theme, a code snippet plugin)? | Only if you review it and install it by hand; never through the admin `[stated: "approve mode only, no auto"]` | It is the core of the "no plugin installs" decision. |
-| What does the friend expect if the site is down? | An apologetic message to you, not a refund `[inferred]` | It decides that having no SLA is acceptable. |
+| Question | Working assumption (at the time) | Answer (operator, 2026-11-19) | Why it matters |
+|---|---|---|---|
+| What do the friends' sites do? Portfolios, small shops, event pages, a club site? | A mix of brochure sites and one or two small WooCommerce shops, like the practice file `[inferred]` | School project sites and some small blogs | A shop means money, personal data and payment plugins: the compromise cost is higher and a backup gap hurts more. A brochure site is mostly about not being defaced. |
+| Do any of them take payments or collect personal data on this server? | Payments go through a hosted gateway (the plugin redirects), no card data touches `dellwp` `[inferred]` | No. Any payments were sandbox payments with no real personal data | It decides whether the "compliance paperwork" gap in section 1.4 is a nuisance or a blocker. |
+| How much traffic does a typical friend's site get? | A few hundred visits a week at most `[inferred]` | At most fewer than 10 visitors a day | It decides whether Cloudflare's free proxy is enough and whether 512 MB of PHP memory per site is generous. |
+| Who edits content, and how often? | The friend, in WordPress admin, weekly to monthly `[inferred]` | The site's admin (the friend), almost never: set and forget | It decides how much data changes between backups (the nightly cadence is fine for weekly edits, thin for a daily blog). |
+| What happens to a site when a friend loses interest? | It sits on `hold` or `stopped` and eventually gets deleted with the 14-day archive `[inferred]` | Closed after asking the friend beforehand | It is the reason `stopped` and `closed` exist as separate states. |
+| Is a friend ever allowed to run custom code (a bespoke theme, a code snippet plugin)? | Only if you review it and install it by hand; never through the admin `[stated: "approve mode only, no auto"]` | No | It is the core of the "no plugin installs" decision. |
+| What does the friend expect if the site is down? | An apologetic message to you, not a refund `[inferred]` | Not much | It decides that having no SLA is acceptable. |
 
-> **For you to answer when you read this:** the table above is the one place in Part One where I would rather be told
-> than guess. The text below is written so that nothing depends on the answers being exactly as assumed, but several
-> of the trade-offs (section 1.9 on threats, section 1.10 on cost) get sharper with the real picture.
+> **Answered 2026-11-19 `[stated]`:** the sites were school projects and small blogs, with no real payments or personal data (any shop was a sandbox), fewer than ten visitors a day, content changes almost never, no custom code, and not much expected of the service. So the low-stakes reading of this section was right; the text below was written before these answers and is left as it was.
 
 ### Why "friends" is a stronger design input than "customers"
 
@@ -1096,6 +1092,8 @@ existing `SwapThrashing` alert (swap above 50% for ten minutes) would show it in
 > (`min_over_time(node_memory_MemAvailable_bytes{host="dellwp"}[7d])` and the swap equivalent). If the minimum
 > available stays above about 500 MB and swap stays near zero, 4 GB is right and the question is closed. If not, trace
 > which job ran at the minimum (the Loki logs and the systemd timer history show it) before spending 1 GB.
+
+> **Closed, 2026-11-19 `[stated]`:** 4 GB was enough, because no more than three WordPress sites ran at once. The VM was later reduced to 3 GB for two sites (2026-11-13).
 
 ### 1.10.3 What the control plane adds to the budget
 
